@@ -29,7 +29,6 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.token.Token;
 import org.junit.Test;
-import org.mockito.Mockito;
 
 public class TestSecurityUtil {
   public static final Log LOG = LogFactory.getLog(TestSecurityUtil.class);
@@ -49,38 +48,28 @@ public class TestSecurityUtil {
   
   private void verify(String original, String hostname, String expected)
       throws IOException {
-    assertEquals(expected, 
-                 SecurityUtil.getServerPrincipal(original, hostname));
-
-    InetAddress addr = mockAddr(hostname);
-    assertEquals(expected, 
-                 SecurityUtil.getServerPrincipal(original, addr));
+    assertTrue(SecurityUtil.getServerPrincipal(original, hostname).equals(
+        expected));
+    assertTrue(SecurityUtil.getServerPrincipal(original, null).equals(
+        expected));
+    assertTrue(SecurityUtil.getServerPrincipal(original, "").equals(
+        expected));
+    assertTrue(SecurityUtil.getServerPrincipal(original, "0.0.0.0").equals(
+        expected));
   }
 
-  private InetAddress mockAddr(String reverseTo) {
-    InetAddress mock = Mockito.mock(InetAddress.class);
-    Mockito.doReturn(reverseTo).when(mock).getCanonicalHostName();
-    return mock;
-  }
-  
   @Test
   public void testGetServerPrincipal() throws IOException {
     String service = "hdfs/";
     String realm = "@REALM";
-    String hostname = "foohost";
-    String userPrincipal = "foo@FOOREALM";
+    String hostname = SecurityUtil.getLocalHostName();
     String shouldReplace = service + SecurityUtil.HOSTNAME_PATTERN + realm;
     String replaced = service + hostname + realm;
     verify(shouldReplace, hostname, replaced);
     String shouldNotReplace = service + SecurityUtil.HOSTNAME_PATTERN + "NAME"
         + realm;
     verify(shouldNotReplace, hostname, shouldNotReplace);
-    verify(userPrincipal, hostname, userPrincipal);
-    // testing reverse DNS lookup doesn't happen
-    InetAddress notUsed = Mockito.mock(InetAddress.class);
-    assertEquals(shouldNotReplace, SecurityUtil.getServerPrincipal(
-        shouldNotReplace, notUsed));
-    Mockito.verify(notUsed, Mockito.never()).getCanonicalHostName();
+    verify(shouldNotReplace, shouldNotReplace, shouldNotReplace);
   }
   
   @Test

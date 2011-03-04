@@ -839,8 +839,8 @@ public abstract class Server {
     // Cache the remote host & port info so that even if the socket is 
     // disconnected, we can say where it used to connect to.
     private String hostAddress;
+    private String hostName;
     private int remotePort;
-    private InetAddress addr;
     
     ConnectionHeader header = new ConnectionHeader();
     Class<?> protocol;
@@ -877,11 +877,12 @@ public abstract class Server {
       this.unwrappedData = null;
       this.unwrappedDataLengthBuffer = ByteBuffer.allocate(4);
       this.socket = channel.socket();
-      this.addr = socket.getInetAddress();
+      InetAddress addr = socket.getInetAddress();
       if (addr == null) {
         this.hostAddress = "*Unknown*";
       } else {
         this.hostAddress = addr.getHostAddress();
+        this.hostName = addr.getCanonicalHostName();
       }
       this.remotePort = socket.getPort();
       this.responseQueue = new LinkedList<Call>();
@@ -904,8 +905,8 @@ public abstract class Server {
       return hostAddress;
     }
 
-    public InetAddress getHostInetAddress() {
-      return addr;
+    public String getHostName() {
+      return hostName;
     }
     
     public void setLastContact(long lastContact) {
@@ -1317,7 +1318,7 @@ public abstract class Server {
             && (authMethod != AuthMethod.DIGEST)) {
           ProxyUsers.authorize(user, this.getHostAddress(), conf);
         }
-        authorize(user, header, getHostInetAddress());
+        authorize(user, header, getHostName());
         if (LOG.isDebugEnabled()) {
           LOG.debug("Successfully authorized " + header);
         }
@@ -1641,12 +1642,12 @@ public abstract class Server {
    * 
    * @param user client user
    * @param connection incoming connection
-   * @param addr InetAddress of incoming connection
+   * @param hostname fully-qualified domain name of incoming connection
    * @throws AuthorizationException when the client isn't authorized to talk the protocol
    */
   public void authorize(UserGroupInformation user, 
                         ConnectionHeader connection,
-                        InetAddress addr
+                        String hostname
                         ) throws AuthorizationException {
     if (authorize) {
       Class<?> protocol = null;
@@ -1656,7 +1657,7 @@ public abstract class Server {
         throw new AuthorizationException("Unknown protocol: " + 
                                          connection.getProtocol());
       }
-      ServiceAuthorizationManager.authorize(user, protocol, getConf(), addr);
+      ServiceAuthorizationManager.authorize(user, protocol, getConf(), hostname);
     }
   }
   
