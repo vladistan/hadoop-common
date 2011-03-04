@@ -366,6 +366,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    * the minimum interval between jobtracker polls
    */
   private volatile int heartbeatInterval = HEARTBEAT_INTERVAL_MIN;
+  
   /**
    * Number of maptask completion events locations to poll for at one time
    */  
