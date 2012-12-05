@@ -35,9 +35,11 @@ import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
 import org.apache.hadoop.mapreduce.security.token.JobTokenSecretManager;
+import org.apache.hadoop.metrics.MetricsContext;
+import org.apache.hadoop.metrics.MetricsUtil;
+import org.apache.hadoop.metrics.jvm.JvmMetrics;
 import org.apache.hadoop.mapreduce.server.tasktracker.JVMInfo;
-import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
-import org.apache.hadoop.metrics2.source.JvmMetricsSource;
+import org.apache.hadoop.mapreduce.server.tasktracker.Localizer;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
@@ -62,12 +64,23 @@ class Child {
   static volatile boolean isCleanup;
   static String cwd;
 
+  private static boolean isChildJvm = false;
+
+  /**
+   * Return true if running in a task/child JVM. This should
+   * only be used for asserts/safety checks.
+   */
+  public static boolean isChildJvm() {
+    return isChildJvm;
+  }
+
   static boolean logIsSegmented(JobConf job) {
     return (job.getNumTasksToExecutePerJvm() != 1);
   }
 
   public static void main(String[] args) throws Throwable {
     LOG.debug("Child starting");
+    isChildJvm = true;
 
     final JobConf defaultConf = new JobConf();
     String host = args[0];
@@ -78,7 +91,6 @@ class Child {
     final int SLEEP_LONGER_COUNT = 5;
     int jvmIdInt = Integer.parseInt(args[4]);
     JVMId jvmId = new JVMId(firstTaskid.getJobID(),firstTaskid.isMap(),jvmIdInt);
-    String prefix = firstTaskid.isMap() ? "MapTask" : "ReduceTask";
     
     cwd = System.getenv().get(TaskRunner.HADOOP_WORK_DIR);
     if (cwd == null) {
@@ -162,7 +174,7 @@ class Child {
     Task task = null;
     
     UserGroupInformation childUGI = null;
-
+   
     final JvmContext jvmContext = context;
     try {
       while (true) {
@@ -235,8 +247,7 @@ class Child {
         task.setConf(job);
 
         // Initiate Java VM metrics
-        initMetrics(prefix, jvmId.toString(), job.getSessionId());
-
+        JvmMetrics.init(task.getPhase().toString(), job.getSessionId());
         LOG.debug("Creating remote user to execute task: " + job.get("user.name"));
         childUGI = UserGroupInformation.createRemoteUser(job.get("user.name"));
         // Add tokens to new user so that it may execute its task correctly.
@@ -311,22 +322,13 @@ class Child {
       }
     } finally {
       RPC.stopProxy(umbilical);
-      shutdownMetrics();
+      MetricsContext metricsContext = MetricsUtil.getContext("mapred");
+      metricsContext.close();
       // Shutting down log4j of the child-vm... 
       // This assumes that on return from Task.run() 
       // there is no more logging done.
       LogManager.shutdown();
     }
-  }
-
-  private static void initMetrics(String prefix, String procName,
-                                  String sessionId) {
-    DefaultMetricsSystem.initialize(prefix);  
-    JvmMetricsSource.create(procName, sessionId);
-  }
-
-  private static void shutdownMetrics() {
-    DefaultMetricsSystem.INSTANCE.shutdown();
   }
 
   static void localizeTask(Task task, JobConf jobConf, String logLocation) 

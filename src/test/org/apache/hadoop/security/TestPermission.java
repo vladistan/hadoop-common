@@ -144,7 +144,7 @@ public class TestPermission extends TestCase {
     }
   }
 
-  public void testFilePermission() throws Exception {
+  public void testFilePermision() throws Exception {
     final Configuration conf = new Configuration();
     conf.setBoolean("dfs.permissions", true);
     MiniDFSCluster cluster = new MiniDFSCluster(conf, 3, true, null);

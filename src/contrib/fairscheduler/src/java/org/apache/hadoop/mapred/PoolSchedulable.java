@@ -41,11 +41,11 @@ public class PoolSchedulable extends Schedulable {
   private PoolManager poolMgr;
   private List<JobSchedulable> jobScheds = new LinkedList<JobSchedulable>();
   private int demand = 0;
-  
+
   // Variables used for preemption
   long lastTimeAtMinShare;
   long lastTimeAtHalfFairShare;
-
+  
   public PoolSchedulable(FairScheduler scheduler, Pool pool, TaskType type) {
     this.scheduler = scheduler;
     this.pool = pool;

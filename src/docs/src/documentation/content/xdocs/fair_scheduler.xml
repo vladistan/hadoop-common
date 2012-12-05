@@ -18,15 +18,16 @@
 <!DOCTYPE document PUBLIC "-//APACHE//DTD Documentation V2.0//EN" "http://forrest.apache.org/dtd/document-v20.dtd">
 <document>
   <header>
-    <title>Fair Scheduler</title>
+    <title>Fair Scheduler Guide</title>
   </header>
   <body>
 
     <section>
       <title>Purpose</title>
 
-      <p>This document describes the Fair Scheduler, a pluggable MapReduce
-        scheduler that provides a way to share large clusters.</p>
+      <p>This document describes the Fair Scheduler, a pluggable
+        MapReduce scheduler for Hadoop which provides a way to share
+        large clusters.</p>
     </section>
 
     <section>
@@ -102,7 +103,7 @@
       <p>
         To run the fair scheduler in your Hadoop installation, you need to put
         it on the CLASSPATH. The easiest way is to copy the 
-        <em>hadoop-*-fairscheduler.jar</em> from
+        <em>hadoop-fairscheduler-*.jar</em> from
         <em>HADOOP_HOME/build/contrib/fairscheduler</em> to <em>HADOOP_HOME/lib</em>.
         Alternatively you can modify <em>HADOOP_CLASSPATH</em> to include this jar, in
         <em>HADOOP_CONF_DIR/hadoop-env.sh</em>
@@ -110,14 +111,12 @@
       <p>
        You will also need to set the following property in the Hadoop config 
        file  <em>HADOOP_CONF_DIR/mapred-site.xml</em> to have Hadoop use 
-       the fair scheduler:
+       the fair scheduler: <br/><br/>
+       <code>&lt;property&gt;</code><br/> 
+       <code>&nbsp;&nbsp;&lt;name&gt;mapred.jobtracker.taskScheduler&lt;/name&gt;</code><br/>
+       <code>&nbsp;&nbsp;&lt;value&gt;org.apache.hadoop.mapred.FairScheduler&lt;/value&gt;</code><br/>
+       <code>&lt;/property&gt;</code>
       </p>
-<source>
-&lt;property&gt;
-  &lt;name&gt;mapred.jobtracker.taskScheduler&lt;/name&gt;
-  &lt;value&gt;org.apache.hadoop.mapred.FairScheduler&lt;/value&gt;
-&lt;/property&gt;
-</source>
       <p>
         Once you restart the cluster, you can check that the fair scheduler 
         is running by going to <em>http://&lt;jobtracker URL&gt;/scheduler</em> 
@@ -127,7 +126,7 @@
       <p>
         If you wish to compile the fair scheduler from source, run <em> ant 
         package</em> in your HADOOP_HOME directory. This will build
-        <em>build/contrib/fair-scheduler/hadoop-*-fairscheduler.jar</em>.
+        <em>build/contrib/fair-scheduler/hadoop-fairscheduler-*.jar</em>.
       </p>
     </section>
     
@@ -135,10 +134,8 @@
       <title>Configuration</title>
       <p>
         The Fair Scheduler contains configuration in two places -- algorithm
-        parameters are set in <em>HADOOP_CONF_DIR/mapred-site.xml</em>, while 
-        a separate XML file called the <em>allocation file</em>, 
-        located by default in
-        <em>HADOOP_CONF_DIR/fair-scheduler.xml</em>, is used to configure
+        parameters are set in <em>mapred-site.xml</em>, while a separate XML
+        file called the <em>allocation file</em> can be used to configure
         pools, minimum shares, running job limits and preemption timeouts.
         The allocation file is reloaded periodically at runtime, 
         allowing you to change pool settings without restarting 
@@ -146,7 +143,10 @@
       </p>
       <p>
         For a minimal installation, to just get equal sharing between users,
-        you will not need to edit the allocation file.
+        you will not need to set up an allocation file. If you do set up an
+        allocation file, you will need to tell the scheduler where to
+        find it by setting the <em>mapred.fairscheduler.allocation.file</em>
+        parameter in <em>mapred-site.xml</em> as described below.
       </p>
       <section>
       <title>Scheduler Parameters in mapred-site.xml</title>
@@ -154,10 +154,23 @@
           The following parameters can be set in <em>mapred-site.xml</em>
           to affect the behavior of the fair scheduler:
         </p>
-        <p><strong>Basic Parameters</strong></p>
+        <p><strong>Basic Parameters:</strong></p>
         <table>
           <tr>
           <th>Name</th><th>Description</th>
+          </tr>
+          <tr>
+          <td>
+            mapred.fairscheduler.allocation.file
+          </td>
+          <td>
+            Specifies an absolute path to an XML file which contains minimum
+            shares for each pool, per-pool and per-user limits on number of
+            running jobs, and preemption timeouts. If this property is not 
+            set, these features are not used.
+            The <a href="#Allocation+File+Format">allocation file
+            format</a> is described later.
+          </td>
           </tr>
           <tr>
           <td>
@@ -186,23 +199,21 @@
             (i.e. one pool for each user). 
             Another useful value is <em>mapred.job.queue.name</em> to use MapReduce's "queue"
             system for access control lists (see below).
-            mapred.fairscheduler.poolnameproperty is used only for jobs in which 
+            mapred.fairscheduler.poolnameproperty is used only for jobs in which
             mapred.fairscheduler.pool is not explicitly set.
           </td>
           </tr>
           <tr>
           <td>
-            mapred.fairscheduler.allocation.file
+            mapred.fairscheduler.allow.undeclared.pools
           </td>
           <td>
-            Can be used to have the scheduler use a different allocation file
-            than the default one (<em>HADOOP_CONF_DIR/fair-scheduler.xml</em>).
-            Must be an absolute path to the allocation file.
+            Boolean property for enabling job submission to pools not declared
+            in the allocation file. Default: true.
           </td>
           </tr>
         </table>
-        <p> <br></br></p>
-        <p><strong>Advanced Parameters</strong> </p>
+        <p><strong>Advanced Parameters:</strong></p>
         <table>
           <tr>
           <th>Name</th><th>Description</th>
@@ -341,15 +352,13 @@
         </table>
       </section>  
       <section>
-        <title>Allocation File (fair-scheduler.xml)</title>
+        <title>Allocation File Format</title>
         <p>
         The allocation file configures minimum shares, running job
         limits, weights and preemption timeouts for each pool.
-        Only users/pools whose values differ from the defaults need to be
-        explicitly configured in this file.
-        The allocation file is located in
-        <em>HADOOP_HOME/conf/fair-scheduler.xml</em>.
-        It can contain the following types of elements:
+        An example is provided in 
+        <em>HADOOP_HOME/conf/fair-scheduler.xml.template</em>.
+        The allocation file can contain the following types of elements:
         </p>
         <ul>
         <li><em>pool</em> elements, which configure each pool.
@@ -366,7 +375,7 @@
           to limit the number of jobs from the 
           pool to run at once (defaults to infinite).</li>
           <li><em>weight</em>, to share the cluster 
-          non-proportionally with other pools. For example, a pool with weight 2.0 will get a 2x higher share than other pools. The default weight is 1.0.</li>
+          non-proportionally with other pools (defaults to 1.0).</li>
           <li><em>minSharePreemptionTimeout</em>, the
             number of seconds the pool will wait before
             killing other pools' tasks if it is below its minimum share
@@ -400,44 +409,39 @@
         </p>
         <p>
         An example allocation file is given below : </p>
-<source>
-&lt;?xml version="1.0"?&gt;  
-&lt;allocations&gt;  
-  &lt;pool name="sample_pool"&gt;
-    &lt;minMaps&gt;5&lt;/minMaps&gt;
-    &lt;minReduces&gt;5&lt;/minReduces&gt;
-    &lt;maxMaps&gt;25&lt;/maxMaps&gt;
-    &lt;maxReduces&gt;25&lt;/maxReduces&gt;
-    &lt;minSharePreemptionTimeout&gt;300&lt;/minSharePreemptionTimeout&gt;
-  &lt;/pool&gt;
-  &lt;user name="sample_user"&gt;
-    &lt;maxRunningJobs&gt;6&lt;/maxRunningJobs&gt;
-  &lt;/user&gt;
-  &lt;userMaxJobsDefault&gt;3&lt;/userMaxJobsDefault&gt;
-  &lt;fairSharePreemptionTimeout&gt;600&lt;/fairSharePreemptionTimeout&gt;
-&lt;/allocations&gt;
-</source>
         <p>
-        This example creates a pool sample_pool with a guarantee of 5 map 
-        slots and 5 reduce slots. The pool also has a minimum share preemption
-        timeout of 300 seconds (5 minutes), meaning that if it does not get its
-        guaranteed share within this time, it is allowed to kill tasks from
-        other pools to achieve its share. The pool has a cap of 25 map and 25
-        reduce slots, which means that once 25 tasks are running, no more will
-        be scheduled even if the pool's fair share is higher.
-        The example also limits the number of running jobs 
-        per user to 3, except for sample_user, who can run 6 jobs concurrently. 
-        Finally, the example sets a fair share preemption timeout of 600 seconds
-        (10 minutes). If a job is below half its fair share for 10 minutes, it
-        will be allowed to kill tasks from other jobs to achieve its share.
-        Note that the preemption settings require preemption to be
-        enabled in <em>mapred-site.xml</em> as described earlier.
+        <code>&lt;?xml version="1.0"?&gt; </code> <br/>
+        <code>&lt;allocations&gt;</code> <br/> 
+        <code>&nbsp;&nbsp;&lt;pool name="sample_pool"&gt;</code><br/>
+        <code>&nbsp;&nbsp;&nbsp;&nbsp;&lt;minMaps&gt;5&lt;/minMaps&gt;</code><br/>
+        <code>&nbsp;&nbsp;&nbsp;&nbsp;&lt;minReduces&gt;5&lt;/minReduces&gt;</code><br/>
+        <code>&nbsp;&nbsp;&nbsp;&nbsp;&lt;maxMaps&gt;25&lt;/maxMaps&gt;</code><br/>
+        <code>&nbsp;&nbsp;&nbsp;&nbsp;&lt;maxReduces&gt;25&lt;/maxReduces&gt;</code><br/>
+        <code>&nbsp;&nbsp;&nbsp;&nbsp;&lt;weight&gt;2.0&lt;/weight&gt;</code><br/>
+        <code>&nbsp;&nbsp;&lt;/pool&gt;</code><br/>
+        <code>&nbsp;&nbsp;&lt;user name="sample_user"&gt;</code><br/>
+        <code>&nbsp;&nbsp;&nbsp;&nbsp;&lt;maxRunningJobs&gt;6&lt;/maxRunningJobs&gt;</code><br/>
+        <code>&nbsp;&nbsp;&lt;/user&gt;</code><br/>
+        <code>&nbsp;&nbsp;&lt;userMaxJobsDefault&gt;3&lt;/userMaxJobsDefault&gt;</code><br/>
+        <code>&lt;/allocations&gt;</code>
         </p>
         <p>
+        This example creates a pool sample_pool with a guarantee of 5 map 
+        slots and 5 reduce slots. The pool also has a weight of 2.0, meaning 
+        it has a 2x higher share of the cluster than other pools (the default 
+        weight is 1). The pool has a cap of 25 map and 25 reduce slots, which
+        means that once 25 tasks are running, no more will be scheduled even if
+        the pool's fair share is higher.
+        Finally, the example limits the number of running jobs 
+        per user to 3, except for sample_user, who can run 6 jobs concurrently. 
         Any pool not defined in the allocation file will have no guaranteed 
-        capacity and no preemption timeout. Also, any pool or user with no max 
+        capacity and a weight of 1.0. Also, any pool or user with no max 
         running jobs set in the file will be allowed to run an unlimited 
         number of jobs.
+        </p>
+        <p>
+        A more detailed example file, setting preemption timeouts as well,
+        is available in <em>HADOOP_HOME/conf/fair-scheduler.xml.template</em>.
         </p>
       </section>
       <section>
@@ -586,7 +590,7 @@
      implementing a "shortest job first" policy which reduces response
      times for interactive jobs even further.
      These extension points are listed in
-     <a href="#Scheduler+Parameters+in+mapred-site.xml">Advanced Parameters</a>.
+     <a href="#Advanced+Parameters">advanced mapred-site.xml properties</a>.
      </p>
     </section>
     -->

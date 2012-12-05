@@ -60,7 +60,7 @@ public class TestJobQueueTaskScheduler extends TestCase {
     }
 
     @Override
-    public Task obtainNewNodeOrRackLocalMapTask(TaskTrackerStatus tts, int clusterSize, 
+    public Task obtainNewLocalMapTask(TaskTrackerStatus tts, int clusterSize, 
                                       int ignored) 
     throws IOException {
       return obtainNewMapTask(tts, clusterSize, ignored);
@@ -130,13 +130,13 @@ public class TestJobQueueTaskScheduler extends TestCase {
       
       TaskTracker tt1 = new TaskTracker("tt1");
       tt1.setStatus(new TaskTrackerStatus("tt1", "tt1.host", 1,
-                    new ArrayList<TaskStatus>(), 0,
+                    new ArrayList<TaskStatus>(), 0, 0,
                     maxMapTasksPerTracker, maxReduceTasksPerTracker));
       trackers.put("tt1", tt1);
       
       TaskTracker tt2 = new TaskTracker("tt2");
       tt2.setStatus(new TaskTrackerStatus("tt2", "tt2.host", 2,
-                    new ArrayList<TaskStatus>(), 0,
+                    new ArrayList<TaskStatus>(), 0, 0,
                     maxMapTasksPerTracker, maxReduceTasksPerTracker));
       trackers.put("tt2", tt2);
     }
@@ -144,7 +144,7 @@ public class TestJobQueueTaskScheduler extends TestCase {
     @Override
     public ClusterStatus getClusterStatus() {
       int numTrackers = trackers.size();
-      return new ClusterStatus(numTrackers, 0, 0,
+      return new ClusterStatus(numTrackers, 0, 
                                JobTracker.TASKTRACKER_EXPIRY_INTERVAL,
                                maps, reduces,
                                numTrackers * maxMapTasksPerTracker,
@@ -184,7 +184,7 @@ public class TestJobQueueTaskScheduler extends TestCase {
     
     @Override
     public int getNextHeartbeatInterval() {
-      return MRConstants.HEARTBEAT_INTERVAL_MIN;
+      return MRConstants.HEARTBEAT_INTERVAL_MIN_DEFAULT;
     }
 
     @Override
@@ -206,10 +206,10 @@ public class TestJobQueueTaskScheduler extends TestCase {
     }
 
     @Override
-    public boolean killTask(TaskAttemptID taskid, boolean shouldFail)
-      throws IOException {
-      return false;
+    public boolean killTask(TaskAttemptID attemptId, boolean shouldFail) {
+      return true;
     }
+
     
     // Test methods
     

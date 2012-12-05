@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hdfs.server.namenode;
 
 import junit.framework.TestCase;
@@ -74,8 +73,8 @@ public class TestDFSConcurrentFileOperations extends TestCase {
     Configuration conf = new Configuration();
     
     conf.setLong("dfs.block.size", blockSize);
-    conf.setBoolean("dfs.support.append", true);
-    
+    conf.setBoolean("dfs.support.broken.append", true);
+
     init(conf);
     
     String src = "/file-1";

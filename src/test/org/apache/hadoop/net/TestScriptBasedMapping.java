@@ -25,28 +25,22 @@ import org.apache.hadoop.conf.Configuration;
 import junit.framework.TestCase;
 
 public class TestScriptBasedMapping extends TestCase {
-  
-  private ScriptBasedMapping mapping;
-  private Configuration conf;
-  private List<String> names;
-  
-  public TestScriptBasedMapping() {
-    mapping = new ScriptBasedMapping();
 
-    conf = new Configuration();
+  public void testNoArgsMeansNoResult() {
+    ScriptBasedMapping mapping = new ScriptBasedMapping();
+
+    Configuration conf = new Configuration();
     conf.setInt(ScriptBasedMapping.SCRIPT_ARG_COUNT_KEY,
         ScriptBasedMapping.MIN_ALLOWABLE_ARGS - 1);
     conf.set(ScriptBasedMapping.SCRIPT_FILENAME_KEY, "any-filename");
 
-    mapping.setConf(conf);    
-  }
+    mapping.setConf(conf);
 
-  public void testNoArgsMeansNoResult() {
-    names = new ArrayList<String>();
+    List<String> names = new ArrayList<String>();
     names.add("some.machine.name");
     names.add("other.machine.name");
+
     List<String> result = mapping.resolve(names);
     assertNull(result);
   }
-
 }

@@ -19,6 +19,8 @@ package org.apache.hadoop.mapred;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -43,7 +45,7 @@ import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.classification.InterfaceAudience;
+//import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.filecache.DistributedCache;
@@ -180,40 +182,60 @@ public class JobClient extends Configured implements MRConstants, Tool  {
     Configuration.addDefaultResource("mapred-site.xml");
   }
 
+  /** The interval at which monitorAndPrintJob() prints status */
+  private int progMonitorPollIntervalMillis;
+
+  /** Default progMonitorPollIntervalMillis is 1000 ms. */
+  private static final int DEFAULT_MONITOR_POLL_INTERVAL = 1000;
+
+  /** Key in mapred-*.xml that sets progMonitorPollIntervalMillis */
+  static final String PROGRESS_MONITOR_POLL_INTERVAL_KEY =
+      "jobclient.progress.monitor.poll.interval";
+
+
   /**
    * A NetworkedJob is an implementation of RunningJob.  It holds
    * a JobProfile object to provide some info, and interacts with the
    * remote service to provide certain functionality.
    */
-  static class NetworkedJob implements RunningJob {
-    private JobSubmissionProtocol jobSubmitClient;
+  class NetworkedJob implements RunningJob {
     JobProfile profile;
     JobStatus status;
     long statustime;
 
+    /** The interval at which NetworkedJob.waitForCompletion() should check. */
+    private int completionPollIntervalMillis;
+
+    /** Default completionPollIntervalMillis is 5000 ms. */
+    private static final int DEFAULT_COMPLETION_POLL_INTERVAL = 5000;
+
+    /** Key in mapred-*.xml that sets completionPollInvervalMillis */
+    static final String COMPLETION_POLL_INTERVAL_KEY = "jobclient.completion.poll.interval";
+
     /**
      * We store a JobProfile and a timestamp for when we last
      * acquired the job profile.  If the job is null, then we cannot
-     * perform any of the tasks, so we throw an exception.
-     * The job might be null if the JobTracker has completely forgotten
-     * about the job.  (eg, 24 hours after the job completes.)
+     * perform any of the tasks.  The job might be null if the JobTracker
+     * has completely forgotten about the job.  (eg, 24 hours after the
+     * job completes.)
      */
-    public NetworkedJob(JobStatus job, JobProfile prof, JobSubmissionProtocol jobSubmitClient) throws IOException {
+    public NetworkedJob(JobStatus job) throws IOException {
       this.status = job;
-      this.profile = prof;
-      this.jobSubmitClient = jobSubmitClient;
-      if(this.status == null) {
-        throw new IOException("The Job status cannot be null");
-      }
-      if(this.profile == null) {
-        throw new IOException("The Job profile cannot be null");
-      }
-      if(this.jobSubmitClient == null) {
-        throw new IOException("The Job Submission Protocol cannot be null");
-      }
+      this.profile = jobSubmitClient.getJobProfile(job.getJobID());
       this.statustime = System.currentTimeMillis();
+
+      // Set the completion poll interval from the configuration.
+      // Default is 5 seconds.
+      Configuration conf = JobClient.this.getConf();
+      this.completionPollIntervalMillis = conf.getInt(COMPLETION_POLL_INTERVAL_KEY,
+          DEFAULT_COMPLETION_POLL_INTERVAL);
+      if (this.completionPollIntervalMillis < 1) {
+        LOG.warn(COMPLETION_POLL_INTERVAL_KEY + " has been set to an invalid value; "
+            + "replacing with " + DEFAULT_COMPLETION_POLL_INTERVAL);
+        this.completionPollIntervalMillis = DEFAULT_COMPLETION_POLL_INTERVAL;
+      }
     }
-    
+
     /**
      * Some methods rely on having a recent job profile object.  Refresh
      * it, if necessary
@@ -230,9 +252,6 @@ public class JobClient extends Configured implements MRConstants, Tool  {
      */
     synchronized void updateStatus() throws IOException {
       this.status = jobSubmitClient.getJobStatus(profile.getJobID());
-      if(this.status == null) {
-        throw new IOException("The job appears to have been removed."); 
-      }
       this.statustime = System.currentTimeMillis();
     }
 
@@ -331,7 +350,7 @@ public class JobClient extends Configured implements MRConstants, Tool  {
     public void waitForCompletion() throws IOException {
       while (!isComplete()) {
         try {
-          Thread.sleep(5000);
+          Thread.sleep(this.completionPollIntervalMillis);
         } catch (InterruptedException ie) {
         }
       }
@@ -399,9 +418,7 @@ public class JobClient extends Configured implements MRConstants, Tool  {
         "file: " + profile.getJobFile() + "\n" + 
         "tracking URL: " + profile.getURL() + "\n" + 
         "map() completion: " + status.mapProgress() + "\n" + 
-        "reduce() completion: " + status.reduceProgress() + "\n" +
-        ((status.getRunState() == JobStatus.FAILED) ? ("Failure Info: " + status.getFailureInfo()) : "");
-      
+        "reduce() completion: " + status.reduceProgress();
     }
         
     /**
@@ -424,6 +441,12 @@ public class JobClient extends Configured implements MRConstants, Tool  {
       ensureFreshStatus();
       return status.getFailureInfo();
     }
+
+    @Override
+    public JobStatus getJobStatus() throws IOException {
+      updateStatus();
+      return status;
+    }
   }
 
   private JobSubmissionProtocol jobSubmitClient;
@@ -441,6 +464,7 @@ public class JobClient extends Configured implements MRConstants, Tool  {
    * Create a job client.
    */
   public JobClient() {
+    this.progMonitorPollIntervalMillis = DEFAULT_MONITOR_POLL_INTERVAL;
   }
     
   /**
@@ -471,6 +495,15 @@ public class JobClient extends Configured implements MRConstants, Tool  {
     } else {
       this.jobSubmitClient = createRPCProxy(JobTracker.getAddress(conf), conf);
     }        
+
+    // Read progress monitor poll interval from config. Default is 1 second.
+    this.progMonitorPollIntervalMillis = conf.getInt(PROGRESS_MONITOR_POLL_INTERVAL_KEY,
+        DEFAULT_MONITOR_POLL_INTERVAL);
+    if (this.progMonitorPollIntervalMillis < 1) {
+      LOG.warn(PROGRESS_MONITOR_POLL_INTERVAL_KEY + " has been set to an invalid value; "
+          + " replacing with " + DEFAULT_MONITOR_POLL_INTERVAL);
+      this.progMonitorPollIntervalMillis = DEFAULT_MONITOR_POLL_INTERVAL;
+    }
   }
 
   private static JobSubmissionProtocol createRPCProxy(InetSocketAddress addr,
@@ -481,7 +514,7 @@ public class JobClient extends Configured implements MRConstants, Tool  {
         NetUtils.getSocketFactory(conf, JobSubmissionProtocol.class));
   }
 
-  @InterfaceAudience.Private
+  //@InterfaceAudience.Private
   public static class Renewer extends TokenRenewer {
 
     @Override
@@ -509,7 +542,13 @@ public class JobClient extends Configured implements MRConstants, Tool  {
 
     @Override
     public boolean isManaged(Token<?> token) throws IOException {
-      return true;
+      ByteArrayInputStream buf = new ByteArrayInputStream(token.getIdentifier());
+      DelegationTokenIdentifier id = new DelegationTokenIdentifier(); 
+      id.readFields(new DataInputStream(buf));
+      // AbstractDelegationToken converts given renewer to a short name, but
+      // AbstractDelegationTokenSecretManager does not, so we have to do it
+      String loginUser = UserGroupInformation.getLoginUser().getShortUserName();
+      return loginUser.equals(id.getRenewer().toString());
     }
     
   }
@@ -683,6 +722,7 @@ public class JobClient extends Configured implements MRConstants, Tool  {
           " that directory");
     }
     submitJobDir = fs.makeQualified(submitJobDir);
+    submitJobDir = new Path(submitJobDir.toUri().getPath());
     FsPermission mapredSysPerms = new FsPermission(JobSubmissionFiles.JOB_DIR_PERMISSION);
     FileSystem.mkdirs(fs, submitJobDir, mapredSysPerms);
     Path filesDir = JobSubmissionFiles.getJobDistCacheFiles(submitJobDir);
@@ -720,8 +760,8 @@ public class JobClient extends Configured implements MRConstants, Tool  {
       for (String tmpjars: libjarsArr) {
         Path tmp = new Path(tmpjars);
         Path newPath = copyRemoteFiles(fs, libjarsDir, tmp, job, replication);
-        DistributedCache.addArchiveToClassPath
-          (new Path(newPath.toUri().getPath()), job, fs);
+        DistributedCache.addFileToClassPath(
+          new Path(newPath.toUri().getPath()), job, fs);
       }
     }
     
@@ -901,6 +941,12 @@ public class JobClient extends Configured implements MRConstants, Tool  {
             FileSystem.create(fs, submitJobFile,
                 new FsPermission(JobSubmissionFiles.JOB_FILE_PERMISSION));
 
+          // removing jobtoken referrals before copying the jobconf to HDFS
+          // as the tasks don't need this setting, actually they may break
+          // because of it if present as the referral will point to a
+          // different job.
+          TokenCache.cleanUpTokenReferral(jobCopy);
+
           try {
             jobCopy.writeXml(out);
           } finally {
@@ -912,9 +958,8 @@ public class JobClient extends Configured implements MRConstants, Tool  {
           printTokens(jobId, jobCopy.getCredentials());
           status = jobSubmitClient.submitJob(
               jobId, submitJobDir.toString(), jobCopy.getCredentials());
-          JobProfile prof = jobSubmitClient.getJobProfile(jobId);
-          if (status != null && prof != null) {
-            return new NetworkedJob(status, prof, jobSubmitClient);
+          if (status != null) {
+            return new NetworkedJob(status);
           } else {
             throw new IOException("Could not launch job");
           }
@@ -1061,9 +1106,8 @@ public class JobClient extends Configured implements MRConstants, Tool  {
    */
   public RunningJob getJob(JobID jobid) throws IOException {
     JobStatus status = jobSubmitClient.getJobStatus(jobid);
-    JobProfile profile = jobSubmitClient.getJobProfile(jobid);
-    if (status != null && profile != null) {
-      return new NetworkedJob(status, profile, jobSubmitClient);
+    if (status != null) {
+      return new NetworkedJob(status);
     } else {
       return null;
     }
@@ -1263,6 +1307,46 @@ public class JobClient extends Configured implements MRConstants, Tool  {
   }
   
   /**
+   * @return true if the profile parameters indicate that this is using
+   * hprof, which generates profile files in a particular location
+   * that we can retrieve to the client.
+   */
+  private boolean shouldDownloadProfile(JobConf conf) {
+    // Check the argument string that was used to initialize profiling.
+    // If this indicates hprof and file-based output, then we're ok to
+    // download.
+    String profileParams = conf.getProfileParams();
+
+    if (null == profileParams) {
+      return false;
+    }
+
+    // Split this on whitespace.
+    String [] parts = profileParams.split("[ \\t]+");
+
+    // If any of these indicate hprof, and the use of output files, return true.
+    boolean hprofFound = false;
+    boolean fileFound = false;
+    for (String p : parts) {
+      if (p.startsWith("-agentlib:hprof") || p.startsWith("-Xrunhprof")) {
+        hprofFound = true;
+
+        // This contains a number of comma-delimited components, one of which
+        // may specify the file to write to. Make sure this is present and
+        // not empty.
+        String [] subparts = p.split(",");
+        for (String sub : subparts) {
+          if (sub.startsWith("file=") && sub.length() != "file=".length()) {
+            fileFound = true;
+          }
+        }
+      }
+    }
+
+    return hprofFound && fileFound;
+  }
+
+  /**
    * Monitor a job and print status in real-time as progress is made and tasks 
    * fail.
    * @param conf the job's configuration
@@ -1284,7 +1368,7 @@ public class JobClient extends Configured implements MRConstants, Tool  {
     Configuration.IntegerRanges reduceRanges = conf.getProfileTaskRange(false);
 
     while (!job.isComplete()) {
-      Thread.sleep(1000);
+      Thread.sleep(this.progMonitorPollIntervalMillis);
       String report = 
         (" map " + StringUtils.formatPercent(job.mapProgress(), 0)+
             " reduce " + 
@@ -1299,7 +1383,7 @@ public class JobClient extends Configured implements MRConstants, Tool  {
       eventCounter += events.length;
       for(TaskCompletionEvent event : events){
         TaskCompletionEvent.Status status = event.getTaskStatus();
-        if (profiling && 
+        if (profiling && shouldDownloadProfile(conf) &&
             (status == TaskCompletionEvent.Status.SUCCEEDED ||
                 status == TaskCompletionEvent.Status.FAILED) &&
                 (event.isMap ? mapRanges : reduceRanges).
@@ -1696,23 +1780,13 @@ public class JobClient extends Configured implements MRConstants, Tool  {
         if (job == null) {
           System.out.println("Could not find job " + jobid);
         } else {
-          Throwable counterException = null;
-          Counters counters = null;
-          try {
-            counters = job.getCounters();
-          } catch (IOException e) {
-            counterException = e;
-          }
+          Counters counters = job.getCounters();
           System.out.println();
           System.out.println(job);
           if (counters != null) {
             System.out.println(counters);
           } else {
-            if (counterException != null) {
-              System.out.println("Error fetching counters: " + counterException.getMessage());
-            } else {
-              System.out.println("Counters not available. Job is retired.");
-            }
+            System.out.println("Counters not available. Job is retired.");
           }
           exitCode = 0;
         }
@@ -1721,21 +1795,10 @@ public class JobClient extends Configured implements MRConstants, Tool  {
         if (job == null) {
           System.out.println("Could not find job " + jobid);
         } else {
-          Throwable counterException = null;
-          Counters counters = null;
-          try {
-            counters = job.getCounters();
-          } catch (IOException e) {
-            counterException = e;
-          }
+          Counters counters = job.getCounters();
           if (counters == null) {
-            if (counterException != null) {
-              System.out
-                  .println("Error fetching counters: " + counterException.getMessage());
-            } else {
-              System.out.println("Counters not available for retired job "
-                  + jobid);
-            }
+            System.out.println("Counters not available for retired job " + 
+                jobid);
             exitCode = -1;
           } else {
             Group group = counters.getGroup(counterGroupName);

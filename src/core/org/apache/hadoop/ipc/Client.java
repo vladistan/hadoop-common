@@ -19,8 +19,10 @@
 package org.apache.hadoop.ipc;
 
 import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.net.Socket;
 import java.net.InetSocketAddress;
+import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.ConnectException;
@@ -40,7 +42,14 @@ import java.util.Iterator;
 import java.util.Random;
 import java.util.Set;
 import java.util.Map.Entry;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import javax.net.SocketFactory;
@@ -88,6 +97,25 @@ public class Client {
   final private static String PING_INTERVAL_NAME = "ipc.ping.interval";
   final static int DEFAULT_PING_INTERVAL = 60000; // 1 min
   final static int PING_CALL_ID = -1;
+  
+  private static final ThreadFactory DAEMON_THREAD_FACTORY = new ThreadFactory() {
+    private final ThreadFactory defaultThreadFactory = 
+      Executors.defaultThreadFactory();
+    private final AtomicInteger counter = new AtomicInteger(0);
+    @Override
+    public Thread newThread(Runnable r) {
+      Thread thread = defaultThreadFactory.newThread(r);
+        
+      thread.setDaemon(true);
+      thread.setName("sendParams-" + counter.getAndIncrement());
+        
+      return thread;
+    }
+  };
+  
+  private static final ExecutorService SEND_PARAMS_EXECUTOR = 
+    Executors.newCachedThreadPool(DAEMON_THREAD_FACTORY);
+  
   
   /**
    * set the ping interval value in configuration
@@ -199,6 +227,7 @@ public class Client {
          //maxIdleTime msecs
     private int maxRetries; //the max. no. of retries for socket connections
     private boolean tcpNoDelay; // if T then disable Nagle's Algorithm
+    private boolean doPing; //do we need to send ping message
     private int pingInterval; // how often sends ping to the server in msecs
     
     // currently active calls
@@ -206,6 +235,9 @@ public class Client {
     private AtomicLong lastActivity = new AtomicLong();// last I/O activity time
     private AtomicBoolean shouldCloseConnection = new AtomicBoolean();  // indicate if the connection is closed
     private IOException closeException; // close reason
+    
+    private final Object sendParamsLock = new Object();
+
 
     public Connection(ConnectionId remoteId) throws IOException {
       this.remoteId = remoteId;
@@ -214,14 +246,16 @@ public class Client {
         throw new UnknownHostException("unknown host: " + 
                                        remoteId.getAddress().getHostName());
       }
+      this.rpcTimeout = remoteId.getRpcTimeout();
       this.maxIdleTime = remoteId.getMaxIdleTime();
       this.maxRetries = remoteId.getMaxRetries();
       this.tcpNoDelay = remoteId.getTcpNoDelay();
+      this.doPing = remoteId.getDoPing();
       this.pingInterval = remoteId.getPingInterval();
       if (LOG.isDebugEnabled()) {
         LOG.debug("The ping interval is" + this.pingInterval + "ms.");
       }
-      this.rpcTimeout = remoteId.getRpcTimeout();
+      
       UserGroupInformation ticket = remoteId.getTicket();
       Class<?> protocol = remoteId.getProtocol();
       this.useSasl = UserGroupInformation.isSecurityEnabled();
@@ -302,9 +336,9 @@ public class Client {
       }
 
       /* Process timeout exception
-       * if the connection is not going to be closed or 
+       * if the connection is not going to be closed or
        * is not configured to have a RPC timeout, send a ping.
-       * (if rpcTimeout is not set to be 0, then RPC should timeout.
+       * (if rpcTimeout is not set to be 0, then RPC should timeout)
        * otherwise, throw the timeout exception.
        */
       private void handleTimeout(SocketTimeoutException e) throws IOException {
@@ -431,50 +465,31 @@ public class Client {
           }
           
           // connection time out is 20s
-          NetUtils.connect(this.socket, server, 20000);
+          NetUtils.connect(this.socket, remoteId.getAddress(), 20000);
           if (rpcTimeout > 0) {
-            pingInterval = rpcTimeout;  // rpcTimeout overwrites pingInterval
+            pingInterval = rpcTimeout; // rpcTimeout overwrites pingInterval
           }
-
           this.socket.setSoTimeout(pingInterval);
           return;
         } catch (SocketTimeoutException toe) {
-          /* Check for an address change and update the local reference.
-           * Reset the failure counter if the address was changed
-           */
-          if (updateAddress()) {
-            timeoutFailures = ioFailures = 0;
-          }
           /* The max number of retries is 45,
            * which amounts to 20s*45 = 15 minutes retries.
            */
           handleConnectionFailure(timeoutFailures++, 45, toe);
         } catch (IOException ie) {
-          if (updateAddress()) {
-            timeoutFailures = ioFailures = 0;
-          }
           handleConnectionFailure(ioFailures++, maxRetries, ie);
         }
       }
     }
     /**
-     * Three failures are handled here -
-     * 1) SocketTimeout failures. We just retry after sleeping for sometime
-     * 2) Kerberos replay attack failure. If multiple clients with the same 
-     * principal try to connect to the same server at the same time, the server
-     * assumes a replay attack is in progress. This is a feature of kerberos.
+     * If multiple clients with the same principal try to connect 
+     * to the same server at the same time, the server assumes a 
+     * replay attack is in progress. This is a feature of kerberos.
      * In order to work around this, what is done is that the client
      * backs off randomly and tries to initiate the connection
      * again.
-     * 3) The third problem is to do with ticket expiry. To handle that,
+     * The other problem is to do with ticket expiry. To handle that,
      * a relogin is attempted.
-     * Failure scenarios: 
-     * (1) Client authenticates over kerberos and the
-     * connection fails due to kerberos replay attack, or his ticket has
-     * expired or does not exist. Also connection can fail due to timeout.
-     * (2) Client authenticates over DIGEST and the connection fails due 
-     * to timeout.
-     * For MapReduce tasks, assuming the token is valid, only (2) can happen.
      */
     private synchronized void handleSaslConnectionFailure(
         final int currRetries,
@@ -612,18 +627,24 @@ public class Client {
           start();
           return;
         }
-      } catch (IOException e) {
-        markClosed(e);
+      } catch (Throwable t) {
+        if (t instanceof IOException) {
+          markClosed((IOException)t);
+        } else {
+          markClosed(new IOException("Couldn't set up IO streams", t));
+        }
         close();
       }
     }
     
     private void closeConnection() {
       // close the current connection
-      try {
-        socket.close();
-      } catch (IOException e) {
-        LOG.warn("Not able to close a socket", e);
+      if (socket != null) {
+        try {
+          socket.close();
+        } catch (IOException e) {
+          LOG.warn("Not able to close a socket", e);
+        }
       }
       // set socket to null so that the next call to setupIOstreams
       // can start the process of connect all over again.
@@ -741,8 +762,16 @@ public class Client {
         LOG.debug(getName() + ": starting, having connections " 
             + connections.size());
 
-      while (waitForWork()) {//wait here for work - read or close connection
-        receiveResponse();
+      try {
+        while (waitForWork()) {//wait here for work - read or close connection
+          receiveResponse();
+        }
+      } catch (Throwable t) {
+        // This truly is unexpected, since we catch IOException in receiveResponse
+        // -- this is only to be really sure that we don't leave a client hanging
+        // forever.
+        LOG.warn("Unexpected error reading responses on connection " + this, t);
+        markClosed(new IOException("Error reading responses", t));
       }
       
       close();
@@ -756,34 +785,63 @@ public class Client {
      * Note: this is not called from the Connection thread, but by other
      * threads.
      */
-    public void sendParam(Call call) {
+    public void sendParam(final Call call) throws InterruptedException {
       if (shouldCloseConnection.get()) {
         return;
       }
+      
+      // lock the connection for the period of submission and waiting
+      // in order to bound the # of threads in the executor by the number
+      // of connections
+      synchronized (sendParamsLock) {
+        Future senderFuture = SEND_PARAMS_EXECUTOR.submit(new Runnable() {
+          @Override
+          public void run() {
+            DataOutputBuffer d = null;
 
-      DataOutputBuffer d=null;
-      try {
-        synchronized (this.out) {
-          if (LOG.isDebugEnabled())
-            LOG.debug(getName() + " sending #" + call.id);
-          
-          //for serializing the
-          //data to be written
-          d = new DataOutputBuffer();
-          d.writeInt(call.id);
-          call.param.write(d);
-          byte[] data = d.getData();
-          int dataLength = d.getLength();
-          out.writeInt(dataLength);      //first put the data length
-          out.write(data, 0, dataLength);//write the data
-          out.flush();
+            try {
+              synchronized (Connection.this.out) {
+                if (shouldCloseConnection.get()) {
+                  return;
+                }
+                if (LOG.isDebugEnabled()) {
+                  LOG.debug(getName() + " sending #" + call.id);
+                }
+
+                //for serializing the
+                //data to be written
+                d = new DataOutputBuffer();
+                d.writeInt(call.id);
+                call.param.write(d);
+                byte[] data = d.getData();
+                int dataLength = d.getLength();
+                out.writeInt(dataLength);      //first put the data length
+                out.write(data, 0, dataLength);//write the data
+                out.flush();
+              }
+            } catch (IOException e) {
+              markClosed(e);
+            } finally {
+              //the buffer is just an in-memory buffer, but it is still polite to
+              // close early
+              IOUtils.closeStream(d);
+            }
+          }
+        });
+
+        try {
+          senderFuture.get();
+        } catch (ExecutionException e) {
+          Throwable cause = e.getCause();
+
+          // cause should only be a RuntimeException as the Runnable above
+          // catches IOException
+          if (cause instanceof RuntimeException) {
+            throw (RuntimeException) cause;
+          } else {
+            throw new RuntimeException("checked exception made it here", cause);
+          }
         }
-      } catch(IOException e) {
-        markClosed(e);
-      } finally {
-        //the buffer is just an in-memory buffer, but it is still polite to
-        // close early
-        IOUtils.closeStream(d);
       }
     }  
 
@@ -1004,18 +1062,24 @@ public class Client {
   }
   
   /** Make a call, passing <code>param</code>, to the IPC server running at
-   * <code>address</code> which is servicing the <code>protocol</code> protocol,
-   * with the <code>ticket</code> credentials and <code>rpcTimeout</code> as
-   * timeout, returning the value.
+   * <code>address</code> which is servicing the <code>protocol</code> protocol, 
+   * with the <code>ticket</code> credentials, returning the value.  
    * Throws exceptions if there are network problems or if the remote code 
    * threw an exception. 
    * @deprecated Use {@link #call(Writable, ConnectionId)} instead 
    */
   @Deprecated
   public Writable call(Writable param, InetSocketAddress addr, 
+                       Class<?> protocol, UserGroupInformation ticket)  
+                       throws InterruptedException, IOException {
+    return call(param, addr, protocol, ticket, 0);
+  }
+  
+  @Deprecated
+  public Writable call(Writable param, InetSocketAddress addr,
                        Class<?> protocol, UserGroupInformation ticket,
                        int rpcTimeout)
-                       throws InterruptedException, IOException {
+                       throws InterruptedException, IOException {  
     ConnectionId remoteId = ConnectionId.getConnectionId(addr, protocol,
         ticket, rpcTimeout, conf);
     return call(param, remoteId);
@@ -1023,13 +1087,24 @@ public class Client {
   
   /** Make a call, passing <code>param</code>, to the IPC server running at
    * <code>address</code> which is servicing the <code>protocol</code> protocol, 
-   * with the <code>ticket</code> credentials, <code>rpcTimeout</code> as timeout 
-   * and <code>conf</code> as configuration for this connection, returning the 
-   * value. Throws exceptions if there are network problems or if the remote code 
-   * threw an exception. */
-  public Writable call(Writable param, InetSocketAddress addr,
+   * with the <code>ticket</code> credentials and <code>conf</code> as 
+   * configuration for this connection, returning the value.  
+   * Throws exceptions if there are network problems or if the remote code 
+   * threw an exception. 
+   * @throws IOException 
+   * @throws InterruptedException */
+  @Deprecated
+  public Writable call(Writable param, InetSocketAddress addr, 
                        Class<?> protocol, UserGroupInformation ticket,
-                       int rpcTimeout, Configuration conf)
+                       Configuration conf)
+                       throws InterruptedException, IOException {  
+    return call(param, addr, protocol, ticket, 0, conf);
+  }
+
+  @Deprecated
+  public Writable call(Writable param, InetSocketAddress addr, 
+                       Class<?> protocol, UserGroupInformation ticket,
+                       int rpcTimeout, Configuration conf)  
                        throws InterruptedException, IOException {
     ConnectionId remoteId = ConnectionId.getConnectionId(addr, protocol,
         ticket, rpcTimeout, conf);
@@ -1044,7 +1119,16 @@ public class Client {
                        throws InterruptedException, IOException {
     Call call = new Call(param);
     Connection connection = getConnection(remoteId, call);
-    connection.sendParam(call);                 // send the parameter
+    try {
+      connection.sendParam(call);                 // send the parameter
+    } catch (RejectedExecutionException e) {
+      throw new IOException("connection has been closed", e);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      LOG.warn("interrupted waiting to send params to server", e);
+      throw new IOException(e);
+    }
+
     boolean interrupted = false;
     synchronized (call) {
       while (!call.done) {
@@ -1147,11 +1231,17 @@ public class Client {
               protocol, ticket, 0, conf);
           Connection connection = getConnection(remoteId, call);
           connection.sendParam(call);             // send each parameter
+        } catch (RejectedExecutionException e) {
+          throw new IOException("connection has been closed", e);
         } catch (IOException e) {
           // log errors
           LOG.info("Calling "+addresses[i]+" caught: " + 
                    e.getMessage(),e);
           results.size--;                         //  wait for one fewer result
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          LOG.warn("interrupted waiting to send params to server", e);
+          throw new IOException(e);
         }
       }
       while (results.count != results.size) {
@@ -1218,13 +1308,15 @@ public class Client {
      //maxIdleTime msecs
      private int maxRetries; //the max. no. of retries for socket connections
      private boolean tcpNoDelay; // if T then disable Nagle's Algorithm
+     private boolean doPing; //do we need to send ping message
      private int pingInterval; // how often sends ping to the server in msecs
+     
      
      ConnectionId(InetSocketAddress address, Class<?> protocol, 
                   UserGroupInformation ticket, int rpcTimeout,
                   String serverPrincipal, int maxIdleTime, 
                   int maxRetries, boolean tcpNoDelay,
-                  int pingInterval) {
+                  boolean doPing, int pingInterval) {
        this.protocol = protocol;
        this.address = address;
        this.ticket = ticket;
@@ -1233,6 +1325,7 @@ public class Client {
        this.maxIdleTime = maxIdleTime;
        this.maxRetries = maxRetries;
        this.tcpNoDelay = tcpNoDelay;
+       this.doPing = doPing;
        this.pingInterval = pingInterval;
      }
      
@@ -1247,11 +1340,11 @@ public class Client {
      UserGroupInformation getTicket() {
        return ticket;
      }
-    
+     
      private int getRpcTimeout() {
        return rpcTimeout;
      }
- 
+     
      String getServerPrincipal() {
        return serverPrincipal;
      }
@@ -1268,26 +1361,26 @@ public class Client {
        return tcpNoDelay;
      }
      
+     boolean getDoPing() {
+       return doPing;
+     }
+     
      int getPingInterval() {
        return pingInterval;
      }
      
      static ConnectionId getConnectionId(InetSocketAddress addr,
-         Class<?> protocol, UserGroupInformation ticket,
-         Configuration conf) throws IOException {
-       return getConnectionId(addr, protocol, ticket, 0, conf);
-     }
-
-     static ConnectionId getConnectionId(InetSocketAddress addr,
          Class<?> protocol, UserGroupInformation ticket, int rpcTimeout,
          Configuration conf) throws IOException {
        String remotePrincipal = getRemotePrincipal(conf, addr, protocol);
+       boolean doPing = conf.getBoolean("ipc.client.ping", true);
        return new ConnectionId(addr, protocol, ticket,
            rpcTimeout, remotePrincipal,
            conf.getInt("ipc.client.connection.maxidletime", 10000), // 10s
            conf.getInt("ipc.client.connect.max.retries", 10),
            conf.getBoolean("ipc.client.tcpnodelay", false),
-           Client.getPingInterval(conf));
+           doPing,
+           (doPing ? Client.getPingInterval(conf) : 0));
      }
      
      private static String getRemotePrincipal(Configuration conf,
@@ -1304,7 +1397,7 @@ public class Client {
                    + protocol.getCanonicalName());
          }
          return SecurityUtil.getServerPrincipal(conf.get(serverKey), address
-             .getAddress().getCanonicalHostName());
+             .getAddress());
        }
        return null;
      }
@@ -1321,12 +1414,13 @@ public class Client {
        if (obj instanceof ConnectionId) {
          ConnectionId that = (ConnectionId) obj;
          return isEqual(this.address, that.address)
+             && this.doPing == that.doPing
              && this.maxIdleTime == that.maxIdleTime
              && this.maxRetries == that.maxRetries
              && this.pingInterval == that.pingInterval
              && isEqual(this.protocol, that.protocol)
-             && this.rpcTimeout == that.rpcTimeout
              && isEqual(this.serverPrincipal, that.serverPrincipal)
+             && this.rpcTimeout == that.rpcTimeout
              && this.tcpNoDelay == that.tcpNoDelay
              && isEqual(this.ticket, that.ticket);
        }
@@ -1337,11 +1431,12 @@ public class Client {
      public int hashCode() {
        int result = 1;
        result = PRIME * result + ((address == null) ? 0 : address.hashCode());
+       result = PRIME * result + ((doPing ? 1231 : 1237));
        result = PRIME * result + maxIdleTime;
        result = PRIME * result + maxRetries;
        result = PRIME * result + pingInterval;
        result = PRIME * result + ((protocol == null) ? 0 : protocol.hashCode());
-       result = PRIME * rpcTimeout;
+       result = PRIME * result + rpcTimeout;
        result = PRIME * result
            + ((serverPrincipal == null) ? 0 : serverPrincipal.hashCode());
        result = PRIME * result + (tcpNoDelay ? 1231 : 1237);

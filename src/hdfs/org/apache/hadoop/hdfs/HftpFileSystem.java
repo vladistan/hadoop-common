@@ -32,7 +32,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.TimeZone;
 
-import org.apache.hadoop.classification.InterfaceAudience;
+//import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -48,6 +48,7 @@ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifie
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenRenewer;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSelector;
 import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.StreamFile;
 import org.apache.hadoop.hdfs.tools.DelegationTokenFetcher;
 import org.apache.hadoop.io.Text;
@@ -61,6 +62,7 @@ import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.security.token.TokenRenewer;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
 import org.apache.hadoop.util.Progressable;
+import org.apache.hadoop.util.ServletUtil;
 import org.xml.sax.Attributes;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
@@ -81,12 +83,12 @@ public class HftpFileSystem extends FileSystem
 
   static {
     HttpURLConnection.setFollowRedirects(true);
-    dtRenewer.start();
   }
 
   public static final Text TOKEN_KIND = new Text("HFTP delegation");
   
   protected UserGroupInformation ugi; 
+  private boolean remoteIsInsecure = false;
   private URI hftpURI;
 
   protected InetSocketAddress nnAddr;
@@ -120,8 +122,9 @@ public class HftpFileSystem extends FileSystem
   }
 
   protected int getDefaultSecurePort() {
-    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_KEY,
-        DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT);
+    return !SecurityUtil.useKsslAuth() ? getDefaultPort() :
+        getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_KEY,
+            DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT);
   }
 
   protected InetSocketAddress getNamenodeAddr(URI uri) {
@@ -150,10 +153,6 @@ public class HftpFileSystem extends FileSystem
     this.nnAddr = getNamenodeAddr(name);
     this.nnSecureAddr = getNamenodeSecureAddr(name);
     this.hftpURI = DFSUtil.createUri(name.getScheme(), nnAddr);
-    
-    if (UserGroupInformation.isSecurityEnabled()) {
-      initDelegationToken();
-    }
   }
   
   protected void initDelegationToken() throws IOException {
@@ -220,15 +219,17 @@ public class HftpFileSystem extends FileSystem
       ugi.checkTGTAndReloginFromKeytab();
       return ugi.doAs(new PrivilegedExceptionAction<Token<?>>() {
         public Token<?> run() throws IOException {
-          final String nnHttpUrl = DFSUtil.createUri("https", nnSecureAddr).toString();
+          final String nnHttpUrl = DFSUtil.createUri(
+              NameNode.getHttpUriScheme(), nnSecureAddr).toString();
           Credentials c;
           try {
             c = DelegationTokenFetcher.getDTfromRemote(nnHttpUrl, renewer);
           } catch (Exception e) {
             LOG.info("Couldn't get a delegation token from " + nnHttpUrl + 
-            " using https.");
+            " using " + NameNode.getHttpUriScheme());
             LOG.debug("error was ", e);
             //Maybe the server is in unsecure mode (that's bad but okay)
+            remoteIsInsecure = true;
             return null;
           }
           for (Token<? extends TokenIdentifier> t : c.getAllTokens()) {
@@ -248,17 +249,35 @@ public class HftpFileSystem extends FileSystem
   public URI getUri() {
     return hftpURI;
   }
-  
+
+  /**
+   * Return a URL pointing to given path on the namenode.
+   *
+   * @param path to obtain the URL for
+   * @param query string to append to the path
+   * @return namenode URL referring to the given path
+   * @throws IOException on error constructing the URL
+   */
+  private URL getNamenodeURL(String path, String query) throws IOException {
+    final URL url = new URL("http", nnAddr.getHostName(),
+        nnAddr.getPort(), path + '?' + query);
+    if (LOG.isTraceEnabled()) {
+      LOG.trace("url=" + url);
+    }
+    return url;
+  }
+
   /**
    * ugi parameter for http connection
    * 
    * @return user_shortname,group1,group2...
    */
-  private String getUgiParameter() {
-    StringBuilder ugiParamenter = new StringBuilder(ugi.getShortUserName());
+  private String getEncodedUgiParameter() {
+    StringBuilder ugiParamenter = new StringBuilder(
+      ServletUtil.encodeQueryValue(ugi.getShortUserName()));
     for(String g: ugi.getGroupNames()) {
       ugiParamenter.append(",");
-      ugiParamenter.append(g);
+      ugiParamenter.append(ServletUtil.encodeQueryValue(g));
     }
     return ugiParamenter.toString();
   }
@@ -279,23 +298,18 @@ public class HftpFileSystem extends FileSystem
    */
   protected HttpURLConnection openConnection(String path, String query)
       throws IOException {
-    try {
-      query = updateQuery(query);
-      final URL url = new URI("http", null, nnAddr.getHostName(),
-          nnAddr.getPort(), path, query, null).toURL();
-      if (LOG.isTraceEnabled()) {
-        LOG.trace("url=" + url);
-      }
-      return (HttpURLConnection)url.openConnection();
-    } catch (URISyntaxException e) {
-      throw (IOException)new IOException().initCause(e);
-    }
+    query = addDelegationTokenParam(query);
+    final URL url = getNamenodeURL(path, query);
+    return (HttpURLConnection)url.openConnection();
   }
   
-  protected String updateQuery(String query) throws IOException {
+  protected String addDelegationTokenParam(String query) throws IOException {
     String tokenString = null;
     if (UserGroupInformation.isSecurityEnabled()) {
       synchronized (this) {
+        if (delegationToken == null && !remoteIsInsecure) {
+          initDelegationToken();
+        }    
         if (delegationToken != null) {
           tokenString = delegationToken.encodeToUrlString();
           return (query + JspHelper.getDelegationTokenUrlParam(tokenString));
@@ -305,66 +319,66 @@ public class HftpFileSystem extends FileSystem
     return query;
   }
 
+  static class RangeHeaderUrlOpener extends ByteRangeInputStream.URLOpener {
+    RangeHeaderUrlOpener(final URL url) {
+      super(url);
+    }
+
+    @Override
+    protected HttpURLConnection openConnection() throws IOException {
+      return (HttpURLConnection)url.openConnection();
+      }
+
+    /** Use HTTP Range header for specifying offset. */
+    @Override
+    protected HttpURLConnection openConnection(final long offset) throws IOException {
+      final HttpURLConnection conn = openConnection();
+      conn.setRequestMethod("GET");
+      if (offset != 0L) {
+        conn.setRequestProperty("Range", "bytes=" + offset + "-");
+      }
+      return conn;
+    }  
+  }
+
+  static class RangeHeaderInputStream extends ByteRangeInputStream {
+    RangeHeaderInputStream(RangeHeaderUrlOpener o, RangeHeaderUrlOpener r) {
+      super(o, r);
+    }
+
+    RangeHeaderInputStream(final URL url) {
+      this(new RangeHeaderUrlOpener(url), new RangeHeaderUrlOpener(null));
+    }
+
+    /** Expects HTTP_OK and HTTP_PARTIAL response codes. */
+    @Override
+    protected void checkResponseCode(final HttpURLConnection connection
+        ) throws IOException {
+      final int code = connection.getResponseCode();
+      if (startPos != 0 && code != HttpURLConnection.HTTP_PARTIAL) {
+        // We asked for a byte range but did not receive a partial content
+        // response...
+        throw new IOException("HTTP_PARTIAL expected, received " + code);
+      } else if (startPos == 0 && code != HttpURLConnection.HTTP_OK) {
+        // We asked for all bytes from the beginning but didn't receive a 200
+        // response (none of the other 2xx codes are valid here)
+        throw new IOException("HTTP_OK expected, received " + code);
+      }
+    }
+
+    @Override
+    protected URL getResolvedUrl(final HttpURLConnection connection) {
+      return connection.getURL();
+    }
+  }
+
   @Override
   public FSDataInputStream open(Path f, int buffersize) throws IOException {
-    final HttpURLConnection connection = openConnection(
-        "/data" + f.makeQualified(this).toUri().getPath(),
-        "ugi=" + getUgiParameter());
-    final InputStream in;
-    try {
-      connection.setRequestMethod("GET");
-      connection.connect();
-      in = connection.getInputStream();
-    } catch(IOException ioe) {
-      final int code = connection.getResponseCode();
-      final String s = connection.getResponseMessage();
-      throw s == null? ioe:
-          new IOException(s + " (error code=" + code + ")", ioe);
-    }
-
-    final String cl = connection.getHeaderField(StreamFile.CONTENT_LENGTH);
-    final long filelength = cl == null? -1: Long.parseLong(cl);
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("filelength = " + filelength);
-    }
-
-    return new FSDataInputStream(new FSInputStream() {
-        long currentPos = 0;
-
-        private void update(final boolean isEOF, final int n
-            ) throws IOException {
-          if (!isEOF) {
-            currentPos += n;
-          } else if (currentPos < filelength) {
-            throw new IOException("Got EOF but byteread = " + currentPos
-                + " < filelength = " + filelength);
-          }
-        }
-        public int read() throws IOException {
-          final int b = in.read();
-          update(b == -1, 1);
-          return b;
-        }
-        public int read(byte[] b, int off, int len) throws IOException {
-          final int n = in.read(b, off, len);
-          update(n == -1, n);
-          return n;
-        }
-
-        public void close() throws IOException {
-          in.close();
-        }
-
-        public void seek(long pos) throws IOException {
-          throw new IOException("Can't seek!");
-        }
-        public long getPos() throws IOException {
-          throw new IOException("Position unknown!");
-        }
-        public boolean seekToNewSource(long targetPos) throws IOException {
-          return false;
-        }
-      });
+    f = f.makeQualified(getUri(), getWorkingDirectory());
+    String path = "/data" + ServletUtil.encodePath(f.toUri().getPath());
+    String query = addDelegationTokenParam("ugi=" + getEncodedUgiParameter());
+    URL u = getNamenodeURL(path, query);    
+    return new FSDataInputStream(new RangeHeaderInputStream(u));
   }
 
   /** Class to parse and store a listing reply from the server. */
@@ -412,8 +426,8 @@ public class HftpFileSystem extends FileSystem
       try {
         XMLReader xr = XMLReaderFactory.createXMLReader();
         xr.setContentHandler(this);
-        HttpURLConnection connection = openConnection("/listPaths" + path,
-            "ugi=" + getUgiParameter() + (recur? "&recursive=yes" : ""));
+        HttpURLConnection connection = openConnection("/listPaths" + ServletUtil.encodePath(path),
+            "ugi=" + getEncodedUgiParameter() + (recur? "&recursive=yes" : ""));
         connection.setRequestMethod("GET");
         connection.connect();
 
@@ -479,7 +493,7 @@ public class HftpFileSystem extends FileSystem
 
     private FileChecksum getFileChecksum(String f) throws IOException {
       final HttpURLConnection connection = openConnection(
-          "/fileChecksum" + f, "ugi=" + getUgiParameter());
+          "/fileChecksum" + ServletUtil.encodePath(f), "ugi=" + getEncodedUgiParameter());
       try {
         final XMLReader xr = XMLReaderFactory.createXMLReader();
         xr.setContentHandler(this);
@@ -580,7 +594,7 @@ public class HftpFileSystem extends FileSystem
      */
     private ContentSummary getContentSummary(String path) throws IOException {
       final HttpURLConnection connection = openConnection(
-          "/contentSummary" + path, "ugi=" + getUgiParameter());
+          "/contentSummary" + ServletUtil.encodePath(path), "ugi=" + getEncodedUgiParameter());
       InputStream in = null;
       try {
         in = connection.getInputStream();        
@@ -651,7 +665,7 @@ public class HftpFileSystem extends FileSystem
     return cs != null? cs: super.getContentSummary(f);
   }
   
-  @InterfaceAudience.Private
+  //@InterfaceAudience.Private
   public static class TokenManager extends TokenRenewer {
 
     @Override
@@ -670,12 +684,11 @@ public class HftpFileSystem extends FileSystem
                       Configuration conf) throws IOException {
       // update the kerberos credentials, if they are coming from a keytab
       UserGroupInformation.getLoginUser().checkTGTAndReloginFromKeytab();
-      // use https to renew the token
+      // use http/s to renew the token
       InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
       return DelegationTokenFetcher.renewDelegationToken(
-          DFSUtil.createUri("https", serviceAddr).toString(),
-          (Token<DelegationTokenIdentifier>) token
-      );
+          DFSUtil.createUri(NameNode.getHttpUriScheme(), serviceAddr).toString(),
+          (Token<DelegationTokenIdentifier>) token);
     }
 
     @SuppressWarnings("unchecked")
@@ -684,12 +697,11 @@ public class HftpFileSystem extends FileSystem
                        Configuration conf) throws IOException {
       // update the kerberos credentials, if they are coming from a keytab
       UserGroupInformation.getLoginUser().checkTGTAndReloginFromKeytab();
-      // use https to cancel the token
+      // use http/s to cancel the token
       InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
       DelegationTokenFetcher.cancelDelegationToken(
-          DFSUtil.createUri("https", serviceAddr).toString(), 
-          (Token<DelegationTokenIdentifier>) token
-      );
+          DFSUtil.createUri(NameNode.getHttpUriScheme(), serviceAddr).toString(),
+          (Token<DelegationTokenIdentifier>) token);
     }
     
   }

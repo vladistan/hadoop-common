@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
 # this work for additional information regarding copyright ownership.
@@ -50,16 +49,9 @@
 bin=`dirname "$0"`
 bin=`cd "$bin"; pwd`
 
-if [ -e "$bin"/../libexec/hadoop-config.sh ]; then
-  . "$bin"/../libexec/hadoop-config.sh
-else
-  . "$bin"/hadoop-config.sh
-fi
+. "$bin"/hadoop-config.sh
 
-if [ "$HADOOP_HOME_WARN_SUPPRESS" == "" ] && [ "$HADOOP_HOME" != "" ]; then
-  echo "Warning: \$HADOOP_HOME is deprecated." 1>&2
-  echo 1>&2
-fi
+HADOOP_IDENT_STRING=${HADOOP_IDENT_STRING:-$USER}
 
 cygwin=false
 case "`uname`" in
@@ -83,14 +75,16 @@ if [ $# = 0 ]; then
   echo "  jobtracker           run the MapReduce job Tracker node" 
   echo "  pipes                run a Pipes job"
   echo "  tasktracker          run a MapReduce task Tracker node" 
-  echo "  historyserver        run job history servers as a standalone daemon"
   echo "  job                  manipulate MapReduce jobs"
   echo "  queue                get information regarding JobQueues" 
   echo "  version              print the version"
   echo "  jar <jar>            run a jar file"
   echo "  distcp <srcurl> <desturl> copy file or directories recursively"
   echo "  archive -archiveName NAME -p <parent path> <src>* <dest> create a hadoop archive"
+  echo "  oiv                  apply the offline fsimage viewer to an fsimage"
   echo "  classpath            prints the class path needed to get the"
+  echo "  dfsgroups            get the groups which users belong to on the Name Node"
+  echo "  mrgroups             get the groups which users belong to on the Job Tracker"
   echo "                       Hadoop jar and the required libraries"
   echo "  daemonlog            get/set the log level for each daemon"
   echo " or"
@@ -105,14 +99,6 @@ shift
 
 if [ -f "${HADOOP_CONF_DIR}/hadoop-env.sh" ]; then
   . "${HADOOP_CONF_DIR}/hadoop-env.sh"
-fi
-
-# Determine if we're starting a secure datanode, and if so, redefine appropriate variables
-if [ "$COMMAND" == "datanode" ] && [ "$EUID" -eq 0 ] && [ -n "$HADOOP_SECURE_DN_USER" ]; then
-  HADOOP_PID_DIR=$HADOOP_SECURE_DN_PID_DIR
-  HADOOP_LOG_DIR=$HADOOP_SECURE_DN_LOG_DIR
-  HADOOP_IDENT_STRING=$HADOOP_SECURE_DN_USER
-  starting_secure_dn="true"
 fi
 
 # some Java parameters
@@ -138,10 +124,10 @@ fi
 
 # CLASSPATH initially contains $HADOOP_CONF_DIR
 CLASSPATH="${HADOOP_CONF_DIR}"
+CLASSPATH=${CLASSPATH}:$JAVA_HOME/lib/tools.jar
 if [ "$HADOOP_USER_CLASSPATH_FIRST" != "" ] && [ "$HADOOP_CLASSPATH" != "" ] ; then
   CLASSPATH=${CLASSPATH}:${HADOOP_CLASSPATH}
 fi
-CLASSPATH=${CLASSPATH}:$JAVA_HOME/lib/tools.jar
 
 # for developers, add Hadoop classes to CLASSPATH
 if [ -d "$HADOOP_HOME/build/classes" ]; then
@@ -161,66 +147,39 @@ fi
 IFS=
 
 # for releases, add core hadoop jar & webapps to CLASSPATH
-if [ -e $HADOOP_PREFIX/share/hadoop/hadoop-core-* ]; then
-  # binary layout
-  if [ -d "$HADOOP_PREFIX/share/hadoop/webapps" ]; then
-    CLASSPATH=${CLASSPATH}:$HADOOP_PREFIX/share/hadoop
-  fi
-  for f in $HADOOP_PREFIX/share/hadoop/hadoop-core-*.jar; do
-    CLASSPATH=${CLASSPATH}:$f;
-  done
-
-  # add libs to CLASSPATH
-  for f in $HADOOP_PREFIX/share/hadoop/lib/*.jar; do
-    CLASSPATH=${CLASSPATH}:$f;
-  done
-
-  for f in $HADOOP_PREFIX/share/hadoop/lib/jsp-2.1/*.jar; do
-    CLASSPATH=${CLASSPATH}:$f;
-  done
-
-  for f in $HADOOP_PREFIX/share/hadoop/hadoop-tools-*.jar; do
-    TOOL_PATH=${TOOL_PATH}:$f;
-  done
-else
-  # tarball layout
-  if [ -d "$HADOOP_HOME/webapps" ]; then
-    CLASSPATH=${CLASSPATH}:$HADOOP_HOME
-  fi
-  for f in $HADOOP_HOME/hadoop-core-*.jar; do
-    CLASSPATH=${CLASSPATH}:$f;
-  done
-
-  # add libs to CLASSPATH
-  for f in $HADOOP_HOME/lib/*.jar; do
-    CLASSPATH=${CLASSPATH}:$f;
-  done
-
-  if [ -d "$HADOOP_HOME/build/ivy/lib/Hadoop/common" ]; then
-    for f in $HADOOP_HOME/build/ivy/lib/Hadoop/common/*.jar; do
-      CLASSPATH=${CLASSPATH}:$f;
-    done
-  fi
-
-  for f in $HADOOP_HOME/lib/jsp-2.1/*.jar; do
-    CLASSPATH=${CLASSPATH}:$f;
-  done
-
-  for f in $HADOOP_HOME/hadoop-tools-*.jar; do
-    TOOL_PATH=${TOOL_PATH}:$f;
-  done
-  for f in $HADOOP_HOME/build/hadoop-tools-*.jar; do
-    TOOL_PATH=${TOOL_PATH}:$f;
-  done
+if [ -d "$HADOOP_HOME/webapps" ]; then
+  CLASSPATH=${CLASSPATH}:$HADOOP_HOME
 fi
+for f in $HADOOP_HOME/hadoop-core-*.jar; do
+  CLASSPATH=${CLASSPATH}:$f;
+done
+
+# add libs to CLASSPATH
+for f in $HADOOP_HOME/lib/*.jar; do
+  CLASSPATH=${CLASSPATH}:$f;
+done
+
+if [ -d "$HADOOP_HOME/build/ivy/lib/Hadoop/common" ]; then
+for f in $HADOOP_HOME/build/ivy/lib/Hadoop/common/*.jar; do
+  CLASSPATH=${CLASSPATH}:$f;
+done
+fi
+
+for f in $HADOOP_HOME/lib/jsp-2.1/*.jar; do
+  CLASSPATH=${CLASSPATH}:$f;
+done
+
+for f in $HADOOP_HOME/hadoop-tools-*.jar; do
+  TOOL_PATH=${TOOL_PATH}:$f;
+done
+for f in $HADOOP_HOME/build/hadoop-tools-*.jar; do
+  TOOL_PATH=${TOOL_PATH}:$f;
+done
 
 # add user-specified CLASSPATH last
 if [ "$HADOOP_USER_CLASSPATH_FIRST" = "" ] && [ "$HADOOP_CLASSPATH" != "" ]; then
   CLASSPATH=${CLASSPATH}:${HADOOP_CLASSPATH}
 fi
-
-# adding TOOL_PATH to CLASSPATH. TOOL_PATH is added after HADOOP_CLASSPATH.
-CLASSPATH=${CLASSPATH}:${TOOL_PATH}
 
 # default log directory & file
 if [ "$HADOOP_LOG_DIR" = "" ]; then
@@ -253,11 +212,7 @@ elif [ "$COMMAND" = "secondarynamenode" ] ; then
   HADOOP_OPTS="$HADOOP_OPTS $HADOOP_SECONDARYNAMENODE_OPTS"
 elif [ "$COMMAND" = "datanode" ] ; then
   CLASS='org.apache.hadoop.hdfs.server.datanode.DataNode'
-  if [ "$starting_secure_dn" = "true" ]; then
-    HADOOP_OPTS="$HADOOP_OPTS -jvm server $HADOOP_DATANODE_OPTS"
-  else
-    HADOOP_OPTS="$HADOOP_OPTS -server $HADOOP_DATANODE_OPTS"
-  fi
+  HADOOP_OPTS="$HADOOP_OPTS $HADOOP_DATANODE_OPTS"
 elif [ "$COMMAND" = "fs" ] ; then
   CLASS=org.apache.hadoop.fs.FsShell
   HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
@@ -281,9 +236,6 @@ elif [ "$COMMAND" = "fetchdt" ] ; then
 elif [ "$COMMAND" = "jobtracker" ] ; then
   CLASS=org.apache.hadoop.mapred.JobTracker
   HADOOP_OPTS="$HADOOP_OPTS $HADOOP_JOBTRACKER_OPTS"
-elif [ "$COMMAND" = "historyserver" ] ; then
-  CLASS=org.apache.hadoop.mapred.JobHistoryServer
-  HADOOP_OPTS="$HADOOP_OPTS $HADOOP_JOB_HISTORYSERVER_OPTS"
 elif [ "$COMMAND" = "tasktracker" ] ; then
   CLASS=org.apache.hadoop.mapred.TaskTracker
   HADOOP_OPTS="$HADOOP_OPTS $HADOOP_TASKTRACKER_OPTS"
@@ -304,18 +256,35 @@ elif [ "$COMMAND" = "jar" ] ; then
   HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
 elif [ "$COMMAND" = "distcp" ] ; then
   CLASS=org.apache.hadoop.tools.DistCp
+  CLASSPATH=${CLASSPATH}:${TOOL_PATH}
   HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
 elif [ "$COMMAND" = "daemonlog" ] ; then
   CLASS=org.apache.hadoop.log.LogLevel
   HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
 elif [ "$COMMAND" = "archive" ] ; then
   CLASS=org.apache.hadoop.tools.HadoopArchives
+  CLASSPATH=${CLASSPATH}:${TOOL_PATH}
+  HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
+elif [ "$COMMAND" = "oiv" ] ; then
+  CLASS=org.apache.hadoop.hdfs.tools.offlineImageViewer.OfflineImageViewer
+  CLASSPATH=${CLASSPATH}:${TOOL_PATH}
   HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
 elif [ "$COMMAND" = "sampler" ] ; then
   CLASS=org.apache.hadoop.mapred.lib.InputSampler
   HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
+elif [ "$COMMAND" = "dfsgroups" ] ; then
+  CLASS=org.apache.hadoop.hdfs.tools.GetGroups
+  HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
+elif [ "$COMMAND" = "mrgroups" ] ; then
+  CLASS=org.apache.hadoop.mapred.tools.GetGroups
+  HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
+elif [[ "$COMMAND" = -*  ]] ; then
+  # class and package names cannot begin with a -
+  echo "Error: No command named \`$COMMAND' was found. Perhaps you meant \`hadoop ${COMMAND#-}'"
+  exit 1
 else
   CLASS=$COMMAND
+  HADOOP_OPTS="$HADOOP_OPTS $HADOOP_CLIENT_OPTS"
 fi
 
 # cygwin path translation
@@ -324,20 +293,19 @@ if $cygwin; then
   HADOOP_HOME=`cygpath -w "$HADOOP_HOME"`
   HADOOP_LOG_DIR=`cygpath -w "$HADOOP_LOG_DIR"`
   TOOL_PATH=`cygpath -p -w "$TOOL_PATH"`
+  JAVA_LIBRARY_PATH=`cygpath -p -w "$JAVA_LIBRARY_PATH"`
 fi
+
 # setup 'java.library.path' for native-hadoop code if necessary
-JAVA_LIBRARY_PATH=''
-if [ -d "${HADOOP_HOME}/build/native" -o -d "${HADOOP_HOME}/lib/native" -o -e "${HADOOP_PREFIX}/lib/libhadoop.a" ]; then
+if [ -d "${HADOOP_HOME}/build/native" -o -d "${HADOOP_HOME}/lib/native" -o -d "${HADOOP_HOME}/sbin" ]; then
   JAVA_PLATFORM=`CLASSPATH=${CLASSPATH} ${JAVA} -Xmx32m ${HADOOP_JAVA_PLATFORM_OPTS} org.apache.hadoop.util.PlatformName | sed -e "s/ /_/g"`
   
-  if [ "$JAVA_PLATFORM" = "Linux-amd64-64" ]; then
-    JSVC_ARCH="amd64"
-  else
-    JSVC_ARCH="i386"
-  fi
-
   if [ -d "$HADOOP_HOME/build/native" ]; then
-    JAVA_LIBRARY_PATH=${HADOOP_HOME}/build/native/${JAVA_PLATFORM}/lib
+    if [ "x$JAVA_LIBRARY_PATH" != "x" ]; then
+        JAVA_LIBRARY_PATH=${JAVA_LIBRARY_PATH}:${HADOOP_HOME}/build/native/${JAVA_PLATFORM}/lib
+    else
+        JAVA_LIBRARY_PATH=${HADOOP_HOME}/build/native/${JAVA_PLATFORM}/lib
+    fi
   fi
   
   if [ -d "${HADOOP_HOME}/lib/native" ]; then
@@ -348,9 +316,7 @@ if [ -d "${HADOOP_HOME}/build/native" -o -d "${HADOOP_HOME}/lib/native" -o -e "$
     fi
   fi
 
-  if [ -e "${HADOOP_PREFIX}/lib/libhadoop.a" ]; then
-    JAVA_LIBRARY_PATH=${HADOOP_PREFIX}/lib
-  fi
+  _JSVC_PATH=${HADOOP_HOME}/sbin/${JAVA_PLATFORM}/jsvc
 fi
 
 # cygwin path translation
@@ -376,23 +342,137 @@ if [ "x$JAVA_LIBRARY_PATH" != "x" ]; then
 fi  
 HADOOP_OPTS="$HADOOP_OPTS -Dhadoop.policy.file=$HADOOP_POLICYFILE"
 
-# Check to see if we should start a secure datanode
-if [ "$starting_secure_dn" = "true" ]; then
-  if [ "$HADOOP_PID_DIR" = "" ]; then
-    HADOOP_SECURE_DN_PID="/tmp/hadoop_secure_dn.pid"
-  else
-    HADOOP_SECURE_DN_PID="$HADOOP_PID_DIR/hadoop_secure_dn.pid"
+# Disable ipv6 as it can cause issues
+HADOOP_OPTS="$HADOOP_OPTS -Djava.net.preferIPv4Stack=true"
+
+###########################################################################
+# DAEMON SETTINGS
+###########################################################################
+# For any command that ends in 'node', we are starting one of the daemons.
+# In this case, we do some special processing in order to automatically
+# setuid to the correct user.
+#
+# The user itself is determined as one of the following, in descending
+# precedence:
+#  HADOOP_<node>NODE_USER variable
+#  the current userid, so long as that userid is not root
+#
+# After the above is determined, it is stored into the local variable
+# _HADOOP_DAEMON_USER
+#
+# We also need to determine the "run mode". This can be one of the following:
+#
+#  "jsvc" - only supported for the datanode - we use the jsvc wrapper in
+#           the sbin/<platform> directory in order to setuid to the target
+#           user. Requires that this script is running as root.
+#  "su" -   supported only when running as root and /bin/su exists.
+#           Uses su in order to assume the identity of the daemon user.
+#  "normal" - supported only when already running as the target user.
+###########################################################################
+if [[ "$COMMAND" == *node ]] || [[ "$COMMAND" == *tracker ]]; then
+  command_uc=$(echo $COMMAND| tr a-z A-Z)
+  user_var="HADOOP_${command_uc}_USER"
+  _HADOOP_DAEMON_USER=$(eval "echo \$$user_var")
+  _HADOOP_DAEMON_USER=${_HADOOP_DAEMON_USER:-$(id -un)}
+
+  if [ -z "$_HADOOP_DAEMON_USER" ]; then
+    echo Please specify a user to run the $COMMAND by setting $user_var
+    exit 1
+  elif  [ "$_HADOOP_DAEMON_USER" == "root" ]; then
+    echo May not run daemons as root. Please specify $user_var
+    exit 1
   fi
 
-  exec "$HADOOP_HOME/libexec/jsvc.${JSVC_ARCH}" -Dproc_$COMMAND -outfile "$HADOOP_LOG_DIR/jsvc.out" \
-                                                -errfile "$HADOOP_LOG_DIR/jsvc.err" \
-                                                -pidfile "$HADOOP_SECURE_DN_PID" \
-                                                -nodetach \
-                                                -user "$HADOOP_SECURE_DN_USER" \
-                                                -cp "$CLASSPATH" \
-                                                $JAVA_HEAP_MAX $HADOOP_OPTS \
-                                                org.apache.hadoop.hdfs.server.datanode.SecureDataNodeStarter "$@"
+  if [ "$EUID" = "0" ] ; then
+    if [ "$COMMAND" == "datanode" ] && [ -x "$_JSVC_PATH" ]; then
+      _HADOOP_RUN_MODE="jsvc"
+    elif [ -x /bin/su ]; then
+      _HADOOP_RUN_MODE="su"
+    else
+      echo "Daemon wants to run as $_HADOOP_DAEMON_USER but script is running as root"
+      echo "and su is not available."
+      exit 1
+    fi
+  else
+    # We must be running as the user we want to run as, if we can't use jsvc or su
+    # to drop privileges
+    if [ "$_HADOOP_DAEMON_USER" != "$(whoami)" ]; then
+      echo Daemon wants to run as $_HADOOP_DAEMON_USER but not running as that user or root.
+      exit 1
+    fi
+    _HADOOP_RUN_MODE="normal"
+  fi
 else
-  # run it
-  exec "$JAVA" -Dproc_$COMMAND $JAVA_HEAP_MAX $HADOOP_OPTS -classpath "$CLASSPATH" $CLASS "$@"
+  # Normal client command
+  _HADOOP_RUN_MODE="normal"
 fi
+
+###########################################################################
+# Actually run the JVM
+###########################################################################
+case "$_HADOOP_RUN_MODE" in
+  jsvc)
+    case "$COMMAND" in
+      datanode)
+        _JSVC_STARTER_CLASS=org.apache.hadoop.hdfs.server.datanode.SecureDataNodeStarter
+      ;;
+      *)
+        echo "Cannot start $COMMAND with jsvc"
+        exit 1
+      ;;
+    esac
+
+    if [ "$_HADOOP_DAEMON_DETACHED" = "true" ]; then
+      _JSVC_FLAGS="-pidfile $_HADOOP_DAEMON_PIDFILE
+                  -errfile &1
+                  -outfile $_HADOOP_DAEMON_OUT"
+    else
+      # Even though we are trying to run a non-detached datanode,
+      # jsvc will not write to stdout/stderr, so we have to pipe
+      # it and tail the logfile.
+      _JSVC_FLAGS="-nodetach
+                   -errfile &1
+                   -outfile $HADOOP_LOG_DIR/jsvc.out"
+      echo Non-detached jsvc output piping to: $HADOOP_LOG_DIR/jsvc.out
+      touch $HADOOP_LOG_DIR/jsvc.out
+      tail -f --pid=$$ $HADOOP_LOG_DIR/jsvc.out &
+    fi
+    unset _HADOOP_DAEMON_DETACHED
+
+    exec "$_JSVC_PATH" -Dproc_$COMMAND \
+                       $_JSVC_FLAGS \
+                       -user "$_HADOOP_DAEMON_USER" \
+                       -cp "$CLASSPATH" \
+                       $JAVA_HEAP_MAX $HADOOP_OPTS \
+                       $_JSVC_STARTER_CLASS "$@"
+  ;;
+
+  normal | su)
+    # If we need to su, tack the command into a local variable
+    if [ $_HADOOP_RUN_MODE = "su" ]; then
+      _JAVA_EXEC="su $_HADOOP_DAEMON_USER -s $JAVA --"
+    else
+      _JAVA_EXEC="$JAVA"
+    fi
+
+    if [ "$_HADOOP_DAEMON_DETACHED" = "true" ]; then
+      unset _HADOOP_DAEMON_DETACHED
+      touch $_HADOOP_DAEMON_OUT
+      nohup $_JAVA_EXEC -Dproc_$COMMAND $JAVA_HEAP_MAX $HADOOP_OPTS -classpath "$CLASSPATH" $CLASS "$@" > "$_HADOOP_DAEMON_OUT" 2>&1 < /dev/null &
+      if [ "$EUID" == "0" ]; then
+        chown $_HADOOP_DAEMON_USER $_HADOOP_DAEMON_OUT
+      fi
+      echo $! > "$_HADOOP_DAEMON_PIDFILE"
+      sleep 1
+      head "$_HADOOP_DAEMON_OUT"
+    else
+      # For normal operation, just run the command
+      exec $_JAVA_EXEC -Dproc_$COMMAND $JAVA_HEAP_MAX $HADOOP_OPTS -classpath "$CLASSPATH" $CLASS "$@"
+    fi
+  ;;
+
+  *)
+    echo Bad run mode: $_HADOOP_RUN_MODE
+    exit 1
+  ;;
+esac

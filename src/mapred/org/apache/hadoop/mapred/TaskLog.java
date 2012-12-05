@@ -23,9 +23,11 @@ import java.io.BufferedReader;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.FileReader;
+import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
@@ -38,11 +40,13 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.ChecksumFileSystem;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.SecureIOUtils;
 import org.apache.hadoop.mapreduce.JobID;
@@ -80,6 +84,20 @@ public class TaskLog {
   static AtomicInteger rotor = new AtomicInteger(0);
 
   /**
+   * Path filter that filters out userlogs directory For the time-being, it also
+   * filters out Checksum files. The checksum filtering should be removed once
+   * HADOOP-8649 is committed.
+   */
+  public static final PathFilter USERLOGS_PATH_FILTER = new PathFilter() {
+    @Override
+    public boolean accept(Path path) {
+      boolean userlogsAccept = !path.toString().contains(USERLOGS_DIR_NAME);
+      boolean checksumAccept = !ChecksumFileSystem.isChecksumFile(path);
+      return userlogsAccept && checksumAccept;
+    }
+  };
+
+  /**
    * Create log directory for the given attempt. This involves creating the
    * following and setting proper permissions for the new directories
    * <br>{hadoop.log.dir}/userlogs/<jobid>
@@ -93,7 +111,7 @@ public class TaskLog {
    * @throws IOException
    */
   public static void createTaskAttemptLogDir(TaskAttemptID taskID,
-      boolean isCleanup, String[] localDirs) throws IOException{
+      boolean isCleanup, String[] localDirs) throws IOException {
     String cleanupSuffix = isCleanup ? ".cleanup" : "";
     String strAttemptLogDir = getTaskAttemptLogDir(taskID, 
         cleanupSuffix, localDirs);
@@ -101,8 +119,8 @@ public class TaskLog {
     if (!attemptLogDir.mkdirs()) {
       throw new IOException("Creation of " + attemptLogDir + " failed.");
     }
-    String strLinkAttemptLogDir = 
-        getJobDir(taskID.getJobID()).getAbsolutePath() + File.separatorChar + 
+    String strLinkAttemptLogDir = getJobDir(
+        taskID.getJobID()).getAbsolutePath() + File.separatorChar + 
         taskID.toString() + cleanupSuffix;
     if (FileUtil.symLink(strAttemptLogDir, strLinkAttemptLogDir) != 0) {
       throw new IOException("Creation of symlink from " + 
@@ -110,9 +128,9 @@ public class TaskLog {
                             " failed.");
     }
 
-    //Set permissions for target attempt log dir 
-    FsPermission userOnly = new FsPermission((short) 0700);
-    FileUtil.setPermission(attemptLogDir, userOnly);
+    FileSystem localFs = FileSystem.getLocal(new Configuration());
+    localFs.setPermission(new Path(attemptLogDir.getPath()),
+                          new FsPermission((short)0700));
   }
 
   /**
@@ -121,8 +139,8 @@ public class TaskLog {
    * @return the next chosen mapred local directory
    * @throws IOException
    */
-  private static String getNextLocalDir(String[] localDirs) throws IOException{
-    if(localDirs.length == 0) {
+  private static String getNextLocalDir(String[] localDirs) throws IOException {
+    if (localDirs.length == 0) {
       throw new IOException ("Not enough mapred.local.dirs ("
                              + localDirs.length + ")");
     }
@@ -184,8 +202,21 @@ public class TaskLog {
         new HashMap<LogName, LogFileDetail>();
 
     File indexFile = getIndexFile(taskid, isCleanup);
-    BufferedReader fis = new BufferedReader(new InputStreamReader(
-      SecureIOUtils.openForRead(indexFile, obtainLogDirOwner(taskid))));
+    BufferedReader fis;
+    try {
+       fis = new BufferedReader(new FileReader(indexFile));
+    } catch (FileNotFoundException ex) {
+      LOG.warn("Index file for the log of " + taskid + " does not exist.");
+
+      //Assume no task reuse is used and files exist on attemptdir
+      StringBuffer input = new StringBuffer();
+      input.append(LogFileDetail.LOCATION
+                     + getAttemptDir(taskid, isCleanup) + "\n");
+      for (LogName logName : LOGS_TRACKED_BY_INDEX_FILES) {
+        input.append(logName + ":0 -1\n");
+      }
+      fis = new BufferedReader(new StringReader(input.toString()));
+    }
     //the format of the index file is
     //LOG_DIR: <the dir where the task logs are really stored>
     //stdout:<start-offset in the stdout file> <length>
@@ -193,7 +224,7 @@ public class TaskLog {
     //syslog:<start-offset in the syslog file> <length>
     String str = fis.readLine();
     if (str == null) { //the file doesn't have anything
-      throw new IOException ("Index file for the log of " + taskid+" doesn't exist.");
+      throw new IOException ("Index file for the log of " + taskid+" is empty.");
     }
     String loc = str.substring(str.indexOf(LogFileDetail.LOCATION)+
         LogFileDetail.LOCATION.length());
@@ -242,16 +273,14 @@ public class TaskLog {
    * determined by checking the job's log directory.
    */
   static String obtainLogDirOwner(TaskAttemptID taskid) throws IOException {
-    if (localFS == null) {
-      localFS = FileSystem.getLocal(new Configuration());
-    }
-    FileSystem raw = localFS.getRaw();
+    Configuration conf = new Configuration();
+    FileSystem raw = FileSystem.getLocal(conf).getRaw();
     Path jobLogDir = new Path(getJobDir(taskid.getJobID()).getAbsolutePath());
     FileStatus jobStat = raw.getFileStatus(jobLogDir);
     return jobStat.getOwner();
   }
 
-  public static String getBaseLogDir() {
+  static String getBaseLogDir() {
     return System.getProperty("hadoop.log.dir");
   }
 
@@ -264,6 +293,7 @@ public class TaskLog {
   static File getAttemptDir(String jobid, String taskid) {
     // taskid should be fully formed and it should have the optional 
     // .cleanup suffix
+    // TODO(todd) should this have cleanup suffix?
     return new File(getJobDir(jobid), taskid);
   }
 
@@ -284,11 +314,9 @@ public class TaskLog {
     }
   }
   
-  static synchronized 
-  void writeToIndexFile(String logLocation,
-                        TaskAttemptID currentTaskid, 
-                        boolean isCleanup,
-                        Map<LogName, Long[]> lengths) throws IOException {
+  static void writeToIndexFile(String logLocation,
+      TaskAttemptID currentTaskid, boolean isCleanup,
+      Map<LogName, Long[]> lengths) throws IOException {
     // To ensure atomicity of updates to index file, write to temporary index
     // file first and then rename.
     File tmpIndexFile = getTmpIndexFile(currentTaskid, isCleanup);

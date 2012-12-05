@@ -37,15 +37,16 @@ import org.apache.hadoop.filecache.DistributedCache;
 import org.apache.hadoop.filecache.TaskDistributedCacheManager;
 import org.apache.hadoop.filecache.TrackerDistributedCacheManager;
 import org.apache.hadoop.mapreduce.security.TokenCache;
-import org.apache.hadoop.mapreduce.server.tasktracker.Localizer;
 import org.apache.hadoop.fs.FSError;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.LocalDirAllocator;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.log4j.Level;
 
 /** Base class that runs a task in a separate process.  Tasks are run in a
  * separate process in order to isolate the map/reduce system code from bugs in
@@ -53,26 +54,6 @@ import org.apache.hadoop.util.StringUtils;
  */
 abstract class TaskRunner extends Thread {
 
-  static final String MAPRED_MAP_ADMIN_JAVA_OPTS =
-    "mapreduce.admin.map.child.java.opts";
-
-  static final String MAPRED_REDUCE_ADMIN_JAVA_OPTS =
-    "mapreduce.admin.reduce.child.java.opts";
-
-  static final String DEFAULT_MAPRED_ADMIN_JAVA_OPTS =
-    "-Djava.net.preferIPv4Stack=true " +
-    "-Dhadoop.metrics.log.level=WARN ";
-
-  static final String MAPRED_ADMIN_USER_SHELL =
-    "mapreduce.admin.user.shell";
-  
-  static final String DEFAULT_SHELL = "/bin/bash";
-  
-  static final String MAPRED_ADMIN_USER_HOME_DIR =
-    "mapreduce.admin.user.home.dir";
-
-  static final String DEFAULT_HOME_DIR= "/homes/";
-  
   static final String HADOOP_WORK_DIR = "HADOOP_WORK_DIR";
   
   static final String MAPRED_ADMIN_USER_ENV =
@@ -182,7 +163,14 @@ abstract class TaskRunner extends Thread {
   public String getChildEnv(JobConf jobConf) {
     return jobConf.get(JobConf.MAPRED_TASK_ENV);
   }
-  
+
+  /**
+   * Get the log {@link Level} for the child map/reduce tasks.
+   * @param jobConf
+   * @return the log-level for the child map/reduce tasks
+   */
+  public abstract Level getLogLevel(JobConf jobConf);
+
   @Override
   public final void run() {
     String errorInfo = "Child Error";
@@ -200,7 +188,6 @@ abstract class TaskRunner extends Thread {
           taskid.toString(),
           t.isTaskCleanupTask())).toString());
       
-      String user = tip.getUGI().getUserName();
       
       // Set up the child task's configuration. After this call, no localization
       // of files should happen in the TaskTracker's process space. Any changes to
@@ -232,20 +219,12 @@ abstract class TaskRunner extends Thread {
                  stderr);
       
       Map<String, String> env = new HashMap<String, String>();
-      errorInfo = getVMEnvironment(errorInfo, user, workDir, conf, env, taskid,
+      errorInfo = getVMEnvironment(errorInfo, workDir, conf, env, taskid,
                                    logSize);
       
       // flatten the env as a set of export commands
       List <String> setupCmds = new ArrayList<String>();
-      for(Entry<String, String> entry : env.entrySet()) {
-        StringBuffer sb = new StringBuffer();
-        sb.append("export ");
-        sb.append(entry.getKey());
-        sb.append("=\"");
-        sb.append(entry.getValue());
-        sb.append("\"");
-        setupCmds.add(sb.toString());
-      }
+      appendEnvExports(setupCmds, env);
       setupCmds.add(setup);
       
       launchJvmAndWait(setupCmds, vargs, stdout, stderr, logSize, workDir);
@@ -262,7 +241,7 @@ abstract class TaskRunner extends Thread {
     } catch (FSError e) {
       LOG.fatal("FSError", e);
       try {
-        tracker.fsErrorInternal(t.getTaskID(), e.getMessage());
+        tracker.internalFsError(t.getTaskID(), e.getMessage());
       } catch (IOException ie) {
         LOG.fatal(t.getTaskID()+" reporting FSError", ie);
       }
@@ -272,7 +251,7 @@ abstract class TaskRunner extends Thread {
       ByteArrayOutputStream baos = new ByteArrayOutputStream();
       causeThrowable.printStackTrace(new PrintStream(baos));
       try {
-        tracker.reportDiagnosticInfoInternal(t.getTaskID(), baos.toString());
+        tracker.internalReportDiagnosticInfo(t.getTaskID(), baos.toString());
       } catch (IOException e) {
         LOG.warn(t.getTaskID()+" Reporting Diagnostics", e);
       }
@@ -314,6 +293,7 @@ abstract class TaskRunner extends Thread {
     logFiles[1] = TaskLog.getTaskLogFile(taskid, isCleanup,
         TaskLog.LogName.STDERR);
     getTracker().getTaskController().createLogDir(taskid, isCleanup);
+
     return logFiles;
   }
 
@@ -361,6 +341,41 @@ abstract class TaskRunner extends Thread {
   }
 
   /**
+   * Append lines of the form 'export FOO="bar"' to the list of setup commands
+   * to export the given environment map.
+   *
+   * This should not be relied upon for security as the variable names are not
+   * sanitized in any way.
+   * @param commands list of commands to add to
+   * @param env Environment to export
+   */
+  static void appendEnvExports(List<String> commands, Map<String, String> env) {
+    for(Entry<String, String> entry : env.entrySet()) {
+      StringBuilder sb = new StringBuilder();
+      sb.append("export ");
+      sb.append(entry.getKey());
+      sb.append("=\"");
+      sb.append(StringUtils.escapeString(entry.getValue(), '\\', '"'));
+      sb.append("\"");
+      commands.add(sb.toString());
+    }
+  }
+
+  /**
+   * Parse the given string and return an array of individual java opts. Split
+   * on whitespace and replace the special string "@taskid@" with the task ID
+   * given.
+   * 
+   * @param javaOpts The string to parse
+   * @param taskid The task ID to replace the special string with
+   * @return An array of individual java opts.
+   */
+  static String[] parseChildJavaOpts(String javaOpts, TaskAttemptID taskid) {
+    javaOpts = javaOpts.replace("@taskid@", taskid.toString());
+    return javaOpts.trim().split("\\s+");
+  }
+
+  /**
    * @param taskid
    * @param workDir
    * @param classPaths
@@ -405,10 +420,9 @@ abstract class TaskRunner extends Thread {
     //    </value>
     //  </property>
     //
-    String javaOpts = getChildJavaOpts(conf, 
-                                       JobConf.DEFAULT_MAPRED_TASK_JAVA_OPTS);
-    javaOpts = javaOpts.replace("@taskid@", taskid.toString());
-    String [] javaOptsSplit = javaOpts.split(" ");
+    String[] javaOptsSplit = parseChildJavaOpts(getChildJavaOpts(conf,
+                                       JobConf.DEFAULT_MAPRED_TASK_JAVA_OPTS),
+                                       taskid);
     
     // Add java.library.path; necessary for loading native libraries.
     //
@@ -476,10 +490,11 @@ abstract class TaskRunner extends Thread {
       long logSize) {
     vargs.add("-Dhadoop.log.dir=" + 
         new File(System.getProperty("hadoop.log.dir")).getAbsolutePath());
-    vargs.add("-Dhadoop.root.logger=INFO,TLA");
-    vargs.add("-Dhadoop.tasklog.taskid=" + taskid);
-    vargs.add("-Dhadoop.tasklog.iscleanup=" + t.isTaskCleanupTask());
-    vargs.add("-Dhadoop.tasklog.totalLogFileSize=" + logSize);
+    vargs.add("-Dhadoop.root.logger=" + getLogLevel(conf).toString() + ",TLA");
+    vargs.add("-D" + TaskLogAppender.TASKID_PROPERTY +  "=" + taskid);
+    vargs.add("-D" + TaskLogAppender.ISCLEANUP_PROPERTY +
+              "=" + t.isTaskCleanupTask());
+    vargs.add("-D" + TaskLogAppender.LOGSIZE_PROPERTY + "=" + logSize);
   }
 
   /**
@@ -513,14 +528,13 @@ abstract class TaskRunner extends Thread {
 
   /**
    */
-  private static List<String> getClassPaths(JobConf conf, File workDir,
+  static List<String> getClassPaths(JobConf conf, File workDir,
       TaskDistributedCacheManager taskDistributedCacheManager)
       throws IOException {
     // Accumulates class paths for child.
     List<String> classPaths = new ArrayList<String>();
     
-    boolean userClassesTakesPrecedence = 
-      conf.getBoolean(MAPREDUCE_USER_CLASSPATH_FIRST,false);
+    boolean userClassesTakesPrecedence = conf.userClassesTakesPrecedence();
     
     if (!userClassesTakesPrecedence) {
       // start with same classpath as parent process
@@ -531,7 +545,8 @@ abstract class TaskRunner extends Thread {
     appendJobJarClasspaths(conf.getJar(), classPaths);
     
     // Distributed cache paths
-    classPaths.addAll(taskDistributedCacheManager.getClassPaths());
+    if (taskDistributedCacheManager != null)
+      classPaths.addAll(taskDistributedCacheManager.getClassPaths());
     
     // Include the working dir too
     classPaths.add(workDir.toString());
@@ -544,7 +559,7 @@ abstract class TaskRunner extends Thread {
     return classPaths;
   }
 
-  private String getVMEnvironment(String errorInfo, String user, File workDir, 
+  private String getVMEnvironment(String errorInfo, File workDir, 
                                   JobConf conf, Map<String, String> env, 
                                   TaskAttemptID taskid, long logSize
                                   ) throws Throwable {
@@ -558,8 +573,6 @@ abstract class TaskRunner extends Thread {
     }
     env.put("LD_LIBRARY_PATH", ldLibraryPath.toString());
     env.put(HADOOP_WORK_DIR, workDir.toString());
-    //update user configured login-shell properties
-    updateUserLoginEnv(errorInfo, user, conf, env);
     // put jobTokenFile name into env
     String jobTokenFile = conf.get(TokenCache.JOB_TOKENS_FILENAME);
     LOG.debug("putting jobToken file name into environment " + jobTokenFile);
@@ -580,43 +593,18 @@ abstract class TaskRunner extends Thread {
 
     // add the env variables passed by the user
     String mapredChildEnv = getChildEnv(conf);
-    return setEnvFromInputString(errorInfo, env, mapredChildEnv);
-  }
-
-  void updateUserLoginEnv(String errorInfo, String user, JobConf config, 
-      Map<String, String> env) 
-      throws Throwable {
-    env.put("USER",user);
-    env.put("SHELL", config.get(MAPRED_ADMIN_USER_SHELL, DEFAULT_SHELL));
-    env.put("LOGNAME", user);
-    env.put("HOME", config.get(MAPRED_ADMIN_USER_HOME_DIR, DEFAULT_HOME_DIR));
-    // additional user configured login properties
-    String customEnv = config.get(MAPRED_ADMIN_USER_ENV);
-    setEnvFromInputString(errorInfo, env, customEnv);
-  }
-
-  /**
-   * @param errorInfo
-   * @param env
-   * @param mapredChildEnv
-   * @return
-   * @throws Throwable
-   */
-  String setEnvFromInputString(String errorInfo, Map<String, String> env,
-      String mapredChildEnv) throws Throwable {
     if (mapredChildEnv != null && mapredChildEnv.length() > 0) {
       String childEnvs[] = mapredChildEnv.split(",");
       for (String cEnv : childEnvs) {
         try {
           String[] parts = cEnv.split("="); // split on '='
           String value = env.get(parts[0]);
-          
           if (value != null) {
             // replace $env with the child's env constructed by tt's
             // example LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/tmp
             value = parts[1].replace("$" + parts[0], value);
           } else {
-            // this key is not configured by the tt for the child .. get it
+            // this key is not configured by the tt for the child .. get it 
             // from the tt's env
             // example PATH=$PATH:/tmp
             value = System.getenv(parts[0]);
@@ -624,24 +612,17 @@ abstract class TaskRunner extends Thread {
               // the env key is present in the tt's env
               value = parts[1].replace("$" + parts[0], value);
             } else {
-              // check for simple variable substitution
-              // for e.g. ROOT=$HOME
-              String envValue = System.getenv(parts[1].substring(1)); 
-              if (envValue != null) {
-                value = envValue;
-              } else {
-                // the env key is note present anywhere .. simply set it
-                // example X=$X:/tmp or X=/tmp
-                value = parts[1].replace("$" + parts[0], "");
-              }
+              // the env key is note present anywhere .. simply set it
+              // example X=$X:/tmp or X=/tmp
+              value = parts[1].replace("$" + parts[0], "");
             }
           }
           env.put(parts[0], value);
         } catch (Throwable t) {
           // set the error msg
-          errorInfo = "Invalid User environment settings : " + mapredChildEnv
-              + ". Failed to parse user-passed environment param."
-              + " Expecting : env1=value1,env2=value2...";
+          errorInfo = "Invalid User environment settings : " + mapredChildEnv 
+                      + ". Failed to parse user-passed environment param."
+                      + " Expecting : env1=value1,env2=value2...";
           LOG.warn(errorInfo);
           throw t;
         }
@@ -657,7 +638,7 @@ abstract class TaskRunner extends Thread {
    * process space.
    */
   static void setupChildMapredLocalDirs(Task t, JobConf conf) {
-    String[] localDirs = conf.getStrings(JobConf.MAPRED_LOCAL_DIR_PROPERTY);
+    String[] localDirs = conf.getTrimmedStrings(JobConf.MAPRED_LOCAL_DIR_PROPERTY);
     String jobId = t.getJobID().toString();
     String taskId = t.getTaskID().toString();
     boolean isCleanup = t.isTaskCleanupTask();
@@ -687,7 +668,7 @@ abstract class TaskRunner extends Thread {
       classPaths.add(c);
     }
   }
-  
+
   /**
    * Given a "jobJar" (typically retrieved via {@link Configuration.getJar()}),
    * appends classpath entries for it, as well as its lib/ and classes/
@@ -711,7 +692,7 @@ abstract class TaskRunner extends Thread {
       }
     }
     classPaths.add(new File(jobCacheDir, "classes").toString());
-    classPaths.add(jobCacheDir.toString());
+    classPaths.add(jobJar);
   }
    
   /**

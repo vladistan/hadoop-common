@@ -62,7 +62,7 @@ public class TestQuota extends TestCase {
     // Space quotas
     final int DEFAULT_BLOCK_SIZE = 512;
     conf.setLong("dfs.block.size", DEFAULT_BLOCK_SIZE);
-    conf.setBoolean("dfs.support.append", true);
+    conf.setBoolean("dfs.support.broken.append", true);
     final MiniDFSCluster cluster = new MiniDFSCluster(conf, 2, true, null);
     final FileSystem fs = cluster.getFileSystem();
     assertTrue("Not a HDFS: "+fs.getUri(),
@@ -265,7 +265,7 @@ public class TestQuota extends TestCase {
           String[] args3 = new String[] {"-clrQuota", parent.toString()};
           runCommand(userAdmin, args3, true);
           runCommand(userAdmin, true, "-clrSpaceQuota",  args3[1]); 
-          
+
           return null;
         }
       });
@@ -275,31 +275,31 @@ public class TestQuota extends TestCase {
 
       // 20: setQuota on the root directory ("/") should succeed
       runCommand(admin, false, "-setQuota", "1000000", "/");
- 
+
       runCommand(admin, true, "-clrQuota", "/");
       runCommand(admin, false, "-clrSpaceQuota", "/");
       runCommand(admin, new String[]{"-clrQuota", parent.toString()}, false);
       runCommand(admin, false, "-clrSpaceQuota", parent.toString());
- 
- 
+
       // 2: create directory /test/data2
       final Path childDir2 = new Path(parent, "data2");
       assertTrue(dfs.mkdirs(childDir2));
-
 
       final Path childFile2 = new Path(childDir2, "datafile2");
       final Path childFile3 = new Path(childDir2, "datafile3");
       final long spaceQuota2 = DEFAULT_BLOCK_SIZE * replication;
       final long fileLen2 = DEFAULT_BLOCK_SIZE;
       // set space quota to a real low value 
-      runCommand(admin, false, "-setSpaceQuota", Long.toString(spaceQuota2), childDir2.toString());
+      runCommand(admin, false, "-setSpaceQuota", 
+                 Long.toString(spaceQuota2), childDir2.toString());
       // clear space quota
       runCommand(admin, false, "-clrSpaceQuota", childDir2.toString());
       // create a file that is greater than the size of space quota
       DFSTestUtil.createFile(fs, childFile2, fileLen2, replication, 0);
 
       // now set space quota again. This should succeed
-      runCommand(admin, false, "-setSpaceQuota", Long.toString(spaceQuota2), childDir2.toString());
+      runCommand(admin, false, "-setSpaceQuota", Long.toString(spaceQuota2), 
+                 childDir2.toString());
 
       hasException = false;
       try {
@@ -509,7 +509,7 @@ public class TestQuota extends TestCase {
     // set a smaller block size so that we can test with smaller 
     // diskspace quotas
     conf.set("dfs.block.size", "512");
-    conf.setBoolean("dfs.support.append", true);
+    conf.setBoolean("dfs.support.broken.append", true);
     final MiniDFSCluster cluster = new MiniDFSCluster(conf, 2, true, null);
     final FileSystem fs = cluster.getFileSystem();
     assertTrue("Not a HDFS: "+fs.getUri(),
@@ -691,57 +691,7 @@ public class TestQuota extends TestCase {
       // verify increase in space
       c = dfs.getContentSummary(dstPath);
       assertEquals(c.getSpaceConsumed(), 5 * fileSpace + file2Len);
-
-      // Test HDFS-2053 :
-
-      // Create directory /hdfs-2053
-      final Path quotaDir2053 = new Path("/hdfs-2053");
-      assertTrue(dfs.mkdirs(quotaDir2053));
-
-      // Create subdirectories /hdfs-2053/{A,B,C}
-      final Path quotaDir2053_A = new Path(quotaDir2053, "A");
-      assertTrue(dfs.mkdirs(quotaDir2053_A));
-      final Path quotaDir2053_B = new Path(quotaDir2053, "B");
-      assertTrue(dfs.mkdirs(quotaDir2053_B));
-      final Path quotaDir2053_C = new Path(quotaDir2053, "C");
-      assertTrue(dfs.mkdirs(quotaDir2053_C));
-
-      // Factors to vary the sizes of test files created in each subdir.
-      // The actual factors are not really important but they allow us to create
-      // identifiable file sizes per subdir, which helps during debugging.
-      int sizeFactorA = 1;
-      int sizeFactorB = 2;
-      int sizeFactorC = 4;
-
-      // Set space quota for subdirectory C
-      dfs.setQuota(quotaDir2053_C, FSConstants.QUOTA_DONT_SET,
-          (sizeFactorC + 1) * fileSpace);
-      c = dfs.getContentSummary(quotaDir2053_C);
-      assertEquals(c.getSpaceQuota(), (sizeFactorC + 1) * fileSpace);
-
-      // Create a file under subdirectory A
-      DFSTestUtil.createFile(dfs, new Path(quotaDir2053_A, "fileA"),
-          sizeFactorA * fileLen, replication, 0);
-      c = dfs.getContentSummary(quotaDir2053_A);
-      assertEquals(c.getSpaceConsumed(), sizeFactorA * fileSpace);
-
-      // Create a file under subdirectory B
-      DFSTestUtil.createFile(dfs, new Path(quotaDir2053_B, "fileB"),
-          sizeFactorB * fileLen, replication, 0);
-      c = dfs.getContentSummary(quotaDir2053_B);
-      assertEquals(c.getSpaceConsumed(), sizeFactorB * fileSpace);
-
-      // Create a file under subdirectory C (which has a space quota)
-      DFSTestUtil.createFile(dfs, new Path(quotaDir2053_C, "fileC"),
-          sizeFactorC * fileLen, replication, 0);
-      c = dfs.getContentSummary(quotaDir2053_C);
-      assertEquals(c.getSpaceConsumed(), sizeFactorC * fileSpace);
-
-      // Check space consumed for /hdfs-2053
-      c = dfs.getContentSummary(quotaDir2053);
-      assertEquals(c.getSpaceConsumed(),
-          (sizeFactorA + sizeFactorB + sizeFactorC) * fileSpace);
-
+      
     } finally {
       cluster.shutdown();
     }

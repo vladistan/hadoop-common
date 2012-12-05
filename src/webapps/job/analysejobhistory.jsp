@@ -1,3 +1,22 @@
+<%
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file 
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+%>
 <%@ page
   contentType="text/html; charset=UTF-8"
   import="javax.servlet.http.*"
@@ -16,8 +35,7 @@
 %>
 <%!	private static final long serialVersionUID = 1L;
 %>
-<!DOCTYPE html>
-<html><body>
+<html>
 <%
   String logFile = request.getParameter("logFile");
   if (logFile == null) {
@@ -32,13 +50,19 @@
     showTasks = Integer.parseInt(numTasks);  
   }
   FileSystem fs = (FileSystem) application.getAttribute("fileSys");
-  JobConf jobConf = (JobConf) application.getAttribute("jobConf");
-  ACLsManager aclsManager = (ACLsManager) application.getAttribute("aclManager");
+  JobTracker jobTracker = (JobTracker) application.getAttribute("job.tracker");
   JobHistory.JobInfo job = JSPUtil.checkAccessAndGetJobInfo(request,
-      response, jobConf, aclsManager, fs, new Path(logFile));
+      response, jobTracker, fs, new Path(logFile));
   if (job == null) {
     return;
   }%>
+<head>
+  <title>Analyze Job - Hadoop Job <%=jobid %></title>
+  <link rel="stylesheet" type="text/css" href="/static/hadoop.css">
+  <link rel="icon" type="image/vnd.microsoft.icon" href="/static/images/favicon.ico" />
+</head>
+
+<body>
 <h2>Hadoop Job <a href="jobdetailshistory.jsp?logFile=<%=encodedLogFileName%>"><%=jobid %> </a></h2>
 <b>User : </b> <%=HtmlQuoting.quoteHtmlChars(job.get(Keys.USER)) %><br/> 
 <b>JobName : </b> <%=HtmlQuoting.quoteHtmlChars(job.get(Keys.JOBNAME)) %><br/> 
@@ -128,8 +152,11 @@
 <h3>Average time taken by Map tasks: 
 <%=StringUtils.formatTimeDiff(avgMapTime, 0) %></h3>
 <h3>Worse performing map tasks</h3>
-<table border="2" cellpadding="5" cellspacing="2">
-<tr><td>Task Id</td><td>Time taken</td></tr>
+<table class="jobtasks datatable">
+<thead>
+<tr><th>Task Id</th><th>Time taken</th></tr>
+</thead>
+<tbody>
 <%
   for (int i=0;i<showTasks && i<mapTasks.length; i++) {
 %>
@@ -141,6 +168,7 @@
 <%
   }
 %>
+</tbody>
 </table>
 <%  
 
@@ -172,8 +200,10 @@ finished at (relative to the Job launch time):
 <h3>Average time taken by Shuffle: 
 <%=StringUtils.formatTimeDiff(avgShuffleTime, 0) %></h3>
 <h3>Worse performing Shuffle(s)</h3>
-<table border="2" cellpadding="5" cellspacing="2">
-<tr><td>Task Id</td><td>Time taken</td></tr>
+<table class="jobtasks datatable">
+<thead>
+<tr><th>Task Id</th><th>Time taken</th></tr>
+</thead><tbody>
 <%
   for (int i=0;i<showTasks && i<reduceTasks.length; i++) {
 %>
@@ -190,6 +220,7 @@ finished at (relative to the Job launch time):
 <%
   }
 %>
+</tbody>
 </table>
 <%  
   Comparator<JobHistory.Task> cFinishShuffle = 
@@ -235,8 +266,11 @@ finished at (relative to the Job launch time):
 <h3>Average time taken by Reduce tasks: 
 <%=StringUtils.formatTimeDiff(avgReduceTime, 0) %></h3>
 <h3>Worse performing reduce tasks</h3>
-<table border="2" cellpadding="5" cellspacing="2">
-<tr><td>Task Id</td><td>Time taken</td></tr>
+<table class="jobtasks datatable">
+<thead>
+<tr><th>Task Id</th><th>Time taken</th></tr>
+</thead>
+<tbody>
 <%
   for (int i=0;i<showTasks && i<reduceTasks.length; i++) {
 %>
@@ -250,6 +284,7 @@ finished at (relative to the Job launch time):
 <%
   }
 %>
+</tbody>
 </table>
 <%  
   Arrays.sort(reduceTasks, cFinishMapRed);

@@ -24,6 +24,9 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.Math;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -54,7 +57,6 @@ import org.apache.hadoop.fs.ChecksumFileSystem;
 import org.apache.hadoop.fs.FSError;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.FileSystem.Statistics;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.DataInputBuffer;
@@ -76,21 +78,16 @@ import org.apache.hadoop.mapred.Merger.Segment;
 import org.apache.hadoop.mapred.SortedRanges.SkipRangeIterator;
 import org.apache.hadoop.mapred.TaskTracker.TaskInProgress;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
-import org.apache.hadoop.metrics2.MetricsBuilder;
+import org.apache.hadoop.metrics.MetricsContext;
+import org.apache.hadoop.metrics.MetricsRecord;
+import org.apache.hadoop.metrics.MetricsUtil;
+import org.apache.hadoop.metrics.Updater;
 import org.apache.hadoop.util.Progress;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 
-import org.apache.hadoop.mapred.FileOutputFormat;
 import org.apache.hadoop.mapreduce.security.SecureShuffleUtils;
-import org.apache.hadoop.metrics2.MetricsException;
-import org.apache.hadoop.metrics2.MetricsRecordBuilder;
-import org.apache.hadoop.metrics2.MetricsSource;
-import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
-import org.apache.hadoop.metrics2.lib.MetricMutableCounterInt;
-import org.apache.hadoop.metrics2.lib.MetricMutableCounterLong;
-import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 
 /** A Reduce task. */
 class ReduceTask extends Task {
@@ -423,56 +420,6 @@ class ReduceTask extends Task {
     done(umbilical, reporter);
   }
 
-  private class OldTrackingRecordWriter<K, V> implements RecordWriter<K, V> {
-
-    private final RecordWriter<K, V> real;
-    private final org.apache.hadoop.mapred.Counters.Counter outputRecordCounter;
-    private final org.apache.hadoop.mapred.Counters.Counter fileOutputByteCounter;
-    private final Statistics fsStats;
-
-    public OldTrackingRecordWriter(
-        org.apache.hadoop.mapred.Counters.Counter outputRecordCounter,
-        JobConf job, TaskReporter reporter, String finalName)
-        throws IOException {
-      this.outputRecordCounter = outputRecordCounter;
-      this.fileOutputByteCounter = reporter
-          .getCounter(FileOutputFormat.Counter.BYTES_WRITTEN);
-      Statistics matchedStats = null;
-      if (job.getOutputFormat() instanceof FileOutputFormat) {
-        matchedStats = getFsStatistics(FileOutputFormat.getOutputPath(job), job);
-      }
-      fsStats = matchedStats;
-
-      FileSystem fs = FileSystem.get(job);
-      long bytesOutPrev = getOutputBytes(fsStats);
-      this.real = job.getOutputFormat().getRecordWriter(fs, job, finalName,
-          reporter);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
-    }
-
-    @Override
-    public void write(K key, V value) throws IOException {
-      long bytesOutPrev = getOutputBytes(fsStats);
-      real.write(key, value);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
-      outputRecordCounter.increment(1);
-    }
-
-    @Override
-    public void close(Reporter reporter) throws IOException {
-      long bytesOutPrev = getOutputBytes(fsStats);
-      real.close(reporter);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
-    }
-
-    private long getOutputBytes(Statistics stats) {
-      return stats == null ? 0 : stats.getBytesWritten();
-    }
-  }
-  
   @SuppressWarnings("unchecked")
   private <INKEY,INVALUE,OUTKEY,OUTVALUE>
   void runOldReducer(JobConf job,
@@ -487,14 +434,17 @@ class ReduceTask extends Task {
     // make output collector
     String finalName = getOutputName(getPartition());
 
-    final RecordWriter<OUTKEY, OUTVALUE> out = new OldTrackingRecordWriter<OUTKEY, OUTVALUE>(
-        reduceOutputCounter, job, reporter, finalName);
+    FileSystem fs = FileSystem.get(job);
+
+    final RecordWriter<OUTKEY,OUTVALUE> out = 
+      job.getOutputFormat().getRecordWriter(fs, job, finalName, reporter);  
     
     OutputCollector<OUTKEY,OUTVALUE> collector = 
       new OutputCollector<OUTKEY,OUTVALUE>() {
         public void collect(OUTKEY key, OUTVALUE value)
           throws IOException {
           out.write(key, value);
+          reduceOutputCounter.increment(1);
           // indicate that progress update needs to be sent
           reporter.progress();
         }
@@ -542,56 +492,27 @@ class ReduceTask extends Task {
     }
   }
 
-  private class NewTrackingRecordWriter<K,V> 
+  static class NewTrackingRecordWriter<K,V> 
       extends org.apache.hadoop.mapreduce.RecordWriter<K,V> {
     private final org.apache.hadoop.mapreduce.RecordWriter<K,V> real;
     private final org.apache.hadoop.mapreduce.Counter outputRecordCounter;
-    private final org.apache.hadoop.mapreduce.Counter fileOutputByteCounter;
-    private final Statistics fsStats;
   
-    NewTrackingRecordWriter(org.apache.hadoop.mapreduce.Counter recordCounter,
-        JobConf job, TaskReporter reporter,
-        org.apache.hadoop.mapreduce.TaskAttemptContext taskContext)
-        throws InterruptedException, IOException {
+    NewTrackingRecordWriter(org.apache.hadoop.mapreduce.RecordWriter<K,V> real,
+                            org.apache.hadoop.mapreduce.Counter recordCounter) {
+      this.real = real;
       this.outputRecordCounter = recordCounter;
-      this.fileOutputByteCounter = reporter
-          .getCounter(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat.Counter.BYTES_WRITTEN);
-      Statistics matchedStats = null;
-      // TaskAttemptContext taskContext = new TaskAttemptContext(job,
-      // getTaskID());
-      if (outputFormat instanceof org.apache.hadoop.mapreduce.lib.output.FileOutputFormat) {
-        matchedStats = getFsStatistics(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
-            .getOutputPath(taskContext), taskContext.getConfiguration());
-      }
-      fsStats = matchedStats;
-
-      long bytesOutPrev = getOutputBytes(fsStats);
-      this.real = (org.apache.hadoop.mapreduce.RecordWriter<K, V>) outputFormat
-          .getRecordWriter(taskContext);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
     }
 
     @Override
     public void close(TaskAttemptContext context) throws IOException,
     InterruptedException {
-      long bytesOutPrev = getOutputBytes(fsStats);
       real.close(context);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
     }
 
     @Override
     public void write(K key, V value) throws IOException, InterruptedException {
-      long bytesOutPrev = getOutputBytes(fsStats);
       real.write(key,value);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
       outputRecordCounter.increment(1);
-    }
-    
-    private long getOutputBytes(Statistics stats) {
-      return stats == null ? 0 : stats.getBytesWritten();
     }
   }
 
@@ -635,9 +556,11 @@ class ReduceTask extends Task {
     org.apache.hadoop.mapreduce.Reducer<INKEY,INVALUE,OUTKEY,OUTVALUE> reducer =
       (org.apache.hadoop.mapreduce.Reducer<INKEY,INVALUE,OUTKEY,OUTVALUE>)
         ReflectionUtils.newInstance(taskContext.getReducerClass(), job);
+    org.apache.hadoop.mapreduce.RecordWriter<OUTKEY,OUTVALUE> output =
+      (org.apache.hadoop.mapreduce.RecordWriter<OUTKEY,OUTVALUE>)
+        outputFormat.getRecordWriter(taskContext);
      org.apache.hadoop.mapreduce.RecordWriter<OUTKEY,OUTVALUE> trackedRW = 
-       new NewTrackingRecordWriter<OUTKEY, OUTVALUE>(reduceOutputCounter,
-         job, reporter, taskContext);
+       new NewTrackingRecordWriter<OUTKEY, OUTVALUE>(output, reduceOutputCounter);
     job.setBoolean("mapred.skip.on", isSkipping());
     org.apache.hadoop.mapreduce.Reducer.Context 
          reducerContext = createReduceContext(reducer, job, getTaskID(),
@@ -647,7 +570,7 @@ class ReduceTask extends Task {
                                                reporter, comparator, keyClass,
                                                valueClass);
     reducer.run(reducerContext);
-    trackedRW.close(reducerContext);
+    output.close(reducerContext);
   }
 
   private static enum CopyOutputErrorType {
@@ -684,6 +607,10 @@ class ReduceTask extends Task {
      *  the results of dispatched copy attempts
      */
     private List<CopyResult> copyResults;
+    
+    int numEventsFetched = 0;
+    private Object copyResultsOrNewEventsLock = new Object();
+
     
     /**
      *  the number of outputs to copy in parallel
@@ -764,7 +691,7 @@ class ReduceTask extends Task {
     /**
      * The object for metrics reporting.
      */
-    private ShuffleClientInstrumentation shuffleClientMetrics;
+    private ShuffleClientMetrics shuffleClientMetrics = null;
     
     /**
      * the minimum interval between tasktracker polls
@@ -897,64 +824,64 @@ class ReduceTask extends Task {
      */
     private final Map<String, List<MapOutputLocation>> mapLocations = 
       new ConcurrentHashMap<String, List<MapOutputLocation>>();
-
-    class ShuffleClientInstrumentation implements MetricsSource {
-      final MetricsRegistry registry = new MetricsRegistry("shuffleInput");
-      final MetricMutableCounterLong inputBytes =
-          registry.newCounter("shuffle_input_bytes", "", 0L);
-      final MetricMutableCounterInt failedFetches =
-          registry.newCounter("shuffle_failed_fetches", "", 0);
-      final MetricMutableCounterInt successFetches =
-          registry.newCounter("shuffle_success_fetches", "", 0);
-      private volatile int threadsBusy = 0;
-
-      @SuppressWarnings("deprecation")
-      ShuffleClientInstrumentation(JobConf conf) {
-        registry.tag("user", "User name", conf.getUser())
-                .tag("jobName", "Job name", conf.getJobName())
-                .tag("jobId", "Job ID", ReduceTask.this.getJobID().toString())
-                .tag("taskId", "Task ID", getTaskID().toString())
-                .tag("sessionId", "Session ID", conf.getSessionId());
+    
+    /**
+     * This class contains the methods that should be used for metrics-reporting
+     * the specific metrics for shuffle. This class actually reports the
+     * metrics for the shuffle client (the ReduceTask), and hence the name
+     * ShuffleClientMetrics.
+     */
+    class ShuffleClientMetrics implements Updater {
+      private MetricsRecord shuffleMetrics = null;
+      private int numFailedFetches = 0;
+      private int numSuccessFetches = 0;
+      private long numBytes = 0;
+      private int numThreadsBusy = 0;
+      ShuffleClientMetrics(JobConf conf) {
+        MetricsContext metricsContext = MetricsUtil.getContext("mapred");
+        this.shuffleMetrics = 
+          MetricsUtil.createRecord(metricsContext, "shuffleInput");
+        this.shuffleMetrics.setTag("user", conf.getUser());
+        this.shuffleMetrics.setTag("jobName", conf.getJobName());
+        this.shuffleMetrics.setTag("jobId", ReduceTask.this.getJobID().toString());
+        this.shuffleMetrics.setTag("taskId", getTaskID().toString());
+        this.shuffleMetrics.setTag("sessionId", conf.getSessionId());
+        metricsContext.registerUpdater(this);
       }
-
-      //@Override
-      void inputBytes(long numBytes) {
-        inputBytes.incr(numBytes);
+      public synchronized void inputBytes(long numBytes) {
+        this.numBytes += numBytes;
       }
-
-      //@Override
-      void failedFetch() {
-        failedFetches.incr();
+      public synchronized void failedFetch() {
+        ++numFailedFetches;
       }
-
-      //@Override
-      void successFetch() {
-        successFetches.incr();
+      public synchronized void successFetch() {
+        ++numSuccessFetches;
       }
-
-      //@Override
-      synchronized void threadBusy() {
-        ++threadsBusy;
+      public synchronized void threadBusy() {
+        ++numThreadsBusy;
       }
-
-      //@Override
-      synchronized void threadFree() {
-        --threadsBusy;
+      public synchronized void threadFree() {
+        --numThreadsBusy;
       }
-
-      @Override
-      public void getMetrics(MetricsBuilder builder, boolean all) {
-        MetricsRecordBuilder rb = builder.addRecord(registry.name());
-        rb.addGauge("shuffle_fetchers_busy_percent", "", numCopiers == 0 ? 0
-            : 100. * threadsBusy / numCopiers);
-        registry.snapshot(rb, all);
+      public void doUpdates(MetricsContext unused) {
+        synchronized (this) {
+          shuffleMetrics.incrMetric("shuffle_input_bytes", numBytes);
+          shuffleMetrics.incrMetric("shuffle_failed_fetches", 
+                                    numFailedFetches);
+          shuffleMetrics.incrMetric("shuffle_success_fetches", 
+                                    numSuccessFetches);
+          if (numCopiers != 0) {
+            shuffleMetrics.setMetric("shuffle_fetchers_busy_percent",
+                100*((float)numThreadsBusy/numCopiers));
+          } else {
+            shuffleMetrics.setMetric("shuffle_fetchers_busy_percent", 0);
+          }
+          numBytes = 0;
+          numSuccessFetches = 0;
+          numFailedFetches = 0;
+        }
+        shuffleMetrics.update();
       }
-
-    }
-
-    private ShuffleClientInstrumentation createShuffleClientInstrumentation() {
-      return DefaultMetricsSystem.INSTANCE.register("ShuffleClientMetrics",
-          "Shuffle input metrics", new ShuffleClientInstrumentation(conf));
     }
 
     /** Represents the result of an attempt to copy a map output */
@@ -1294,9 +1221,9 @@ class ReduceTask extends Task {
       private synchronized void finish(long size, CopyOutputErrorType error) {
         if (currentLocation != null) {
           LOG.debug(getName() + " finishing " + currentLocation + " =" + size);
-          synchronized (copyResults) {
+          synchronized (copyResultsOrNewEventsLock) {
             copyResults.add(new CopyResult(currentLocation, size, error));
-            copyResults.notify();
+            copyResultsOrNewEventsLock.notifyAll();
           }
           currentLocation = null;
         }
@@ -1689,15 +1616,16 @@ class ReduceTask extends Task {
         
         int bytesRead = 0;
         try {
-          int n = input.read(shuffleData, 0, shuffleData.length);
+          int n = IOUtils.wrappedReadForCompressedData(input, shuffleData, 0,
+              shuffleData.length);
           while (n > 0) {
             bytesRead += n;
             shuffleClientMetrics.inputBytes(n);
 
             // indicate we're making progress
             reporter.progress();
-            n = input.read(shuffleData, bytesRead, 
-                           (shuffleData.length-bytesRead));
+            n = IOUtils.wrappedReadForCompressedData(input, shuffleData,
+                bytesRead, shuffleData.length - bytesRead);
           }
 
           if (LOG.isDebugEnabled()) {
@@ -1913,7 +1841,7 @@ class ReduceTask extends Task {
       
       configureClasspath(conf);
       this.reporter = reporter;
-      this.shuffleClientMetrics = createShuffleClientInstrumentation();
+      this.shuffleClientMetrics = new ShuffleClientMetrics(conf);
       this.umbilical = umbilical;      
       this.reduceTask = ReduceTask.this;
 
@@ -1928,11 +1856,11 @@ class ReduceTask extends Task {
                                                   reporter, null);
       if (combinerRunner != null) {
         combineCollector = 
-          new CombineOutputCollector(reduceCombineOutputCounter, reporter, conf);
+          new CombineOutputCollector(reduceCombineOutputCounter);
       }
       
       this.ioSortFactor = conf.getInt("io.sort.factor", 10);
-      
+
       this.abortFailureLimit = Math.max(30, numMaps / 10);
 
       this.maxFetchFailuresBeforeReporting = conf.getInt(
@@ -2024,6 +1952,10 @@ class ReduceTask extends Task {
       
         // loop until we get all required outputs
         while (copiedMapOutputs.size() < numMaps && mergeThrowable == null) {
+          int numEventsAtStartOfScheduling;
+          synchronized (copyResultsOrNewEventsLock) {
+            numEventsAtStartOfScheduling = numEventsFetched;
+          }
           
           currentTime = System.currentTimeMillis();
           boolean logNow = false;
@@ -2181,7 +2113,7 @@ class ReduceTask extends Task {
             //So, when getCopyResult returns null, we can be sure that
             //we aren't busy enough and we should go and get more mapcompletion
             //events from the tasktracker
-            CopyResult cr = getCopyResult(numInFlight);
+            CopyResult cr = getCopyResult(numInFlight, numEventsAtStartOfScheduling);
 
             if (cr == null) {
               break;
@@ -2552,14 +2484,29 @@ class ReduceTask extends Task {
       }
     }
 
-    private CopyResult getCopyResult(int numInFlight) {  
-      synchronized (copyResults) {
+    private CopyResult getCopyResult(int numInFlight, int numEventsAtStartOfScheduling) {
+      boolean waitedForNewEvents = false;
+      
+      synchronized (copyResultsOrNewEventsLock) {
         while (copyResults.isEmpty()) {
           try {
             //The idea is that if we have scheduled enough, we can wait until
-            //we hear from one of the copiers.
+            // we hear from one of the copiers, or until there are new
+            // map events ready to be scheduled
             if (busyEnough(numInFlight)) {
-              copyResults.wait();
+              // All of the fetcher threads are busy. So, no sense trying
+              // to schedule more until one finishes.
+              copyResultsOrNewEventsLock.wait();
+            } else if (numEventsFetched == numEventsAtStartOfScheduling &&
+                       !waitedForNewEvents) {
+              // no sense trying to schedule more, since there are no
+              // new events to even try to schedule.
+              // We could handle this with a normal wait() without a timeout,
+              // but since this code is being introduced in a stable branch,
+              // we want to be very conservative. A 2-second wait is enough
+              // to prevent the busy-loop experienced before.
+              waitedForNewEvents = true;
+              copyResultsOrNewEventsLock.wait(2000);
             } else {
               return null;
             }
@@ -2808,6 +2755,12 @@ class ReduceTask extends Task {
         do {
           try {
             int numNewMaps = getMapCompletionEvents();
+            if (numNewMaps > 0) {
+              synchronized (copyResultsOrNewEventsLock) {
+                numEventsFetched += numNewMaps;
+                copyResultsOrNewEventsLock.notifyAll();
+              }
+            }
             if (LOG.isDebugEnabled()) {
               if (numNewMaps > 0) {
                 LOG.debug(reduceTask.getTaskID() + ": " +  

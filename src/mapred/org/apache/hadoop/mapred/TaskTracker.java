@@ -36,6 +36,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
@@ -44,7 +45,6 @@ import java.util.Vector;
 import java.util.Map.Entry;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 import javax.crypto.SecretKey;
@@ -61,7 +61,9 @@ import org.apache.hadoop.filecache.TaskDistributedCacheManager;
 import org.apache.hadoop.filecache.TrackerDistributedCacheManager;
 import org.apache.hadoop.mapreduce.server.tasktracker.*;
 import org.apache.hadoop.mapreduce.server.tasktracker.userlogs.*;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.DF;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -71,6 +73,9 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.http.HttpServer;
 import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.nativeio.NativeIO;
+import org.apache.hadoop.io.ReadaheadPool;
+import org.apache.hadoop.io.ReadaheadPool.ReadaheadRequest;
 import org.apache.hadoop.io.SecureIOUtils;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.RemoteException;
@@ -85,12 +90,17 @@ import org.apache.hadoop.mapreduce.TaskType;
 import org.apache.hadoop.mapreduce.security.SecureShuffleUtils;
 import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
 import org.apache.hadoop.mapreduce.security.token.JobTokenSecretManager;
+import org.apache.hadoop.metrics.MetricsContext;
+import org.apache.hadoop.metrics.MetricsException;
+import org.apache.hadoop.metrics.MetricsRecord;
+import org.apache.hadoop.metrics.MetricsUtil;
+import org.apache.hadoop.metrics.Updater;
+import org.apache.hadoop.metrics.util.MBeanUtil;
 import org.apache.hadoop.net.DNS;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.PolicyProvider;
-import org.apache.hadoop.security.authorize.ServiceAuthorizationManager;
 import org.apache.hadoop.util.DiskChecker;
 import org.apache.hadoop.util.MemoryCalculatorPlugin;
 import org.apache.hadoop.util.ResourceCalculatorPlugin;
@@ -102,9 +112,8 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.VersionInfo;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
+import org.apache.hadoop.util.MRAsyncDiskService;
 import org.apache.hadoop.mapreduce.security.TokenCache;
-import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
-import org.apache.hadoop.metrics2.util.MBeans;
 import org.apache.hadoop.security.Credentials;
 
 /*******************************************************
@@ -115,7 +124,6 @@ import org.apache.hadoop.security.Credentials;
  *******************************************************/
 public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     Runnable, TaskTrackerMXBean {
-  
   /**
    * @deprecated
    */
@@ -123,11 +131,17 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   static final String MAPRED_TASKTRACKER_VMEM_RESERVED_PROPERTY =
     "mapred.tasktracker.vmem.reserved";
   /**
-   * @deprecated
+   * @deprecated  TODO(todd) this and above are removed in YDist
    */
   @Deprecated
   static final String MAPRED_TASKTRACKER_PMEM_RESERVED_PROPERTY =
      "mapred.tasktracker.pmem.reserved";
+  
+  static final String TT_RESERVED_PHYSICALMEMORY_MB =
+    "mapreduce.tasktracker.reserved.physicalmemory.mb";
+  
+  static final String TT_MEMORY_MANAGER_MONITORING_INTERVAL = 
+    "mapreduce.tasktracker.taskmemorymanager.monitoringinterval";
 
   static final String CONF_VERSION_KEY = "mapreduce.tasktracker.conf.version";
   static final String CONF_VERSION_DEFAULT = "default";
@@ -136,6 +150,9 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   private int httpPort;
 
   static enum State {NORMAL, STALE, INTERRUPTED, DENIED}
+
+  static final FsPermission LOCAL_DIR_PERMISSION =
+    FsPermission.createImmutable((short) 0755);
 
   static{
     Configuration.addDefaultResource("mapred-default.xml");
@@ -169,23 +186,12 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     private List<String> localDirs;
     private int numFailures;
 
+    /**
+     * TaskTracker internal only
+     */
     public LocalStorage(String[] dirs) {
       localDirs = new ArrayList<String>();
       localDirs.addAll(Arrays.asList(dirs));
-    }
-
-    /**
-     * @return the current valid directories 
-     */
-    synchronized String[] getDirs() {
-      return localDirs.toArray(new String[localDirs.size()]);
-    }
-
-    /**
-     * @return the current valid dirs as comma separated string
-     */
-    synchronized String getDirsString() {
-      return StringUtils.join(",", localDirs);
     }
 
     /**
@@ -196,28 +202,65 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     }
 
     /**
+     * @return the current valid directories 
+     */
+    synchronized String[] getDirs() {
+      return localDirs.toArray(new String[localDirs.size()]);
+    }
+
+    /**
+     * @return the current valid directories
+     */
+    synchronized String getDirsString() {
+      return StringUtils.join(",", localDirs);
+    }
+
+    /**
      * @return the number of directory failures
      */
-    synchronized int numFailures() {
-      return numFailures;
-    }
+     synchronized int numFailures() {
+       return numFailures;
+     }
 
     /**
      * Check the current set of local directories, updating the list
      * of valid directories if necessary.
+     * @param checkAndFixPermissions should check the permissions of the
+     *        directory and try to fix them if incorrect. This is
+     *        expensive so should only be done at startup.
      * @throws DiskErrorException if no directories are writable
      */
-    synchronized void checkDirs() throws DiskErrorException {
-      for (String dir : localDirs) {
+    synchronized void checkDirs(LocalFileSystem fs,
+                                boolean checkAndFixPermissions)
+        throws DiskErrorException {
+      ListIterator<String> it = localDirs.listIterator();
+      while (it.hasNext()) {
+        final String path = it.next();
         try {
-          DiskChecker.checkDir(new File(dir));
-        } catch (DiskErrorException de) {
-          LOG.warn("TaskTracker local dir " + dir + " error " + 
-              de.getMessage() + ", removing from local dirs");
-          localDirs.remove(dir);
+          File dir = new File(path);
+          if (checkAndFixPermissions) {
+            DiskChecker.checkDir(fs, new Path(path), LOCAL_DIR_PERMISSION);
+            // This version of DiskChecker#checkDir - unlike the one
+            // below - doesn't use File to check if an actual read or
+            // write will fail (it just checks the permissions value)
+            // so we need to check that here.
+            if (!dir.canRead()) {
+              throw new DiskErrorException("Dir is not readable: " + path);
+            }
+            if (!dir.canWrite()) {
+              throw new DiskErrorException("Dir is not writable: " + path);
+            }
+          } else {
+            DiskChecker.checkDir(dir);
+          }
+        } catch (IOException ioe) {
+          LOG.warn("TaskTracker local dir " + path + " error " + 
+              ioe.getMessage() + ", removing from local dirs");
+          it.remove();
           numFailures++;
         }
       }
+
       if (localDirs.isEmpty()) {
         throw new DiskErrorException(
             "No mapred local directories are writable");
@@ -261,7 +304,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   
   // The filesystem where job files are stored
   FileSystem systemFS = null;
-  private FileSystem localFs = null;
+  private LocalFileSystem localFs = null;
   private final HttpServer server;
     
   volatile boolean shuttingDown = false;
@@ -322,7 +365,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   private Localizer localizer;
   private int maxMapSlots;
   private int maxReduceSlots;
-  private int failures;
+  private int taskFailures;
   final long mapRetainSize;
   final long reduceRetainSize;
 
@@ -333,13 +376,12 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   static final String TT_OUTOFBAND_HEARBEAT =
     "mapreduce.tasktracker.outofband.heartbeat";
   private volatile boolean oobHeartbeatOnTaskCompletion;
-  static final String TT_OUTOFBAND_HEARTBEAT_DAMPER = 
-    "mapreduce.tasktracker.outofband.heartbeat.damper";
-  static private final int DEFAULT_OOB_HEARTBEAT_DAMPER = 1000000;
-  private volatile int oobHeartbeatDamper;
-  
+  private boolean manageOsCacheInShuffle = false;
+  private int readaheadLength;
+  private ReadaheadPool readaheadPool = ReadaheadPool.getInstance();
+
   // Track number of completed tasks to send an out-of-band heartbeat
-  private AtomicInteger finishedCount = new AtomicInteger(0);
+  private IntWritable finishedCount = new IntWritable(0);
   
   private MapEventsFetcherThread mapEventsFetcher;
   final int workerThreads;
@@ -353,6 +395,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   private long mapSlotMemorySizeOnTT = JobConf.DISABLED_MEMORY_LIMIT;
   private long reduceSlotSizeMemoryOnTT = JobConf.DISABLED_MEMORY_LIMIT;
   private long totalMemoryAllottedForTasks = JobConf.DISABLED_MEMORY_LIMIT;
+  private long reservedPhysicalMemoryOnTT = JobConf.DISABLED_MEMORY_LIMIT;
   private ResourceCalculatorPlugin resourceCalculatorPlugin = null;
 
   private UserLogManager userLogManager;
@@ -362,11 +405,12 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   public static final String TT_RESOURCE_CALCULATOR_PLUGIN = 
       "mapreduce.tasktracker.resourcecalculatorplugin";
 
+  private MRAsyncDiskService asyncDiskService;
+  
   /**
    * the minimum interval between jobtracker polls
    */
-  private volatile int heartbeatInterval = HEARTBEAT_INTERVAL_MIN;
-  
+  private volatile int heartbeatInterval = MRConstants.HEARTBEAT_INTERVAL_MIN_DEFAULT;
   /**
    * Number of maptask completion events locations to poll for at one time
    */  
@@ -383,6 +427,13 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    * Handle to the specific instance of the {@link NodeHealthCheckerService}
    */
   private NodeHealthCheckerService healthChecker;
+
+  /**
+   * Thread which checks CPU usage of Jetty and shuts down the TT if it
+   * exceeds a configurable threshold.
+   */
+  private JettyBugMonitor jettyBugMonitor;
+
   
   /**
    * Configuration property for disk health check interval in milli seconds.
@@ -397,14 +448,82 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    */
   private long diskHealthCheckInterval;
 
+  /**
+   * Whether the TT performs a full or relaxed version check with the JT.
+   */
+  private boolean relaxedVersionCheck;
+
   /*
    * A list of commitTaskActions for whom commit response has been received 
    */
   private List<TaskAttemptID> commitResponses = 
             Collections.synchronizedList(new ArrayList<TaskAttemptID>());
 
-  private ShuffleServerInstrumentation shuffleServerMetrics;
+  private ShuffleServerMetrics shuffleServerMetrics;
+  /** This class contains the methods that should be used for metrics-reporting
+   * the specific metrics for shuffle. The TaskTracker is actually a server for
+   * the shuffle and hence the name ShuffleServerMetrics.
+   */
+  class ShuffleServerMetrics implements Updater {
+    private MetricsRecord shuffleMetricsRecord = null;
+    private int serverHandlerBusy = 0;
+    private long outputBytes = 0;
+    private int failedOutputs = 0;
+    private int successOutputs = 0;
+    private int exceptionsCaught = 0;
+    ShuffleServerMetrics(JobConf conf) {
+      MetricsContext context = MetricsUtil.getContext("mapred");
+      shuffleMetricsRecord = 
+                           MetricsUtil.createRecord(context, "shuffleOutput");
+      this.shuffleMetricsRecord.setTag("sessionId", conf.getSessionId());
+      context.registerUpdater(this);
+    }
+    synchronized void serverHandlerBusy() {
+      ++serverHandlerBusy;
+    }
+    synchronized void serverHandlerFree() {
+      --serverHandlerBusy;
+    }
+    synchronized void outputBytes(long bytes) {
+      outputBytes += bytes;
+    }
+    synchronized void failedOutput() {
+      ++failedOutputs;
+    }
+    synchronized void successOutput() {
+      ++successOutputs;
+    }
+    synchronized void exceptionsCaught() {
+      ++exceptionsCaught;
+    }
+    public void doUpdates(MetricsContext unused) {
+      synchronized (this) {
+        if (workerThreads != 0) {
+          shuffleMetricsRecord.setMetric("shuffle_handler_busy_percent", 
+              100*((float)serverHandlerBusy/workerThreads));
+        } else {
+          shuffleMetricsRecord.setMetric("shuffle_handler_busy_percent", 0);
+        }
+        shuffleMetricsRecord.incrMetric("shuffle_output_bytes", 
+                                        outputBytes);
+        shuffleMetricsRecord.incrMetric("shuffle_failed_outputs", 
+                                        failedOutputs);
+        shuffleMetricsRecord.incrMetric("shuffle_success_outputs", 
+                                        successOutputs);
+        shuffleMetricsRecord.incrMetric("shuffle_exceptions_caught",
+            exceptionsCaught);
+        outputBytes = 0;
+        failedOutputs = 0;
+        successOutputs = 0;
+        exceptionsCaught = 0;
+      }
+      shuffleMetricsRecord.update();
+    }
+  }
 
+  
+  
+    
   private TaskTrackerInstrumentation myInstrumentation = null;
 
   public TaskTrackerInstrumentation getTaskTrackerInstrumentation() {
@@ -508,7 +627,15 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
         LOG.warn("Unknown job " + jobId + " being deleted.");
       } else {
         synchronized (rjob) {
-          rjob.tasks.remove(tip);
+          // Only remove the TIP if it is identical to the one that is finished
+          // Job recovery means that it is possible to have two task attempts
+          // with the same ID, which is used for TIP equals/hashcode.
+          for (TaskInProgress t : rjob.tasks) {
+            if (tip == t) {
+              rjob.tasks.remove(tip);
+              break;
+            }
+          }
         }
       }
     }
@@ -654,7 +781,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
                             protocol);
     }
   }
-
+  
   /**
    * Delete all of the user directories.
    * @param conf the TT configuration
@@ -662,7 +789,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    */
   private void deleteUserDirectories(Configuration conf) throws IOException {
     for(String root: localStorage.getDirs()) {
-      for(FileStatus status: localFs.listStatus(new Path(root, SUBDIR))) {
+      for (FileStatus status : localFs.listStatus(new Path(root, SUBDIR),
+          TaskLog.USERLOGS_PATH_FILTER)) {
         String owner = status.getOwner();
         String path = status.getPath().getName();
         if (path.equals(owner)) {
@@ -672,48 +800,26 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     }
   }
 
-  public static final String TT_USER_NAME = "mapreduce.tasktracker.kerberos.principal";
-  public static final String TT_KEYTAB_FILE =
-    "mapreduce.tasktracker.keytab.file";  
-  /**
-   * Do the real constructor work here.  It's in a separate method
-   * so we can call it again and "recycle" the object after calling
-   * close().
-   */
-  synchronized void initialize() throws IOException, InterruptedException {
-    this.fConf = new JobConf(originalConf);
-    
-    LOG.info("Starting tasktracker with owner as "
-        + getMROwner().getShortUserName());
-
-    localFs = FileSystem.getLocal(fConf);
-    if (fConf.get("slave.host.name") != null) {
-      this.localHostname = fConf.get("slave.host.name");
-    }
-    if (localHostname == null) {
-      this.localHostname =
-      DNS.getDefaultHost
-      (fConf.get("mapred.tasktracker.dns.interface","default"),
-       fConf.get("mapred.tasktracker.dns.nameserver","default"));
-    }
-
+  void initializeDirectories() throws IOException {
     final String dirs = localStorage.getDirsString();
     fConf.setStrings(JobConf.MAPRED_LOCAL_DIR_PROPERTY, dirs);
     LOG.info("Good mapred local directories are: " + dirs);
     taskController.setConf(fConf);
-    // Setup task controller so that deletion of user dirs happens properly
-    taskController.setup(localDirAllocator, localStorage);
-    server.setAttribute("conf", fConf);
+    if (server != null) {
+      server.setAttribute("conf", fConf);
+    }
 
     deleteUserDirectories(fConf);
 
-    // NB: deleteLocalFiles uses the configured local dirs, but does not 
-    // fail if a local directory has failed. 
-    fConf.deleteLocalFiles(SUBDIR);
+    asyncDiskService = new MRAsyncDiskService(fConf);
+    asyncDiskService.cleanupAllVolumes();
+
     final FsPermission ttdir = FsPermission.createImmutable((short) 0755);
     for (String s : localStorage.getDirs()) {
       localFs.mkdirs(new Path(s, SUBDIR), ttdir);
     }
+    // NB: deleteLocalFiles uses the configured local dirs, but does not
+    // fail if a local directory has failed.
     fConf.deleteLocalFiles(TT_PRIVATE_DIR);
     final FsPermission priv = FsPermission.createImmutable((short) 0700);
     for (String s : localStorage.getDirs()) {
@@ -728,9 +834,63 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     for (String s : localStorage.getDirs()) {
       Path userLogsDir = new Path(s, TaskLog.USERLOGS_DIR_NAME);
       if (!localFs.exists(userLogsDir)) {
-        localFs.mkdirs(userLogsDir, pub);
+        if (!localFs.mkdirs(userLogsDir, pub)) {
+          LOG.warn("Unable to create task log directory: " + userLogsDir);
+        }
+      } else {
+        try {
+          localFs.setPermission(userLogsDir, new FsPermission((short)0755));
+        } catch (IOException ioe) {
+          throw new IOException(
+            "Unable to set permissions on task log directory. " +
+            userLogsDir + " should be owned by " +
+            "and accessible by user '" + System.getProperty("user.name") +
+            "'.", ioe);
+        }
       }
     }
+  }
+
+  private void checkSecurityRequirements() throws IOException {
+    if (!UserGroupInformation.isSecurityEnabled()) {
+      return;
+    }
+    if (!NativeIO.isAvailable()) {
+      throw new IOException("Secure IO is necessary to run a secure task tracker.");
+    }
+  }
+
+  public static final String TT_USER_NAME = "mapreduce.tasktracker.kerberos.principal";
+  public static final String TT_KEYTAB_FILE =
+    "mapreduce.tasktracker.keytab.file";  
+  /**
+   * Do the real constructor work here.  It's in a separate method
+   * so we can call it again and "recycle" the object after calling
+   * close().
+   */
+  synchronized void initialize() throws IOException, InterruptedException {
+    this.fConf = new JobConf(originalConf);
+
+    LOG.info("Starting tasktracker with owner as "
+        + getMROwner().getShortUserName());
+
+    if (fConf.get("slave.host.name") != null) {
+      this.localHostname = fConf.get("slave.host.name");
+    }
+    if (localHostname == null) {
+      this.localHostname =
+      DNS.getDefaultHost
+      (fConf.get("mapred.tasktracker.dns.interface","default"),
+       fConf.get("mapred.tasktracker.dns.nameserver","default"));
+    }
+ 
+    // Check local disk, start async disk service, and clean up all 
+    // local directories.
+    initializeDirectories();
+
+    // Check security requirements are met
+    checkSecurityRequirements();
+
     // Clear out state tables
     this.tasks.clear();
     this.runningTasks = new LinkedHashMap<TaskAttemptID, TaskInProgress>();
@@ -744,9 +904,21 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     this.minSpaceKill = this.fConf.getLong("mapred.local.dir.minspacekill", 0L);
     //tweak the probe sample size (make it a function of numCopiers)
     probe_sample_size = this.fConf.getInt("mapred.tasktracker.events.batchsize", 500);
-
-    createInstrumentation();
-
+    
+    try {
+      Class<? extends TaskTrackerInstrumentation> metricsInst = getInstrumentationClass(fConf);
+      java.lang.reflect.Constructor<? extends TaskTrackerInstrumentation> c =
+        metricsInst.getConstructor(new Class[] {TaskTracker.class} );
+      this.myInstrumentation = c.newInstance(this);
+    } catch(Exception e) {
+      //Reflection can throw lots of exceptions -- handle them all by 
+      //falling back on the default.
+      LOG.error(
+        "Failed to initialize taskTracker metrics. Falling back to default.",
+        e);
+      this.myInstrumentation = new TaskTrackerMetricsInst(this);
+    }
+    
     // bind address
     String address = 
       NetUtils.getServerAddress(fConf,
@@ -758,17 +930,6 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     int tmpPort = socAddr.getPort();
     
     this.jvmManager = new JvmManager(this);
-
-    // Set service-level authorization security policy
-    if (this.fConf.getBoolean(
-          ServiceAuthorizationManager.SERVICE_AUTHORIZATION_CONFIG, false)) {
-      PolicyProvider policyProvider = 
-        (PolicyProvider)(ReflectionUtils.newInstance(
-            this.fConf.getClass(PolicyProvider.POLICY_PROVIDER_CONFIG, 
-                MapReducePolicyProvider.class, PolicyProvider.class), 
-            this.fConf));
-      ServiceAuthorizationManager.refresh(fConf, policyProvider);
-    }
     
     // RPC initialization
     int max = maxMapSlots > maxReduceSlots ? 
@@ -777,6 +938,18 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     //of a heartbeat RPC
     this.taskReportServer = RPC.getServer(this, bindAddress,
         tmpPort, 2 * max, false, this.fConf, this.jobTokenSecretManager);
+
+    // Set service-level authorization security policy
+    if (this.fConf.getBoolean(
+          CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, false)) {
+      PolicyProvider policyProvider = 
+        (PolicyProvider)(ReflectionUtils.newInstance(
+            this.fConf.getClass(PolicyProvider.POLICY_PROVIDER_CONFIG, 
+                MapReducePolicyProvider.class, PolicyProvider.class), 
+            this.fConf));
+      this.taskReportServer.refreshServiceAcl(fConf, policyProvider);
+    }
+
     this.taskReportServer.start();
 
     // get the assigned address
@@ -788,11 +961,12 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     this.taskTrackerName = "tracker_" + localHostname + ":" + taskReportAddress;
     LOG.info("Starting tracker " + taskTrackerName);
 
-    // Initialize DistributedCache
-    this.distributedCacheManager = new TrackerDistributedCacheManager(
-        this.fConf, taskController);
-    this.distributedCacheManager.startCleanupThread();
-    
+    // Initialize DistributedCache and
+    // clear out temporary files that might be lying around
+    this.distributedCacheManager = 
+        new TrackerDistributedCacheManager(this.fConf, taskController, asyncDiskService);
+    this.distributedCacheManager.purgeCache(); // TODO(todd) purge here?
+
     this.jobClient = (InterTrackerProtocol) 
     UserGroupInformation.getLoginUser().doAs(
         new PrivilegedExceptionAction<Object>() {
@@ -837,32 +1011,25 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       startHealthMonitor(this.fConf);
     }
     
+    // Start thread to monitor jetty bugs
+    startJettyBugMonitor();
+    
     oobHeartbeatOnTaskCompletion = 
       fConf.getBoolean(TT_OUTOFBAND_HEARBEAT, false);
-    oobHeartbeatDamper = 
-      fConf.getInt(TT_OUTOFBAND_HEARTBEAT_DAMPER, 
-          DEFAULT_OOB_HEARTBEAT_DAMPER);
+    
+    manageOsCacheInShuffle = fConf.getBoolean(
+        "mapred.tasktracker.shuffle.fadvise",
+        true);
+    readaheadLength = fConf.getInt(
+        "mapred.tasktracker.shuffle.readahead.bytes",
+        4 * 1024 * 1024);
   }
 
-  private void createInstrumentation() {
-    Class<? extends TaskTrackerInstrumentation> metricsInst =
-        getInstrumentationClass(fConf);
-    LOG.debug("instrumentation class="+ metricsInst);
-    if (metricsInst == null) {
-      myInstrumentation = TaskTrackerInstrumentation.create(this);
-      return;
+  private void startJettyBugMonitor() {
+    jettyBugMonitor = JettyBugMonitor.create(fConf);
+    if (jettyBugMonitor != null) {
+      jettyBugMonitor.start();
     }
-    try {
-      java.lang.reflect.Constructor<? extends TaskTrackerInstrumentation> c =
-        metricsInst.getConstructor(new Class<?>[] {TaskTracker.class} );
-      this.myInstrumentation = c.newInstance(this);
-    } catch(Exception e) {
-      //Reflection can throw lots of exceptions -- handle them all by
-      //falling back on the default.
-      LOG.error("failed to initialize taskTracker metrics", e);
-      this.myInstrumentation = TaskTrackerInstrumentation.create(this);
-    }
-
   }
 
   UserGroupInformation getMROwner() {
@@ -876,13 +1043,13 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     return fConf.getBoolean(JobConf.MR_ACLS_ENABLED, false);
   }
 
-  static Class<? extends TaskTrackerInstrumentation> getInstrumentationClass(
+  public static Class<? extends TaskTrackerInstrumentation> getInstrumentationClass(
     Configuration conf) {
-    return conf.getClass("mapred.tasktracker.instrumentation", null,
-                         TaskTrackerInstrumentation.class);
+    return conf.getClass("mapred.tasktracker.instrumentation",
+        TaskTrackerMetricsInst.class, TaskTrackerInstrumentation.class);
   }
 
-  static void setInstrumentationClass(
+  public static void setInstrumentationClass(
     Configuration conf, Class<? extends TaskTrackerInstrumentation> t) {
     conf.setClass("mapred.tasktracker.instrumentation",
         t, TaskTrackerInstrumentation.class);
@@ -891,7 +1058,11 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   /** 
    * Removes all contents of temporary storage.  Called upon 
    * startup, to remove any leftovers from previous run.
+   *
+   * Use MRAsyncDiskService.moveAndDeleteAllVolumes instead.
+   * @see org.apache.hadoop.mapreduce.util.MRAsyncDiskService#cleanupAllVolumes()
    */
+  @Deprecated
   public void cleanupStorage() throws IOException {
     this.fConf.deleteLocalFiles(SUBDIR);
     this.fConf.deleteLocalFiles(TT_PRIVATE_DIR);
@@ -1174,7 +1345,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
 
     // Download the job.xml for this job from the system FS
     final Path localJobFile =
-      localizeJobConfFile(new Path(t.getJobFile()), userName, userFs, jobId);
+        localizeJobConfFile(new Path(t.getJobFile()), userName, userFs, jobId);
 
     /**
       * Now initialize the job via task-controller to do the rest of the
@@ -1243,7 +1414,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       debugEnabled = true;
     }
     String keepPattern = localJobConf.getKeepTaskFilesPattern();
-    
+     
     if (debugEnabled || localJobConf.getProfileEnabled() ||
         keepPattern != null || localJobConf.getKeepFailedTaskFiles()) {
       //disable jvm reuse
@@ -1260,7 +1431,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     getUserLogManager().addLogEvent(jse);
   }
 
-  
+
   /**
    * Download the job configuration file from the FS.
    *
@@ -1293,7 +1464,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     return localJobFile;
   }
 
-  protected void launchTaskForJob(TaskInProgress tip, JobConf jobConf,
+  private void launchTaskForJob(TaskInProgress tip, JobConf jobConf,
                                 RunningJob rjob) throws IOException {
     synchronized (tip) {
       jobConf.set(JobConf.MAPRED_LOCAL_DIR_PROPERTY,
@@ -1338,7 +1509,27 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     this.running = false;
 
     // Clear local storage
-    cleanupStorage();
+    if (asyncDiskService != null) {
+
+      // Clear local storage
+      try {
+        asyncDiskService.cleanupAllVolumes();
+      } catch (Exception ioe) {
+        LOG.warn("IOException shutting down TaskTracker", ioe);
+      }
+      
+      // Shutdown all async deletion threads with up to 10 seconds of delay
+      asyncDiskService.shutdown();
+      try {
+        if (!asyncDiskService.awaitTermination(10000)) {
+          asyncDiskService.shutdownNow();
+          asyncDiskService = null;
+        }
+      } catch (InterruptedException e) {
+        asyncDiskService.shutdownNow();
+        asyncDiskService = null;
+      }
+    }
         
     // Shutdown the fetcher thread
     this.mapEventsFetcher.interrupt();
@@ -1347,7 +1538,6 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     this.mapLauncher.interrupt();
     this.reduceLauncher.interrupt();
 
-    this.distributedCacheManager.stopCleanupThread();
     jvmManager.stop();
     
     // shutdown RPC connections
@@ -1371,6 +1561,10 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       healthChecker.stop();
       healthChecker = null;
     }
+    if (jettyBugMonitor != null) {
+      jettyBugMonitor.shutdown();
+      jettyBugMonitor = null;
+    }
   }
 
   /**
@@ -1387,11 +1581,22 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     fConf = conf;
   }
 
+  void setLocalStorage(LocalStorage in) {
+    localStorage = in;
+  }
+	  
+  void setLocalDirAllocator(LocalDirAllocator in) {
+    localDirAllocator = in;
+  }
+  
   /**
    * Start with the local machine name, and the default JobTracker
    */
   public TaskTracker(JobConf conf) throws IOException, InterruptedException {
     originalConf = conf;
+    relaxedVersionCheck = conf.getBoolean(
+        CommonConfigurationKeys.HADOOP_RELAXED_VERSION_CHECK_KEY,
+        CommonConfigurationKeys.HADOOP_RELAXED_VERSION_CHECK_DEFAULT);
     FILE_CACHE_SIZE = conf.getInt("mapred.tasktracker.file.cache.size", 2000);
     maxMapSlots = conf.getInt(
                   "mapred.tasktracker.map.tasks.maximum", 2);
@@ -1399,7 +1604,6 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
                   "mapred.tasktracker.reduce.tasks.maximum", 2);
     diskHealthCheckInterval = conf.getLong(DISK_HEALTH_CHECK_INTERVAL_PROPERTY,
                                            DEFAULT_DISK_HEALTH_CHECK_INTERVAL);
-    UserGroupInformation.setConfiguration(originalConf);
     aclsManager = new ACLsManager(conf, new JobACLsManager(conf), null);
     this.jobTrackAddr = JobTracker.getAddress(conf);
     String infoAddr = 
@@ -1412,6 +1616,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     int httpPort = infoSocAddr.getPort();
     this.server = new HttpServer("task", httpBindAddress, httpPort,
         httpPort == 0, conf, aclsManager.getAdminsAcl());
+    this.shuffleServerMetrics = new ShuffleServerMetrics(conf);
     workerThreads = conf.getInt("tasktracker.http.threads", 40);
     server.setThreads(1, workerThreads);
     // let the jsp pages get to the task tracker, config, and other relevant
@@ -1423,10 +1628,11 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
                      DefaultTaskController.class, TaskController.class);
 
     fConf = new JobConf(conf);
+    localFs = FileSystem.getLocal(fConf);
     localStorage = new LocalStorage(fConf.getLocalDirs());
-    localStorage.checkDirs();
+    localStorage.checkDirs(localFs, true);
     taskController = 
-      (TaskController) ReflectionUtils.newInstance(taskControllerClass, fConf);
+      (TaskController)ReflectionUtils.newInstance(taskControllerClass, fConf);
     taskController.setup(localDirAllocator, localStorage);
     lastNumFailures = localStorage.numFailures();
 
@@ -1435,7 +1641,6 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     SecurityUtil.login(originalConf, TT_KEYTAB_FILE, TT_USER_NAME);
 
     initialize();
-    this.shuffleServerMetrics = ShuffleServerInstrumentation.create(this);
     server.setAttribute("task.tracker", this);
     server.setAttribute("local.file.system", local);
 
@@ -1443,14 +1648,10 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     server.setAttribute("localDirAllocator", localDirAllocator);
     server.setAttribute("shuffleServerMetrics", shuffleServerMetrics);
 
-    String exceptionStackRegex =
-      conf.get("mapreduce.reduce.shuffle.catch.exception.stack.regex");
-    String exceptionMsgRegex =
-      conf.get("mapreduce.reduce.shuffle.catch.exception.message.regex");
-
+    String exceptionStackRegex = conf.get("mapreduce.reduce.shuffle.catch.exception.stack.regex");
+    String exceptionMsgRegex = conf.get("mapreduce.reduce.shuffle.catch.exception.message.regex");
     server.setAttribute("exceptionStackRegex", exceptionStackRegex);
     server.setAttribute("exceptionMsgRegex", exceptionMsgRegex);
-
     server.addInternalServlet("mapOutput", "/mapOutput", MapOutputServlet.class);
     server.addServlet("taskLog", "/tasklog", TaskLogServlet.class);
     server.start();
@@ -1529,52 +1730,67 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     return recentMapEvents;
   }
 
-  private long getHeartbeatInterval(int numFinishedTasks) {
-    return (heartbeatInterval / (numFinishedTasks * oobHeartbeatDamper + 1));
+  /**
+   * @return true if this tasktracker is permitted to connect to
+   *    the given jobtracker version
+   */
+  boolean isPermittedVersion(String jtBuildVersion, String jtVersion) {
+    boolean buildVersionMatch =
+      jtBuildVersion.equals(VersionInfo.getBuildVersion());
+    boolean versionMatch = jtVersion.equals(VersionInfo.getVersion());
+    if (buildVersionMatch && !versionMatch) {
+      throw new AssertionError("Invalid build. The build versions match" +
+          " but the JT version is " + jtVersion +
+          " and the TT version is " + VersionInfo.getVersion());
+    }
+    if (relaxedVersionCheck) {
+      if (!buildVersionMatch && versionMatch) {
+        LOG.info("Permitting tasktracker revision " + VersionInfo.getRevision() +
+            " to connect to jobtracker " + jtBuildVersion + " because " +
+            CommonConfigurationKeys.HADOOP_RELAXED_VERSION_CHECK_KEY +
+            " is enabled");
+      }
+      return versionMatch;
+    } else {
+      return buildVersionMatch;
+    }
   }
-  
+
   /**
    * Main service loop.  Will stay in this loop forever.
    */
   State offerService() throws Exception {
-    long lastHeartbeat = System.currentTimeMillis();
+    long lastHeartbeat = 0;
 
     while (running && !shuttingDown) {
       try {
         long now = System.currentTimeMillis();
-        
-        // accelerate to account for multiple finished tasks up-front
-        long remaining = 
-          (lastHeartbeat + getHeartbeatInterval(finishedCount.get())) - now;
-        while (remaining > 0) {
+
+        long waitTime = heartbeatInterval - (now - lastHeartbeat);
+        if (waitTime > 0) {
           // sleeps for the wait time or 
-          // until there are *enough* empty slots to schedule tasks
+          // until there are empty slots to schedule tasks
           synchronized (finishedCount) {
-            finishedCount.wait(remaining);
-            
-            // Recompute
-            now = System.currentTimeMillis();
-            remaining = 
-              (lastHeartbeat + getHeartbeatInterval(finishedCount.get())) - now;
-            
-            if (remaining <= 0) {
-              // Reset count 
-              finishedCount.set(0);
-              break;
+            if (finishedCount.get() == 0) {
+              finishedCount.wait(waitTime);
             }
+            finishedCount.set(0);
           }
         }
 
         // If the TaskTracker is just starting up:
-        // 1. Verify the buildVersion
+        // 1. Verify the versions matches with the JobTracker
         // 2. Get the system directory & filesystem
         if(justInited) {
-          String jobTrackerBV = jobClient.getBuildVersion();
-          if(!VersionInfo.getBuildVersion().equals(jobTrackerBV)) {
+          String jtBuildVersion = jobClient.getBuildVersion();
+          String jtVersion = jobClient.getVIVersion();
+          if (!isPermittedVersion(jtBuildVersion, jtVersion)) {
             String msg = "Shutting down. Incompatible buildVersion." +
-            "\nJobTracker's: " + jobTrackerBV + 
-            "\nTaskTracker's: "+ VersionInfo.getBuildVersion();
-            LOG.error(msg);
+              "\nJobTracker's: " + jtBuildVersion + 
+              "\nTaskTracker's: "+ VersionInfo.getBuildVersion() +
+              " and " + CommonConfigurationKeys.HADOOP_RELAXED_VERSION_CHECK_KEY +
+              " is " + (relaxedVersionCheck ? "enabled" : "not enabled");
+            LOG.fatal(msg);
             try {
               jobClient.reportTaskTrackerError(taskTrackerName, null, msg);
             } catch(Exception e ) {
@@ -1593,7 +1809,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
 
         now = System.currentTimeMillis();
         if (now > (lastCheckDirsTime + diskHealthCheckInterval)) {
-          localStorage.checkDirs();
+          localStorage.checkDirs(localFs, false);
           lastCheckDirsTime = now;
           int numFailures = localStorage.numFailures();
           // Re-init the task tracker if there were any new failures
@@ -1695,7 +1911,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
           jobClient.reportTaskTrackerError(taskTrackerName, 
                                            "DiskErrorException", msg);
         }
-        return State.STALE;
+        // If we caught a DEE here we have no good dirs, therefore shutdown.
+        return State.DENIED;
       } catch (RemoteException re) {
         String reClass = re.getClassName();
         if (DisallowedTaskTrackerException.class.getName().equals(reClass)) {
@@ -1746,7 +1963,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
                                        httpPort, 
                                        cloneAndResetRunningTaskStatuses(
                                          sendCounters), 
-                                       failures, 
+                                       taskFailures,
+                                       localStorage.numFailures(),
                                        maxMapSlots,
                                        maxReduceSlots); 
       }
@@ -1830,7 +2048,11 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
           } else {
             reduceTotal--;
           }
-          myInstrumentation.completeTask(taskStatus.getTaskID());
+          try {
+            myInstrumentation.completeTask(taskStatus.getTaskID());
+          } catch (MetricsException me) {
+            LOG.warn("Caught: " + StringUtils.stringifyException(me));
+          }
           runningTasks.remove(taskStatus.getTaskID());
         }
       }
@@ -1947,6 +2169,15 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   }
   
   /**
+   * @return The amount of physical memory that will not be used for running
+   *         tasks in bytes. Returns JobConf.DISABLED_MEMORY_LIMIT if it is not
+   *         configured.
+   */
+  long getReservedPhysicalMemoryOnTT() {
+    return reservedPhysicalMemoryOnTT;
+  }
+
+  /**
    * Check if the jobtracker directed a 'reset' of the tasktracker.
    * 
    * @param actions the directives of the jobtracker for the tasktracker.
@@ -1958,7 +2189,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       for (TaskTrackerAction action : actions) {
         if (action.getActionId() == 
             TaskTrackerAction.ActionType.REINIT_TRACKER) {
-          LOG.info("Recieved ReinitTrackerAction from JobTracker");
+          LOG.info("Recieved RenitTrackerAction from JobTracker");
           return true;
         }
       }
@@ -2054,8 +2285,9 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       runningJobs.remove(jobId);
     }
     getJobTokenSecretManager().removeTokenForJob(jobId.toString());  
-  }      
-    
+    distributedCacheManager.removeTaskDistributedCacheManager(jobId);
+  }
+
   /**
    * This job's files are no longer needed on this TT, remove them.
    *
@@ -2368,53 +2600,61 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     }
     return tip;
   }
-
   /**
    * Start a new task.
    * All exceptions are handled locally, so that we don't mess up the
    * task tracker.
    * @throws InterruptedException 
    */
-  void startNewTask(final TaskInProgress tip) throws InterruptedException {
-    Thread launchThread = new Thread(new Runnable() {
-      @Override
-      public void run() {
-        try {
-          RunningJob rjob = localizeJob(tip);
-          tip.getTask().setJobFile(rjob.getLocalizedJobConf().toString());
-          // Localization is done. Neither rjob.jobConf nor rjob.ugi can be null
-          launchTaskForJob(tip, new JobConf(rjob.getJobConf()), rjob); 
-        } catch (Throwable e) {
-          String msg = ("Error initializing " + tip.getTask().getTaskID() + 
-                        ":\n" + StringUtils.stringifyException(e));
-          LOG.warn(msg);
-          tip.reportDiagnosticInfo(msg);
-          try {
-            tip.kill(true);
-            tip.cleanup(true);
-          } catch (IOException ie2) {
-            LOG.info("Error cleaning up " + tip.getTask().getTaskID(), ie2);
-          } catch (InterruptedException ie2) {
-            LOG.info("Error cleaning up " + tip.getTask().getTaskID(), ie2);
-          }
-          if (e instanceof Error) {
-            LOG.error("TaskLauncher error " + 
-                StringUtils.stringifyException(e));
-          }
-        }
+  void startNewTask(TaskInProgress tip) throws InterruptedException {
+    try {
+      RunningJob rjob = localizeJob(tip);
+      tip.getTask().setJobFile(rjob.localizedJobConf.toString());
+      // Localization is done. Neither rjob.jobConf nor rjob.ugi can be null
+      launchTaskForJob(tip, new JobConf(rjob.jobConf), rjob); 
+    } catch (Throwable e) {
+      String msg = ("Error initializing " + tip.getTask().getTaskID() + 
+                    ":\n" + StringUtils.stringifyException(e));
+      LOG.warn(msg);
+      tip.reportDiagnosticInfo(msg);
+      try {
+        tip.kill(true);
+        tip.cleanup(true);
+      } catch (IOException ie2) {
+        LOG.info("Error cleaning up " + tip.getTask().getTaskID(), ie2);
+      } catch (InterruptedException ie2) {
+        LOG.info("Error cleaning up " + tip.getTask().getTaskID(), ie2);
       }
-    });
-    launchThread.start();
+        
+      // Careful! 
+      // This might not be an 'Exception' - don't handle 'Error' here!
+      if (e instanceof Error) {
+        throw ((Error) e);
+      }
+    }
   }
-
+  
   void addToMemoryManager(TaskAttemptID attemptId, boolean isMap,
                           JobConf conf) {
-    if (isTaskMemoryManagerEnabled()) {
-      taskMemoryManager.addTask(attemptId, 
-          isMap ? conf
-              .getMemoryForMapTask() * 1024 * 1024L : conf
-              .getMemoryForReduceTask() * 1024 * 1024L);
+    if (!isTaskMemoryManagerEnabled()) {
+      return; // Skip this if TaskMemoryManager is not enabled.
     }
+    // Obtain physical memory limits from the job configuration
+    long physicalMemoryLimit =
+      conf.getLong(isMap ? JobContext.MAP_MEMORY_PHYSICAL_MB :
+                   JobContext.REDUCE_MEMORY_PHYSICAL_MB,
+                   JobConf.DISABLED_MEMORY_LIMIT);
+    if (physicalMemoryLimit > 0) {
+      physicalMemoryLimit *= 1024L * 1024L;
+    }
+
+    // Obtain virtual memory limits from the job configuration
+    long virtualMemoryLimit = isMap ?
+      conf.getMemoryForMapTask() * 1024 * 1024 :
+      conf.getMemoryForReduceTask() * 1024 * 1024;
+
+    taskMemoryManager.addTask(attemptId, virtualMemoryLimit,
+                              physicalMemoryLimit);
   }
 
   void removeFromMemoryManager(TaskAttemptID attemptId) {
@@ -2430,7 +2670,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   private void notifyTTAboutTaskCompletion() {
     if (oobHeartbeatOnTaskCompletion) {
       synchronized (finishedCount) {
-        finishedCount.incrementAndGet();
+        int value = finishedCount.get();
+        finishedCount.set(value+1);
         finishedCount.notify();
       }
     }
@@ -2447,7 +2688,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       getUserLogManager().start();
       startCleanupThreads();
       boolean denied = false;
-      while (running && !shuttingDown && !denied) {
+      while (running && !shuttingDown) {
         boolean staleState = false;
         try {
           // This while-loop attempts reconnects if we get network errors
@@ -2471,9 +2712,15 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
             }
           }
         } finally {
-          close();
+          // If denied we'll close via shutdown below. We should close
+          // here even if shuttingDown as shuttingDown can be set even
+          // if shutdown is not called.
+          if (!denied) {
+            close();
+          }
         }
         if (shuttingDown) { return; }
+        if (denied) { break; }
         LOG.warn("Reinitializing local state");
         initialize();
       }
@@ -2484,8 +2731,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       LOG.error("Got fatal exception while reinitializing TaskTracker: " +
                 StringUtils.stringifyException(iex));
       return;
-    }
-    catch (InterruptedException i) {
+    } catch (InterruptedException i) {
       LOG.error("Got interrupted while reinitializing TaskTracker: " +
           i.getMessage());
       return;
@@ -2688,8 +2934,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
               "Groups=" + taskCounters.getGroupNames().size() + " Limit=" +
               Counters.MAX_GROUP_LIMIT);
           kill(true);
-        } catch (IOException e) {
-          LOG.error("Error killing task " + task.getTaskID(), e);
+        } catch(IOException ie) {
+          LOG.error("Error killing task " + task.getTaskID(), ie);
         } catch (InterruptedException e) {
           LOG.error("Error killing task " + task.getTaskID(), e);
         }
@@ -2837,7 +3083,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
         }
         if (!done) {
           if (!wasKilled) {
-            failures += 1;
+            taskFailures++;
             setTaskFailState(true);
             // call the script here for the failed tasks.
             if (debugCommand != null) {
@@ -3077,7 +3323,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
           isCleaningup()) {
         wasKilled = true;
         if (wasFailure) {
-          failures += 1;
+          taskFailures++;
         }
         // runner could be null if task-cleanup attempt is not localized yet
         if (runner != null) {
@@ -3086,7 +3332,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
         setTaskFailState(wasFailure);
       } else if (taskStatus.getRunState() == TaskStatus.State.UNASSIGNED) {
         if (wasFailure) {
-          failures += 1;
+          taskFailures++;
           taskStatus.setRunState(TaskStatus.State.FAILED);
         } else {
           taskStatus.setRunState(TaskStatus.State.KILLED);
@@ -3221,7 +3467,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       return task.getTaskID().hashCode();
     }
   }
-  
+ 
   private void validateJVM(TaskInProgress tip, JvmContext jvmContext, TaskAttemptID taskid) throws IOException {
     if (jvmContext == null) {
       LOG.warn("Null jvmContext. Cannot verify Jvm. validateJvm throwing exception");
@@ -3231,8 +3477,14 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       throw new IOException("JvmValidate Failed. Ignoring request from task: " + taskid + ", with JvmId: " + jvmContext.jvmId);
     }
   }
-  
-  private void authorizeJVM(org.apache.hadoop.mapreduce.JobID jobId) 
+
+  /**
+   * Check that the current UGI is the JVM authorized to report
+   * for this particular job.
+   *
+   * @throws IOException for unauthorized access
+   */
+  private void ensureAuthorizedJVM(org.apache.hadoop.mapreduce.JobID jobId)
   throws IOException {
     String currentJobId = 
       UserGroupInformation.getCurrentUser().getUserName();
@@ -3252,7 +3504,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    */
   public synchronized JvmTask getTask(JvmContext context) 
   throws IOException {
-    authorizeJVM(context.jvmId.getJobId());
+    ensureAuthorizedJVM(context.jvmId.getJobId());
     JVMId jvmId = context.jvmId;
     LOG.debug("JVM with ID : " + jvmId + " asked for a task");
     // save pid of task JVM sent by child
@@ -3291,10 +3543,10 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    * Called periodically to report Task progress, from 0.0 to 1.0.
    */
   public synchronized boolean statusUpdate(TaskAttemptID taskid, 
-                                              TaskStatus taskStatus, 
-                                              JvmContext jvmContext) 
+                                              TaskStatus taskStatus,
+                                              JvmContext jvmContext)
   throws IOException {
-    authorizeJVM(taskid.getJobID());
+    ensureAuthorizedJVM(taskid.getJobID());
     TaskInProgress tip = tasks.get(taskid);
     if (tip != null) {
       try {
@@ -3317,7 +3569,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    */
   public synchronized void reportDiagnosticInfo(TaskAttemptID taskid,
       String info, JvmContext jvmContext) throws IOException {
-    authorizeJVM(taskid.getJobID());
+    ensureAuthorizedJVM(taskid.getJobID());
     TaskInProgress tip = tasks.get(taskid);
     if (tip != null) {
       validateJVM(tip, jvmContext, taskid);
@@ -3326,14 +3578,13 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       LOG.warn("Error from unknown child task: "+taskid+". Ignored.");
     }
   }
+
   /**
-   * Meant to be used internally
-   * @param taskid
-   * @param info
-   * @throws IOException
+   * Same as reportDiagnosticInfo but does not authorize caller. This is used
+   * internally within MapReduce, whereas reportDiagonsticInfo may be called
+   * via RPC.
    */
-  synchronized void reportDiagnosticInfoInternal(TaskAttemptID taskid, 
-      String info) throws IOException {
+  synchronized void internalReportDiagnosticInfo(TaskAttemptID taskid, String info) throws IOException {
     TaskInProgress tip = tasks.get(taskid);
     if (tip != null) {
       tip.reportDiagnosticInfo(info);
@@ -3344,7 +3595,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   
   public synchronized void reportNextRecordRange(TaskAttemptID taskid, 
       SortedRanges.Range range, JvmContext jvmContext) throws IOException {
-    authorizeJVM(taskid.getJobID());
+    ensureAuthorizedJVM(taskid.getJobID());
     TaskInProgress tip = tasks.get(taskid);
     if (tip != null) {
       validateJVM(tip, jvmContext, taskid);
@@ -3355,10 +3606,10 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     }
   }
 
-  /** Child checking to see if we're alive. Normally does nothing. */
+  /** Child checking to see if we're alive.  Normally does nothing.*/
   public synchronized boolean ping(TaskAttemptID taskid, JvmContext jvmContext)
       throws IOException {
-    authorizeJVM(taskid.getJobID());
+    ensureAuthorizedJVM(taskid.getJobID());
     TaskInProgress tip = tasks.get(taskid);
     if (tip != null) {
       validateJVM(tip, jvmContext, taskid);
@@ -3376,7 +3627,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
                                          TaskStatus taskStatus,
                                          JvmContext jvmContext) 
   throws IOException {
-    authorizeJVM(taskid.getJobID());
+    ensureAuthorizedJVM(taskid.getJobID());
     LOG.info("Task " + taskid + " is in commit-pending," +"" +
              " task state:" +taskStatus.getRunState());
     // validateJVM is done in statusUpdate
@@ -3391,7 +3642,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    */
   public synchronized boolean canCommit(TaskAttemptID taskid,
       JvmContext jvmContext) throws IOException {
-    authorizeJVM(taskid.getJobID());
+    ensureAuthorizedJVM(taskid.getJobID());
     TaskInProgress tip = tasks.get(taskid);
     validateJVM(tip, jvmContext, taskid);
     return commitResponses.contains(taskid); // don't remove it now
@@ -3402,7 +3653,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    */
   public synchronized void done(TaskAttemptID taskid, JvmContext jvmContext) 
   throws IOException {
-    authorizeJVM(taskid.getJobID());
+    ensureAuthorizedJVM(taskid.getJobID());
     TaskInProgress tip = tasks.get(taskid);
     if (tip != null) {
       validateJVM(tip, jvmContext, taskid);
@@ -3419,7 +3670,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    */  
   public synchronized void shuffleError(TaskAttemptID taskId, String message, JvmContext jvmContext) 
   throws IOException { 
-    authorizeJVM(taskId.getJobID());
+    ensureAuthorizedJVM(taskId.getJobID());
     TaskInProgress tip = runningTasks.get(taskId);
     if (tip != null) {
       validateJVM(tip, jvmContext, taskId);
@@ -3437,7 +3688,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    */  
   public synchronized void fsError(TaskAttemptID taskId, String message,
       JvmContext jvmContext) throws IOException {
-    authorizeJVM(taskId.getJobID());
+    ensureAuthorizedJVM(taskId.getJobID());
     TaskInProgress tip = runningTasks.get(taskId);
     if (tip != null) {
       validateJVM(tip, jvmContext, taskId);
@@ -3448,13 +3699,12 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       LOG.warn("Unknown child task fsError: "+taskId+". Ignored.");
     }
   }
+
   /**
-   * Meant to be used internally
-   * @param taskId
-   * @param message
-   * @throws IOException
+   * Version of fsError() that does not do authorization checks, called by
+   * the TaskRunner.
    */
-  synchronized void fsErrorInternal(TaskAttemptID taskId, String message) 
+  synchronized void internalFsError(TaskAttemptID taskId, String message)
   throws IOException {
     LOG.fatal("Task: " + taskId + " - Killed due to FSError: " + message);
     TaskInProgress tip = runningTasks.get(taskId);
@@ -3467,7 +3717,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
    */  
   public synchronized void fatalError(TaskAttemptID taskId, String msg,
       JvmContext jvmContext) throws IOException {
-    authorizeJVM(taskId.getJobID());
+    ensureAuthorizedJVM(taskId.getJobID());
     TaskInProgress tip = runningTasks.get(taskId);
     if (tip != null) {
       validateJVM(tip, jvmContext, taskId);
@@ -3488,7 +3738,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
           + ". Ignoring getMapCompletionEvents Request");
     }
     validateJVM(tip, jvmContext, id);
-    authorizeJVM(jobId);
+    ensureAuthorizedJVM(jobId);
     TaskCompletionEvent[]mapEvents = TaskCompletionEvent.EMPTY_ARRAY;
     synchronized (shouldReset) {
       if (shouldReset.remove(id)) {
@@ -3587,10 +3837,6 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
 
     JobConf getJobConf() {
       return jobConf;
-    }
-
-    Path getLocalizedJobConf() {
-      return localizedJobConf;
     }
   }
 
@@ -3691,9 +3937,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       // enable the server to track time spent waiting on locks
       ReflectionUtils.setContentionTracing
         (conf.getBoolean("tasktracker.contention.tracking", false));
-      DefaultMetricsSystem.initialize("TaskTracker");
       TaskTracker tt = new TaskTracker(conf);
-      MBeans.register("TaskTracker", "TaskTrackerInfo", tt);
+      MBeanUtil.registerMBean("TaskTracker", "TaskTrackerInfo", tt);
       tt.run();
     } catch (Throwable e) {
       LOG.error("Can not start task tracker because "+
@@ -3743,7 +3988,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   public static class MapOutputServlet extends HttpServlet {
     private static final long serialVersionUID = 1L;
     private static final int MAX_BYTES_TO_READ = 64 * 1024;
-    
+    // work around jetty internal buffering issues
+    private static final int RESPONSE_BUFFER_SIZE = MAX_BYTES_TO_READ + 16;
     private static LRUCache<String, Path> fileCache = new LRUCache<String, Path>(FILE_CACHE_SIZE);
     private static LRUCache<String, Path> fileIndexCache = new LRUCache<String, Path>(FILE_CACHE_SIZE);
     
@@ -3771,8 +4017,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       FileInputStream mapOutputIn = null;
  
       long totalRead = 0;
-      ShuffleServerInstrumentation shuffleMetrics =
-        (ShuffleServerInstrumentation) context.getAttribute("shuffleServerMetrics");
+      ShuffleServerMetrics shuffleMetrics =
+        (ShuffleServerMetrics) context.getAttribute("shuffleServerMetrics");
       TaskTracker tracker = 
         (TaskTracker) context.getAttribute("task.tracker");
       String exceptionStackRegex =
@@ -3787,6 +4033,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
         shuffleMetrics.serverHandlerBusy();
         if(ClientTraceLog.isInfoEnabled())
           startTime = System.nanoTime();
+        response.setContentType("application/octet-stream");
         outStream = response.getOutputStream();
         JobConf conf = (JobConf) context.getAttribute("conf");
         LocalDirAllocator lDirAlloc = 
@@ -3820,7 +4067,6 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
         mapOutputFileName = lDirAlloc.getLocalPathToRead(fileKey, conf);
         fileCache.put(fileKey, mapOutputFileName);
       }
-       
 
         /**
          * Read the index file to get the information about where
@@ -3847,25 +4093,40 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
         //set the custom "for-reduce-task" http header to the reduce task number
         //for which this map output is being transferred
         response.setHeader(FOR_REDUCE_TASK, Integer.toString(reduce));
-        
-        //use the same buffersize as used for reading the data from disk
-        response.setBufferSize(MAX_BYTES_TO_READ);
-        
+
+        response.setBufferSize(RESPONSE_BUFFER_SIZE);
+
         /**
          * Read the data from the sigle map-output file and
          * send it to the reducer.
          */
         //open the map-output file
+        String filePath = mapOutputFileName.toUri().getPath();
         mapOutputIn = SecureIOUtils.openForRead(
-            new File(mapOutputFileName.toUri().getPath()), runAsUserName);
+            new File(filePath), runAsUserName);
+
+        // readahead if possible
+        ReadaheadRequest curReadahead = null;
 
         //seek to the correct offset for the reduce
         mapOutputIn.skip(info.startOffset);
         long rem = info.partLength;
-        int len =
-          mapOutputIn.read(buffer, 0, (int)Math.min(rem, MAX_BYTES_TO_READ));
-        while (rem > 0 && len >= 0) {
+        long offset = info.startOffset;
+        while (rem > 0) {
+          if (tracker.manageOsCacheInShuffle && tracker.readaheadPool != null) {
+            curReadahead = tracker.readaheadPool.readaheadStream(
+              filePath, mapOutputIn.getFD(),
+              offset, tracker.readaheadLength,
+              info.startOffset + info.partLength,
+              curReadahead);
+          }
+          int len =
+            mapOutputIn.read(buffer, 0, (int)Math.min(rem, MAX_BYTES_TO_READ));
+          if (len < 0) {
+            break;
+          }
           rem -= len;
+          offset += len;
           try {
             shuffleMetrics.outputBytes(len);
             outStream.write(buffer, 0, len);
@@ -3875,23 +4136,31 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
             throw ie;
           }
           totalRead += len;
-          len =
-            mapOutputIn.read(buffer, 0, (int)Math.min(rem, MAX_BYTES_TO_READ));
+        }
+
+        if (curReadahead != null) {
+          curReadahead.cancel();
         }
         
+        // drop cache if possible
+        if (tracker.manageOsCacheInShuffle && info.partLength > 0) {
+          NativeIO.posixFadviseIfPossible(mapOutputIn.getFD(),
+              info.startOffset, info.partLength, NativeIO.POSIX_FADV_DONTNEED);
+        }
+
         if (LOG.isDebugEnabled()) {
           LOG.info("Sent out " + totalRead + " bytes for reduce: " + reduce + 
                  " from map: " + mapId + " given " + info.partLength + "/" + 
                  info.rawLength);
         }
-
       } catch (IOException ie) {
         Log log = (Log) context.getAttribute("log");
         String errorMsg = ("getMapOutput(" + mapId + "," + reduceId + 
                            ") failed :\n"+
                            StringUtils.stringifyException(ie));
         log.warn(errorMsg);
-        checkException(ie, exceptionMsgRegex, exceptionStackRegex, shuffleMetrics);
+        checkException(ie, exceptionMsgRegex, exceptionStackRegex,
+            shuffleMetrics);
         if (isInputException) {
           tracker.mapOutputLost(TaskAttemptID.forName(mapId), errorMsg);
         }
@@ -3916,7 +4185,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     }
     
     protected void checkException(IOException ie, String exceptionMsgRegex,
-        String exceptionStackRegex, ShuffleServerInstrumentation shuffleMetrics) {
+        String exceptionStackRegex, ShuffleServerMetrics shuffleMetrics) {
       // parse exception to see if it looks like a regular expression you
       // configure. If both msgRegex and StackRegex set then make sure both
       // match, otherwise only the one set has to match.
@@ -3945,7 +4214,6 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       }
       return false;
     }
-
 
     /**
      * verify that request has correct HASH for the url
@@ -4007,13 +4275,14 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
     return paths;
   }
 
+  // only used by tests
   FileSystem getLocalFileSystem(){
     return localFs;
   }
 
   // only used by tests
   void setLocalFileSystem(FileSystem fs){
-    localFs = fs;
+    localFs = (LocalFileSystem)fs;
   }
 
   int getMaxCurrentMapTasks() {
@@ -4022,6 +4291,10 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   
   int getMaxCurrentReduceTasks() {
     return maxReduceSlots;
+  }
+
+  int getNumDirFailures() {
+    return localStorage.numFailures();
   }
 
   //called from unit test
@@ -4044,6 +4317,10 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   
   public TaskMemoryManagerThread getTaskMemoryManager() {
     return taskMemoryManager;
+  }
+  
+  synchronized TaskInProgress getRunningTask(TaskAttemptID tid) {
+    return runningTasks.get(tid);
   }
 
   /**
@@ -4162,6 +4439,14 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
           + " Thrashing might happen.");
     }
 
+    reservedPhysicalMemoryOnTT =
+      fConf.getLong(TT_RESERVED_PHYSICALMEMORY_MB,
+                    JobConf.DISABLED_MEMORY_LIMIT);
+    reservedPhysicalMemoryOnTT =
+      reservedPhysicalMemoryOnTT == JobConf.DISABLED_MEMORY_LIMIT ?
+      JobConf.DISABLED_MEMORY_LIMIT :
+      reservedPhysicalMemoryOnTT * 1024 * 1024; // normalize to bytes
+
     // start the taskMemoryManager thread only if enabled
     setTaskMemoryManagerEnabledFlag();
     if (isTaskMemoryManagerEnabled()) {
@@ -4179,10 +4464,12 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       return;
     }
 
-    if (totalMemoryAllottedForTasks == JobConf.DISABLED_MEMORY_LIMIT) {
+    if (reservedPhysicalMemoryOnTT == JobConf.DISABLED_MEMORY_LIMIT
+        && totalMemoryAllottedForTasks == JobConf.DISABLED_MEMORY_LIMIT) {
       taskMemoryManagerEnabled = false;
-      LOG.warn("TaskTracker's totalMemoryAllottedForTasks is -1."
-          + " TaskMemoryManager is disabled.");
+      LOG.warn("TaskTracker's totalMemoryAllottedForTasks is -1 and " +
+               "reserved physical memory is not configured. " +
+               "TaskMemoryManager is disabled.");
       return;
     }
 
@@ -4344,7 +4631,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
   updatePrivateDistributedCacheSizes(org.apache.hadoop.mapreduce.JobID jobId,
                                      long[] sizes
                                      ) throws IOException {
-    authorizeJVM(jobId);
+    ensureAuthorizedJVM(jobId);
     distributedCacheManager.setArchiveSizes(jobId, sizes);
   }
 

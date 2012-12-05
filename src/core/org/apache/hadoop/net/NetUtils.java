@@ -39,15 +39,14 @@ import javax.net.SocketFactory;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.commons.net.util.SubnetUtils;
+import org.apache.commons.net.util.SubnetUtils.SubnetInfo;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.ipc.VersionedProtocol;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.util.ReflectionUtils;
-
-// this will need to be replaced someday when there is a suitable replacement
-import sun.net.dns.ResolverConfiguration;
-import sun.net.util.IPAddressUtil;
+import org.apache.hadoop.thirdparty.guava.common.base.Preconditions;
 
 public class NetUtils {
   private static final Log LOG = LogFactory.getLog(NetUtils.class);
@@ -55,25 +54,6 @@ public class NetUtils {
   private static Map<String, String> hostToResolved = 
                                      new HashMap<String, String>();
 
-  private static HostResolver hostResolver;
-  
-  static {
-    // SecurityUtils requires a more secure host resolver if tokens are
-    // using hostnames
-    setUseQualifiedHostResolver(!SecurityUtil.getTokenServiceUseIp());
-  }
-
-  /**
-   * This method is intended for use only by SecurityUtils!
-   * @param flag where the qualified or standard host resolver is used
-   *             to create socket addresses
-   */
-  public static void setUseQualifiedHostResolver(boolean flag) {
-      hostResolver = flag
-          ? new QualifiedHostResolver()
-          : new StandardHostResolver();
-  }
-  
   /**
    * Get the socket factory for the given class according to its
    * configuration parameter
@@ -188,7 +168,7 @@ public class NetUtils {
     }
     return makeSocketAddr(host, port);
   }
-  
+
   /**
    * Create a socket address with the given host and port.  The hostname
    * might be replaced with another host that was set via
@@ -206,7 +186,7 @@ public class NetUtils {
     
     InetSocketAddress addr;
     try {
-      InetAddress iaddr = hostResolver.getByName(resolveHost);
+      InetAddress iaddr = SecurityUtil.getByName(resolveHost);
       // if there is a static entry for the host, make the returned
       // address look like the original given host
       if (staticHost != null) {
@@ -217,150 +197,6 @@ public class NetUtils {
       addr = InetSocketAddress.createUnresolved(host, port);
     }
     return addr;
-  }
-  
-  protected interface HostResolver {
-    InetAddress getByName(String host) throws UnknownHostException;    
-  }
-  
-  /**
-   * Uses standard java host resolution
-   */
-  protected static class StandardHostResolver implements HostResolver {
-    public InetAddress getByName(String host) throws UnknownHostException {
-      return InetAddress.getByName(host);
-    }
-  }
-  
-  /**
-   * This an alternate resolver with important properties that the standard
-   * java resolver lacks:
-   * 1) The hostname is fully qualified.  This avoids security issues if not
-   *    all hosts in the cluster do not share the same search domains.  It
-   *    also prevents other hosts from performing unnecessary dns searches.
-   *    In contrast, InetAddress simply returns the host as given.
-   * 2) The InetAddress is instantiated with an exact host and IP to prevent
-   *    further unnecessary lookups.  InetAddress may perform an unnecessary
-   *    reverse lookup for an IP.
-   * 3) A call to getHostName() will always return the qualified hostname, or
-   *    more importantly, the IP if instantiated with an IP.  This avoids
-   *    unnecessary dns timeouts if the host is not resolvable.
-   * 4) Point 3 also ensures that if the host is re-resolved, ex. during a
-   *    connection re-attempt, that a reverse lookup to host and forward
-   *    lookup to IP is not performed since the reverse/forward mappings may
-   *    not always return the same IP.  If the client initiated a connection
-   *    with an IP, then that IP is all that should ever be contacted.
-   *    
-   * NOTE: this resolver is only used if:
-   *       hadoop.security.token.service.use_ip=false 
-   */
-  protected static class QualifiedHostResolver implements HostResolver {
-    @SuppressWarnings("unchecked")
-    private List<String> searchDomains =
-        ResolverConfiguration.open().searchlist();
-    
-    /**
-     * Create an InetAddress with a fully qualified hostname of the given
-     * hostname.  InetAddress does not qualify an incomplete hostname that
-     * is resolved via the domain search list.
-     * {@link InetAddress#getCanonicalHostName()} will fully qualify the
-     * hostname, but it always return the A record whereas the given hostname
-     * may be a CNAME.
-     * 
-     * @param host a hostname or ip address
-     * @return InetAddress with the fully qualified hostname or ip
-     * @throws UnknownHostException if host does not exist
-     */
-    public InetAddress getByName(String host) throws UnknownHostException {
-      InetAddress addr = null;
-
-      if (IPAddressUtil.isIPv4LiteralAddress(host)) {
-        // use ipv4 address as-is
-        byte[] ip = IPAddressUtil.textToNumericFormatV4(host);
-        addr = InetAddress.getByAddress(host, ip);
-      } else if (IPAddressUtil.isIPv6LiteralAddress(host)) {
-        // use ipv6 address as-is
-        byte[] ip = IPAddressUtil.textToNumericFormatV6(host);
-        addr = InetAddress.getByAddress(host, ip);
-      } else if (host.endsWith(".")) {
-        // a rooted host ends with a dot, ex. "host."
-        // rooted hosts never use the search path, so only try an exact lookup
-        addr = getByExactName(host);
-      } else if (host.contains(".")) {
-        // the host contains a dot (domain), ex. "host.domain"
-        // try an exact host lookup, then fallback to search list
-        addr = getByExactName(host);
-        if (addr == null) {
-          addr = getByNameWithSearch(host);
-        }
-      } else {
-        // it's a simple host with no dots, ex. "host"
-        // try the search list, then fallback to exact host
-        InetAddress loopback = InetAddress.getByName(null);
-        if (host.equalsIgnoreCase(loopback.getHostName())) {
-          addr = InetAddress.getByAddress(host, loopback.getAddress());
-        } else {
-          addr = getByNameWithSearch(host);
-          if (addr == null) {
-            addr = getByExactName(host);
-          }
-        }
-      }
-      // unresolvable!
-      if (addr == null) {
-        throw new UnknownHostException(host);
-      }
-      return addr;
-    }
-
-    InetAddress getByExactName(String host) {
-      InetAddress addr = null;
-      // InetAddress will use the search list unless the host is rooted
-      // with a trailing dot.  The trailing dot will disable any use of the
-      // search path in a lower level resolver.  See RFC 1535.
-      String fqHost = host;
-      if (!fqHost.endsWith(".")) fqHost += ".";
-      try {
-        addr = getInetAddressByName(fqHost);
-        // can't leave the hostname as rooted or other parts of the system
-        // malfunction, ex. kerberos principals are lacking proper host
-        // equivalence for rooted/non-rooted hostnames
-        addr = InetAddress.getByAddress(host, addr.getAddress());
-      } catch (UnknownHostException e) {
-        // ignore, caller will throw if necessary
-      }
-      return addr;
-    }
-
-    InetAddress getByNameWithSearch(String host) {
-      InetAddress addr = null;
-      if (host.endsWith(".")) { // already qualified?
-        addr = getByExactName(host); 
-      } else {
-        for (String domain : searchDomains) {
-          String dot = !domain.startsWith(".") ? "." : "";
-          addr = getByExactName(host + dot + domain);
-          if (addr != null) break;
-        }
-      }
-      return addr;
-    }
-
-    // implemented as a separate method to facilitate unit testing
-    InetAddress getInetAddressByName(String host) throws UnknownHostException {
-      return InetAddress.getByName(host);
-    }
-
-    void setSearchDomains(String ... domains) {
-      searchDomains = Arrays.asList(domains);
-    }
-  }
-  
-  /**
-   * This is for testing only!
-   */
-  static void setHostResolver(HostResolver newResolver) {
-    hostResolver = newResolver;
   }
   
   /**
@@ -404,7 +240,7 @@ public class NetUtils {
     String fqHost = canonicalizedHostCache.get(host);
     if (fqHost == null) {
       try {
-        fqHost = hostResolver.getByName(host).getHostName();
+        fqHost = SecurityUtil.getByName(host).getHostName();
         // slight race condition, but won't hurt 
         canonicalizedHostCache.put(host, fqHost);
       } catch (UnknownHostException e) {
@@ -523,7 +359,8 @@ public class NetUtils {
   }
   
   /**
-   * Same as getInputStream(socket, socket.getSoTimeout()).<br><br>
+   * Same as <code>getInputStream(socket, socket.getSoTimeout()).</code>
+   * <br><br>
    * 
    * From documentation for {@link #getInputStream(Socket, long)}:<br>
    * Returns InputStream for the socket. If the socket has an associated
@@ -537,10 +374,6 @@ public class NetUtils {
    * must use this interface instead of {@link Socket#getInputStream()}.
    *     
    * @see #getInputStream(Socket, long)
-   * 
-   * @param socket
-   * @return InputStream for reading from the socket.
-   * @throws IOException
    */
   public static InputStream getInputStream(Socket socket) 
                                            throws IOException {
@@ -548,28 +381,33 @@ public class NetUtils {
   }
   
   /**
-   * Returns InputStream for the socket. If the socket has an associated
-   * SocketChannel then it returns a 
-   * {@link SocketInputStream} with the given timeout. If the socket does not
-   * have a channel, {@link Socket#getInputStream()} is returned. In the later
-   * case, the timeout argument is ignored and the timeout set with 
-   * {@link Socket#setSoTimeout(int)} applies for reads.<br><br>
+   * Return a {@link SocketInputWrapper} for the socket and set the given
+   * timeout. If the socket does not have an associated channel, then its socket
+   * timeout will be set to the specified value. Otherwise, a
+   * {@link SocketInputStream} will be created which reads with the configured
+   * timeout.
    * 
    * Any socket created using socket factories returned by {@link NetUtils},
    * must use this interface instead of {@link Socket#getInputStream()}.
+   *
+   * In general, this should be called only once on each socket: see the note
+   * in {@link SocketInputWrapper#setTimeout(long)} for more information.
    *     
    * @see Socket#getChannel()
    * 
    * @param socket
-   * @param timeout timeout in milliseconds. This may not always apply. zero
-   *        for waiting as long as necessary.
-   * @return InputStream for reading from the socket.
+   * @param timeout timeout in milliseconds. zero for waiting as
+   *                long as necessary.
+   * @return SocketInputWrapper for reading from the socket.
    * @throws IOException
    */
-  public static InputStream getInputStream(Socket socket, long timeout) 
+  public static SocketInputWrapper getInputStream(Socket socket, long timeout) 
                                            throws IOException {
-    return (socket.getChannel() == null) ? 
-          socket.getInputStream() : new SocketInputStream(socket, timeout);
+    InputStream stm = (socket.getChannel() == null) ? 
+          socket.getInputStream() : new SocketInputStream(socket);
+    SocketInputWrapper w = new SocketInputWrapper(socket, stm);
+    w.setTimeout(timeout);
+    return w;
   }
   
   /**
@@ -622,7 +460,7 @@ public class NetUtils {
     return (socket.getChannel() == null) ? 
             socket.getOutputStream() : new SocketOutputStream(socket, timeout);            
   }
-  
+
   /**
    * This is a drop-in replacement for 
    * {@link Socket#connect(SocketAddress, int)}.
@@ -637,11 +475,27 @@ public class NetUtils {
    * @see java.net.Socket#connect(java.net.SocketAddress, int)
    * 
    * @param socket
-   * @param endpoint 
-   * @param timeout - timeout in milliseconds
+   * @param address the remote address
+   * @param timeout timeout in milliseconds
+   */
+  public static void connect(Socket socket,
+      SocketAddress address,
+      int timeout) throws IOException {
+    connect(socket, address, null, timeout);
+  }
+
+  /**
+   * Like {@link NetUtils#connect(Socket, SocketAddress, int)} but
+   * also takes a local address and port to bind the socket to. 
+   * 
+   * @param socket
+   * @param endpoint the remote address
+   * @param localAddr the local address to bind the socket to
+   * @param timeout timeout in milliseconds
    */
   public static void connect(Socket socket, 
-                             SocketAddress endpoint, 
+                             SocketAddress endpoint,
+                             SocketAddress localAddr,
                              int timeout) throws IOException {
     if (socket == null || endpoint == null || timeout < 0) {
       throw new IllegalArgumentException("Illegal argument for connect()");
@@ -649,6 +503,15 @@ public class NetUtils {
     
     SocketChannel ch = socket.getChannel();
     
+    if (localAddr != null) {
+      Class localClass = localAddr.getClass();
+      Class remoteClass = endpoint.getClass();
+      Preconditions.checkArgument(localClass.equals(remoteClass),
+          "Local address %s must be of same family as remote address %s.",
+          localAddr, endpoint);
+      socket.bind(localAddr);
+    }
+
     if (ch == null) {
       // let the default implementation handle it.
       socket.connect(endpoint, timeout);
@@ -710,35 +573,6 @@ public class NetUtils {
   }
 
   /**
-   * Performs a sanity check on the list of hostnames/IPs to verify they at least
-   * appear to be valid.
-   * @param names - List of hostnames/IPs
-   * @throws UnknownHostException
-   */
-  public static void verifyHostnames(String[] names) throws UnknownHostException {
-    for (String name: names) {
-      if (name == null) {
-        throw new UnknownHostException("null hostname found");
-      }
-      // The first check supports URL formats (e.g. hdfs://, etc.). 
-      // java.net.URI requires a schema, so we add a dummy one if it doesn't
-      // have one already.
-      URI uri = null;
-      try {
-        uri = new URI(name);
-        if (uri.getHost() == null) {
-          uri = new URI("http://" + name);
-        }
-      } catch (URISyntaxException e) {
-        uri = null;
-      }
-      if (uri == null || uri.getHost() == null) {
-        throw new UnknownHostException(name + " is not a valid Inet address");
-      }
-    }
-  }
-
-  /**
    * Checks if {@code host} is a local host name and return {@link InetAddress}
    * corresponding to that address.
    * 
@@ -759,5 +593,71 @@ public class NetUtils {
       }
     } catch (UnknownHostException ignore) { }
     return addr;
+  }
+
+  /**
+   * @return true if the given string is a subnet specified
+   *     using CIDR notation, false otherwise
+   */
+  public static boolean isValidSubnet(String subnet) {
+    try {
+      new SubnetUtils(subnet);
+      return true;
+    } catch (IllegalArgumentException iae) {
+      return false;
+    }
+  }
+
+  /**
+   * Add all addresses associated with the given nif in the
+   * given subnet to the given list.
+   */
+  private static void addMatchingAddrs(NetworkInterface nif,
+      SubnetInfo subnetInfo, List<InetAddress> addrs) {
+    Enumeration<InetAddress> ifAddrs = nif.getInetAddresses();
+    while (ifAddrs.hasMoreElements()) {
+      InetAddress ifAddr = ifAddrs.nextElement();
+      if (subnetInfo.isInRange(ifAddr.getHostAddress())) {
+        addrs.add(ifAddr);
+      }
+    }
+  }
+
+  /**
+   * Return an InetAddress for each interface that matches the
+   * given subnet specified using CIDR notation.
+   *
+   * @param subnet subnet specified using CIDR notation
+   * @param returnSubinterfaces
+   *            whether to return IPs associated with subinterfaces
+   * @throws IllegalArgumentException if subnet is invalid
+   */
+  public static List<InetAddress> getIPs(String subnet,
+      boolean returnSubinterfaces) {
+    List<InetAddress> addrs = new ArrayList<InetAddress>();
+    SubnetInfo subnetInfo = new SubnetUtils(subnet).getInfo();
+    Enumeration<NetworkInterface> nifs;
+
+    try {
+      nifs = NetworkInterface.getNetworkInterfaces();
+    } catch (SocketException e) {
+      LOG.error("Unable to get host interfaces", e);
+      return addrs;
+    }
+
+    while (nifs.hasMoreElements()) {
+      NetworkInterface nif = nifs.nextElement();
+      // NB: adding addresses even if the nif is not up
+      addMatchingAddrs(nif, subnetInfo, addrs);
+
+      if (!returnSubinterfaces) {
+        continue;
+      }
+      Enumeration<NetworkInterface> subNifs = nif.getSubInterfaces();
+      while (subNifs.hasMoreElements()) {
+        addMatchingAddrs(subNifs.nextElement(), subnetInfo, addrs);
+      }
+    }
+    return addrs;
   }
 }

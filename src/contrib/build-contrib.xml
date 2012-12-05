@@ -22,29 +22,27 @@
 <project name="hadoopbuildcontrib" xmlns:ivy="antlib:org.apache.ivy.ant">
 
   <property name="name" value="${ant.project.name}"/>
+  <dirname property="src.contrib.dir" file="${ant.file.hadoopbuildcontrib}" />
   <property name="root" value="${basedir}"/>
-  <property name="hadoop.root" location="${root}/../../../"/>
 
   <!-- Load all the default properties, and any the user wants    -->
   <!-- to contribute (without having to type -D or edit this file -->
   <property file="${user.home}/${name}.build.properties" />
   <property file="${root}/build.properties" />
-  <property file="${hadoop.root}/build.properties" />
 
+  <property name="hadoop.root" location="${src.contrib.dir}/../../"/>
   <property name="src.dir"  location="${root}/src/java"/>
   <property name="src.test" location="${root}/src/test"/>
+  <property name="src.examples" location="${root}/src/examples"/>
   <!-- Property added for contrib system tests -->
   <property name="src.test.system" location="${root}/src/test/system"/>
 
-  <property name="src.examples" location="${root}/src/examples"/>
-
   <available file="${src.examples}" type="dir" property="examples.available"/>
   <available file="${src.test}" type="dir" property="test.available"/>
-
   <!-- Property added for contrib system tests -->
   <available file="${src.test.system}" type="dir" 
       property="test.system.available"/>
- 
+
   <property name="conf.dir" location="${hadoop.root}/conf"/>
   <property name="test.junit.output.format" value="plain"/>
   <property name="test.output" value="no"/>
@@ -52,6 +50,10 @@
   <property name="build.contrib.dir" location="${hadoop.root}/build/contrib"/>
   <property name="build.dir" location="${hadoop.root}/build/contrib/${name}"/>
   <property name="build.classes" location="${build.dir}/classes"/>
+  <!-- NB: sun.arch.data.model is not supported on all platforms -->
+  <property name="build.platform"
+            value="${os.name}-${os.arch}-${sun.arch.data.model}"/>
+  <property name="build.c++.libhdfs" value="${build.dir}/../../c++/${build.platform}/lib"/>
   <property name="build.test" location="${build.dir}/test"/>
   <property name="build.examples" location="${build.dir}/examples"/>
   <property name="hadoop.log.dir" location="${build.dir}/test/logs"/>
@@ -85,6 +87,7 @@
   <property name="build.ivy.lib.dir" location="${build.ivy.dir}/lib" />
   <property name="build.ivy.report.dir" location="${build.ivy.dir}/report" />
   <property name="common.ivy.lib.dir" location="${build.ivy.lib.dir}/${ant.project.name}/common"/> 
+  <property name="hadoop.ivy.lib.dir" location="${build.ivy.lib.dir}/Hadoop/common"/>
 
   <!--this is the naming policy for artifacts we want pulled down-->
   <property name="ivy.artifact.retrieve.pattern"
@@ -96,6 +99,9 @@
     <pathelement location="${hadoop.root}/build/tools"/>
     <fileset refid="lib.jars"/>
     <pathelement location="${hadoop.root}/build/classes"/>
+    <fileset dir="${hadoop.ivy.lib.dir}">
+      <include name="*.jar" />
+    </fileset>
     <fileset dir="${hadoop.root}/lib">
       <include name="**/*.jar" />
     </fileset>
@@ -111,6 +117,7 @@
     <pathelement location="${conf.dir}"/>
     <pathelement location="${hadoop.root}/build"/>
     <pathelement location="${build.examples}"/>
+    <path refid="${ant.project.name}.test-classpath"/>
     <pathelement location="${hadoop.root}/build/examples"/>
     <path refid="contrib-classpath"/>
   </path>
@@ -141,10 +148,6 @@
        <exclude name="**/excluded/" />
      </fileset>
     <fileset dir="${hadoop.root}/build-fi/test/testjar">
-      <include name="**/*.jar" />
-      <exclude name="**/excluded/" />
-    </fileset>
-    <fileset dir="${hadoop.root}/build/contrib/${name}">
       <include name="**/*.jar" />
       <exclude name="**/excluded/" />
     </fileset>
@@ -207,7 +210,7 @@
   <!-- ================================================================== -->
   <!-- Compile test code                                                  -->
   <!-- ================================================================== -->
-  <target name="compile-test" depends="compile-examples" if="test.available">
+  <target name="compile-test" depends="compile-examples, ivy-retrieve-test" if="test.available">
     <echo message="contrib: ${name}"/>
     <javac
      encoding="${build.encoding}"
@@ -272,6 +275,17 @@
         <include name="hadoop-${name}-${version}.jar" />
       </fileset>
     </copy>
+
+    <!-- copy the dependency libraries into the contrib/lib dir -->
+    <mkdir dir="${dist.dir}/contrib/${name}/lib"/>
+    <copy todir="${dist.dir}/contrib/${name}/lib" includeEmptyDirs="false" flatten="true">
+      <fileset dir="${common.ivy.lib.dir}">
+        <!-- except for those already present due to Hadoop -->
+        <present present="srconly" targetdir="${dist.dir}/lib" />
+      </fileset>
+    </copy>
+    <!-- if the lib dir is empty, remove it. -->
+    <delete dir="${dist.dir}/contrib/${name}/lib" includeEmptyDirs="true" excludes="*.jar" />
   </target>
   
   <!-- ================================================================== -->
@@ -283,10 +297,11 @@
     <mkdir dir="${hadoop.log.dir}"/>
     <junit
       printsummary="yes" showoutput="${test.output}" 
-      haltonfailure="no" fork="yes" maxmemory="512m"
+      haltonfailure="no" fork="yes" maxmemory="256m"
       errorProperty="tests.failed" failureProperty="tests.failed"
       timeout="${test.timeout}">
       
+      <assertions><enable/></assertions>
       <sysproperty key="test.build.data" value="${build.test}/data"/>
       <sysproperty key="build.test" value="${build.test}"/>
       <sysproperty key="contrib.name" value="${name}"/>
@@ -298,10 +313,15 @@
       <sysproperty key="user.dir" value="${build.test}/data"/>
       
       <sysproperty key="fs.default.name" value="${fs.default.name}"/>
+      <sysproperty key="fs.defaultFS" value="${fs.defaultFS}"/>
+      <sysproperty key="mapred.job.tracker" value="${mapred.job.tracker}"/>
       <sysproperty key="hadoop.test.localoutputfile" value="${hadoop.test.localoutputfile}"/>
       <sysproperty key="hadoop.log.dir" value="${hadoop.log.dir}"/> 
       <sysproperty key="taskcontroller-path" value="${taskcontroller-path}"/>
       <sysproperty key="taskcontroller-ugi" value="${taskcontroller-ugi}"/>
+      <syspropertyset id="fairscheduler.properties">
+        <propertyref prefix="test.fairscheduler."/>
+      </syspropertyset>
       <classpath refid="test.classpath"/>
       <formatter type="${test.junit.output.format}" />
       <batchtest todir="${build.test}" unless="testcase">
@@ -318,7 +338,7 @@
   <!-- ================================================================== -->
   <!-- Run system tests                                                   -->
   <!-- ================================================================== -->
-  <target name="test-system" depends="compile, compile-test-system, jar"
+  <target name="test-system" depends="compile, compile-test-system"
      if="test.system.available">
      <delete dir="${build.test.system}/extraconf"/>
      <mkdir dir="${build.test.system}/extraconf"/>
@@ -420,5 +440,16 @@
     <ivy:retrieve settingsRef="${ant.project.name}.ivy.settings" 
       pattern="${build.ivy.lib.dir}/${ivy.artifact.retrieve.pattern}" sync="true" />
     <ivy:cachepath pathid="${ant.project.name}.common-classpath" conf="common" />
+  </target>
+
+  <target name="ivy-resolve-test" depends="ivy-init">
+    <ivy:resolve settingsRef="${ant.project.name}.ivy.settings" conf="test" />
+  </target>
+
+  <target name="ivy-retrieve-test" depends="ivy-resolve-test"
+    description="Retrieve Ivy-managed artifacts for the test configuration">
+    <ivy:retrieve settingsRef="${ant.project.name}.ivy.settings"
+      pattern="${build.ivy.lib.dir}/${ivy.artifact.retrieve.pattern}" sync="true" />
+    <ivy:cachepath pathid="${ant.project.name}.test-classpath" conf="test" />
   </target>
 </project>

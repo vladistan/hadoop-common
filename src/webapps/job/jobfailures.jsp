@@ -186,7 +186,6 @@
     String cause = request.getParameter("cause");
 %>
 
-<!DOCTYPE html>
 <html>
 <head>
 <title>Hadoop <%=jobId%> failures on <%=trackerName%></title>

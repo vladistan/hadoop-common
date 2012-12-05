@@ -45,6 +45,15 @@
 </property>
 
 <property>
+  <name>hadoop.security.instrumentation.requires.admin</name>
+  <value>false</value>
+  <description>
+    Indicates if administrator ACLs are required to access
+    instrumentation servlets (JMX, METRICS, CONF, STACKS).
+  </description>
+</property>
+
+<property>
   <name>hadoop.security.authentication</name>
   <value>simple</value>
   <description>Possible values are simple (no authentication), and kerberos
@@ -63,6 +72,17 @@
   </description>
 </property>
 
+<property>
+  <name>hadoop.security.use-weak-http-crypto</name>
+  <value>true</value>
+  <description>If enabled, use KSSL to authenticate HTTP connections to the
+  NameNode. Due to a bug in JDK6, using KSSL requires one to configure
+  Kerberos tickets to use encryption types that are known to be
+  cryptographically weak. If disabled, SPNEGO will be used for HTTP
+  authentication, which supports stronger encryption types.
+  </description>
+</property>
+
 <!--
 <property>
   <name>hadoop.security.service.user.name.key</name>
@@ -72,6 +92,31 @@
   </description>
 </property>
 -->
+
+<property>
+  <name>hadoop.workaround.non.threadsafe.getpwuid</name>
+  <value>false</value>
+  <description>Some operating systems or authentication modules are known to
+  have broken implementations of getpwuid_r and getpwgid_r, such that these
+  calls are not thread-safe. Symptoms of this problem include JVM crashes
+  with a stack trace inside these functions. If your system exhibits this
+  issue, enable this configuration parameter to include a lock around the
+  calls as a workaround.
+
+  An incomplete list of some systems known to have this issue is available
+  at http://wiki.apache.org/hadoop/KnownBrokenPwuidImplementations
+  </description>
+</property>
+
+<property>
+  <name>hadoop.kerberos.kinit.command</name>
+  <value>kinit</value>
+  <description>Used to periodically renew Kerberos credentials when provided
+  to Hadoop. The default setting assumes that kinit is in the PATH of users
+  running the Hadoop client. Change this to the absolute path to kinit if this
+  is not the case.
+  </description>
+</property>
 
 <!--- logging properties -->
 
@@ -114,7 +159,7 @@
 
 <property>
   <name>io.compression.codecs</name>
-  <value>org.apache.hadoop.io.compress.DefaultCodec,org.apache.hadoop.io.compress.GzipCodec,org.apache.hadoop.io.compress.BZip2Codec</value>
+  <value>org.apache.hadoop.io.compress.DefaultCodec,org.apache.hadoop.io.compress.GzipCodec,org.apache.hadoop.io.compress.BZip2Codec,org.apache.hadoop.io.compress.DeflateCodec,org.apache.hadoop.io.compress.SnappyCodec</value>
   <description>A list of the compression codec classes that can be used 
                for compression/decompression.</description>
 </property>
@@ -285,13 +330,22 @@
 
 
 <property>
-  <name>local.cache.size</name>
-  <value>10737418240</value>
-  <description>The limit on the size of cache you want to keep, set by default
-  to 10GB. This will act as a soft limit on the cache directory for out of band data.
+  <name>fs.automatic.close</name>
+  <value>true</value>
+  <description>By default, FileSystem instances are automatically closed at program
+  exit using a JVM shutdown hook. Setting this property to false disables this
+  behavior. This is an advanced option that should only be used by server applications
+  requiring a more carefully orchestrated shutdown sequence.
   </description>
 </property>
-            
+
+<property>
+  <name>fs.s3n.block.size</name>
+  <value>67108864</value>
+  <description>Block size to use when reading files using the native S3
+  filesystem (s3n: URIs).</description>
+</property>
+
 <property>
   <name>io.seqfile.compress.blocksize</name>
   <value>1000000</value>
@@ -477,11 +531,108 @@
 </property>
 
 <property>
+  <name>net.topology.table.file.name</name>
+  <value></value>
+  <description> The file name for a topology file, which is used when the
+    topology.script.file.name property is set to
+    org.apache.hadoop.net.TableMapping. The file format is a two column text
+    file, with columns separated by whitespace. The first column is a DNS or
+    IP address and the second column specifies the rack where the address maps.
+    If no entry corresponding to a host in the cluster is found, then 
+    /default-rack is assumed.
+  </description>
+</property>
+
+<property>
   <name>hadoop.security.uid.cache.secs</name>
   <value>14400</value>
   <description> NativeIO maintains a cache from UID to UserName. This is
   the timeout for an entry in that cache. </description>
 </property>
 
+<!-- HTTP web-consoles Authentication -->
+
+<property>
+  <name>hadoop.http.authentication.type</name>
+  <value>simple</value>
+  <description>
+    Defines authentication used for Oozie HTTP endpoint.
+    Supported values are: simple | kerberos | #AUTHENTICATION_HANDLER_CLASSNAME#
+  </description>
+</property>
+
+<property>
+  <name>hadoop.http.authentication.token.validity</name>
+  <value>36000</value>
+  <description>
+    Indicates how long (in seconds) an authentication token is valid before it has
+    to be renewed.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.http.authentication.signature.secret.file</name>
+  <value>${user.home}/hadoop-http-auth-signature-secret</value>
+  <description>
+    The signature secret for signing the authentication tokens.
+    If not set a random secret is generated at startup time.
+    The same secret should be used for JT/NN/DN/TT configurations.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.http.authentication.cookie.domain</name>
+  <value></value>
+  <description>
+    The domain to use for the HTTP cookie that stores the authentication token.
+    In order to authentiation to work correctly across all Hadoop nodes web-consoles
+    the domain must be correctly set.
+    IMPORTANT: when using IP addresses, browsers ignore cookies with domain settings.
+    For this setting to work properly all nodes in the cluster must be configured
+    to generate URLs with hostname.domain names on it.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.http.authentication.simple.anonymous.allowed</name>
+  <value>true</value>
+  <description>
+    Indicates if anonymous requests are allowed when using 'simple' authentication.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.http.authentication.kerberos.principal</name>
+  <value>HTTP/_HOST@LOCALHOST</value>
+  <description>
+    Indicates the Kerberos principal to be used for HTTP endpoint.
+    The principal MUST start with 'HTTP/' as per Kerberos HTTP SPNEGO specification.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.http.authentication.kerberos.keytab</name>
+  <value>${user.home}/hadoop.keytab</value>
+  <description>
+    Location of the keytab file with the credentials for the principal.
+    Referring to the same keytab file Oozie uses for its Kerberos credentials for Hadoop.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.relaxed.worker.version.check</name>
+  <value>true</value>
+  <description>
+    This option changes the behavior of datanodes and tasktrackers to
+    only check for a version match (eg "0.20.2-cdh3u4") but ignore the
+    other build fields (revision, user, and source checksum) when
+    checking for compatibility with namenodes and jobtrackers. In
+    previous releases datanodes refused to connect to namenodes if
+    their build revision (svn revision) did not match, and
+    tasktrackers refused to connect to jobtrackers if their build
+    version (version, revision, user, and source checksum) did not
+    match. This behavior can be restored by disabling this option.
+  </description>
+</property>
 
 </configuration>

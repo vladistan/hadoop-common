@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python2.5
 
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
@@ -15,17 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from hadoop.cloud.cli import main
 
-# Start hadoop job history daemons.  Run this on node where history server need to run
-
-bin=`dirname "$0"`
-bin=`cd "$bin"; pwd`
-
-if [ -e "$bin/../libexec/hadoop-config.sh" ]; then
-  . "$bin"/../libexec/hadoop-config.sh
-else
-  . "$bin/hadoop-config.sh"
-fi
-
-# start daemon
-"$bin"/hadoop-daemon.sh --config $HADOOP_CONF_DIR start historyserver
+if __name__ == "__main__":
+  main()

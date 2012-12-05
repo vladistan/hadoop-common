@@ -168,8 +168,8 @@ class JobQueueTaskScheduler extends TaskScheduler {
           
           // Try to schedule a node-local or rack-local Map task
           t = 
-            job.obtainNewNodeOrRackLocalMapTask(taskTrackerStatus, 
-                numTaskTrackers, taskTrackerManager.getNumberOfUniqueHosts());
+            job.obtainNewLocalMapTask(taskTrackerStatus, numTaskTrackers,
+                                      taskTrackerManager.getNumberOfUniqueHosts());
           if (t != null) {
             assignedTasks.add(t);
             ++numLocalMaps;

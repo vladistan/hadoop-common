@@ -26,8 +26,6 @@ import java.util.ArrayList;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.metrics.ContextFactory;
 import org.apache.hadoop.metrics.MetricsContext;
 import org.apache.hadoop.metrics.MetricsException;
@@ -35,12 +33,6 @@ import org.apache.hadoop.metrics.MetricsRecord;
 import org.apache.hadoop.metrics.MetricsUtil;
 import org.apache.hadoop.metrics.Updater;
 
-/**
- * @deprecated in favor of <code>org.apache.hadoop.metrics2</code> usage.
- */
-@Deprecated
-@InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class CompositeContext extends AbstractMetricsContext {
 
   private static final Log LOG = LogFactory.getLog(CompositeContext.class);
@@ -49,11 +41,9 @@ public class CompositeContext extends AbstractMetricsContext {
   private final ArrayList<MetricsContext> subctxt =
     new ArrayList<MetricsContext>();
 
-  @InterfaceAudience.Private
   public CompositeContext() {
   }
 
-  @InterfaceAudience.Private
   public void init(String contextName, ContextFactory factory) {
     super.init(contextName, factory);
     int nKids;
@@ -74,7 +64,6 @@ public class CompositeContext extends AbstractMetricsContext {
     }
   }
 
-  @InterfaceAudience.Private
   @Override
   public MetricsRecord newRecord(String recordName) {
     return (MetricsRecord) Proxy.newProxyInstance(
@@ -83,7 +72,6 @@ public class CompositeContext extends AbstractMetricsContext {
         new MetricsRecordDelegator(recordName, subctxt));
   }
 
-  @InterfaceAudience.Private
   @Override
   protected void emitRecord(String contextName, String recordName,
       OutputRecord outRec) throws IOException {
@@ -100,7 +88,6 @@ public class CompositeContext extends AbstractMetricsContext {
     }
   }
 
-  @InterfaceAudience.Private
   @Override
   protected void flush() throws IOException {
     for (MetricsContext ctxt : subctxt) {
@@ -112,7 +99,6 @@ public class CompositeContext extends AbstractMetricsContext {
     }
   }
 
-  @InterfaceAudience.Private
   @Override
   public void startMonitoring() throws IOException {
     for (MetricsContext ctxt : subctxt) {
@@ -124,7 +110,6 @@ public class CompositeContext extends AbstractMetricsContext {
     }
   }
 
-  @InterfaceAudience.Private
   @Override
   public void stopMonitoring() {
     for (MetricsContext ctxt : subctxt) {
@@ -135,7 +120,6 @@ public class CompositeContext extends AbstractMetricsContext {
   /**
    * Return true if all subcontexts are monitoring.
    */
-  @InterfaceAudience.Private
   @Override
   public boolean isMonitoring() {
     boolean ret = true;
@@ -145,7 +129,6 @@ public class CompositeContext extends AbstractMetricsContext {
     return ret;
   }
 
-  @InterfaceAudience.Private
   @Override
   public void close() {
     for (MetricsContext ctxt : subctxt) {
@@ -153,7 +136,6 @@ public class CompositeContext extends AbstractMetricsContext {
     }
   }
 
-  @InterfaceAudience.Private
   @Override
   public void registerUpdater(Updater updater) {
     for (MetricsContext ctxt : subctxt) {
@@ -161,7 +143,6 @@ public class CompositeContext extends AbstractMetricsContext {
     }
   }
 
-  @InterfaceAudience.Private
   @Override
   public void unregisterUpdater(Updater updater) {
     for (MetricsContext ctxt : subctxt) {

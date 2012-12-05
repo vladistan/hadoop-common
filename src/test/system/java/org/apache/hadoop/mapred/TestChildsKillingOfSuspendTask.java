@@ -19,7 +19,6 @@ package org.apache.hadoop.mapred;
 import java.io.DataOutputStream;
 import java.io.IOException;
 
-import org.apache.hadoop.util.RemoteExecution;
 import org.junit.Test;
 import org.junit.Assert;
 import org.junit.AfterClass;
@@ -31,7 +30,7 @@ import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.Log;
-import org.apache.hadoop.util.SSHRemoteExecution;
+import org.apache.hadoop.common.RemoteExecution;
 
 import java.util.Collection;
 import java.util.Hashtable;
@@ -303,8 +302,7 @@ public class TestChildsKillingOfSuspendTask {
     }
     public void run() {
       try {
-        RemoteExecution rExec = new SSHRemoteExecution();
-        rExec.executeCommand(hostName, userName, cmd);
+        RemoteExecution.executeCommand(hostName, userName, cmd);
         exitStatus = true;
       } catch(InterruptedException iexp) {
         LOG.warn("Thread is interrupted:" + iexp.getMessage());

@@ -22,6 +22,9 @@ import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryMXBean;
+import java.lang.management.MemoryUsage;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.security.PrivilegedExceptionAction;
@@ -38,8 +41,10 @@ import javax.servlet.jsp.JspWriter;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.BlockReader;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSClient;
+import org.apache.hadoop.hdfs.DFSClient.RemoteBlockReader;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.FSConstants.UpgradeAction;
@@ -63,6 +68,8 @@ import org.apache.hadoop.security.authorize.AuthorizationException;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.util.VersionInfo;
+import org.apache.hadoop.net.NetUtils;
 
 public class JspHelper {
   public static final String CURRENT_CONF = "current.conf";
@@ -145,8 +152,8 @@ public class JspHelper {
       long amtToRead = Math.min(chunkSizeToView, blockSize - offsetIntoBlock);     
       
       // Use the block name for file name. 
-      DFSClient.BlockReader blockReader = 
-        DFSClient.BlockReader.newBlockReader(s, addr.toString() + ":" + blockId,
+      BlockReader blockReader = 
+        RemoteBlockReader.newBlockReader(s, addr.toString() + ":" + blockId,
                                              blockId, accessToken, genStamp ,offsetIntoBlock, 
                                              amtToRead, 
                                              conf.getInt("io.file.buffer.size",
@@ -182,32 +189,25 @@ public class JspHelper {
   }
 
   public void addTableHeader(JspWriter out) throws IOException {
-    out.print("<table border=\"1\""+
-              " cellpadding=\"2\" cellspacing=\"2\">");
-    out.print("<tbody>");
+    out.print("<table class=\"nnbrowse datatable\">\n");
   }
-  public void addTableRow(JspWriter out, String[] columns) throws IOException {
+
+  public void addTableHeadingRow(JspWriter out, String[] columns) throws IOException {
     out.print("<tr>");
-    for (int i = 0; i < columns.length; i++) {
-      out.print("<td style=\"vertical-align: top;\"><B>"+columns[i]+"</B><br></td>");
+    for (String col : columns) {
+      out.print("<th>" + col + "</th>\n");
     }
     out.print("</tr>");
   }
-  public void addTableRow(JspWriter out, String[] columns, int row) throws IOException {
+  public void addTableRow(JspWriter out, String[] columns) throws IOException {
     out.print("<tr>");
-      
-    for (int i = 0; i < columns.length; i++) {
-      if (row/2*2 == row) {//even
-        out.print("<td style=\"vertical-align: top;background-color:LightGrey;\"><B>"+columns[i]+"</B><br></td>");
-      } else {
-        out.print("<td style=\"vertical-align: top;background-color:LightBlue;\"><B>"+columns[i]+"</B><br></td>");
-          
-      }
+    for (String col : columns) {
+      out.print("<td>" + col + "</td>\n");
     }
     out.print("</tr>");
   }
   public void addTableFooter(JspWriter out) throws IOException {
-    out.print("</tbody></table>");
+    out.print("</table>");
   }
 
   public String getSafeModeText() {
@@ -231,8 +231,11 @@ public class JspHelper {
     long inodes = fsn.dir.totalInodes();
     long blocks = fsn.getBlocksTotal();
     long maxobjects = fsn.getMaxObjects();
-    long totalMemory = Runtime.getRuntime().totalMemory();   
-    long maxMemory = Runtime.getRuntime().maxMemory();   
+
+    MemoryMXBean mem = ManagementFactory.getMemoryMXBean();
+    MemoryUsage heap = mem.getHeapMemoryUsage();
+    long totalMemory = heap.getUsed();
+    long maxMemory = heap.getMax();
 
     long used = (totalMemory * 100)/maxMemory;
  
@@ -624,5 +627,13 @@ public class JspHelper {
    */
   public static int getDefaultChunkSize(Configuration conf) {
     return conf.getInt("dfs.default.chunk.view.size", 32 * 1024);
+  }
+
+  /** Return a table containing version information. */
+  public static String getVersionTable() {
+    return "<div id='dfstable'><table>"       
+        + "\n  <tr><td id='col1'>Version:</td><td>" + VersionInfo.getVersion() + ", " + VersionInfo.getRevision()
+        + "\n  <tr><td id='col1'>Compiled:</td><td>" + VersionInfo.getDate() + " by " + VersionInfo.getUser() + " from " + VersionInfo.getBranch()
+        + "\n</table></div>";
   }
 }

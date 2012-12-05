@@ -70,7 +70,7 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
     final int ORG_FILE_SIZE = 3000; 
     Configuration conf = new Configuration();
     conf.setLong("dfs.block.size", BLOCK_SIZE);
-    conf.setBoolean("dfs.support.append", true);
+    conf.setBoolean("dfs.support.broken.append", true);
     MiniDFSCluster cluster = null;
 
     try {
@@ -92,8 +92,10 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
       assertEquals(REPLICATION_NUM, datanodeinfos.length);
 
       //connect to data nodes
+      InterDatanodeProtocol[] idps = new InterDatanodeProtocol[REPLICATION_NUM];
       DataNode[] datanodes = new DataNode[REPLICATION_NUM];
       for(int i = 0; i < REPLICATION_NUM; i++) {
+        idps[i] = DataNode.createInterDataNodeProtocolProxy(datanodeinfos[i], conf, 0, false);
         datanodes[i] = cluster.getDataNode(datanodeinfos[i].getIpcPort());
         assertTrue(datanodes[i] != null);
       }
@@ -102,7 +104,7 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
       Block lastblock = locatedblock.getBlock();
       DataNode.LOG.info("newblocks=" + lastblock);
       for(int i = 0; i < REPLICATION_NUM; i++) {
-        checkMetaInfo(lastblock, datanodes[i]);
+        checkMetaInfo(lastblock, idps[i]);
       }
 
       //setup random block sizes 
@@ -123,7 +125,7 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
         FSDatasetTestUtil.truncateBlock(dn, lastblock, newblocksizes[i]);
         newblocks[i] = new Block(lastblock.getBlockId(), newblocksizes[i],
             lastblock.getGenerationStamp());
-        checkMetaInfo(newblocks[i], datanodes[i]);
+        checkMetaInfo(newblocks[i], idps[i]);
       }
 
       DataNode.LOG.info("dfs.dfs.clientName=" + dfs.dfs.clientName);
@@ -141,7 +143,7 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
       long currentGS = cluster.getNameNode().namesystem.getGenerationStamp();
       lastblock.setGenerationStamp(currentGS);
       for(int i = 0; i < REPLICATION_NUM; i++) {
-        updatedmetainfo[i] = datanodes[i].getBlockMetaDataInfo(lastblock);
+        updatedmetainfo[i] = idps[i].getBlockMetaDataInfo(lastblock);
         assertEquals(lastblock.getBlockId(), updatedmetainfo[i].getBlockId());
         assertEquals(minsize, updatedmetainfo[i].getNumBytes());
         assertEquals(currentGS, updatedmetainfo[i].getGenerationStamp());

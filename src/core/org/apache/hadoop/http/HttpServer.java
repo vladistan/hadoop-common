@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.http;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.BindException;
@@ -43,17 +44,25 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.ConfServlet;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.jmx.JMXJsonServlet;
 import org.apache.hadoop.log.LogLevel;
+import org.apache.hadoop.metrics.MetricsServlet;
 import org.apache.hadoop.security.Krb5AndCertsSslSocketConnector;
 import org.apache.hadoop.security.Krb5AndCertsSslSocketConnector.MODE;
+import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.util.ReflectionUtils;
+
+import org.mortbay.io.Buffer;
 import org.mortbay.jetty.Connector;
 import org.mortbay.jetty.Handler;
+import org.mortbay.jetty.MimeTypes;
 import org.mortbay.jetty.Server;
+import org.mortbay.jetty.handler.ContextHandler;
 import org.mortbay.jetty.handler.ContextHandlerCollection;
 import org.mortbay.jetty.nio.SelectChannelConnector;
 import org.mortbay.jetty.security.SslSocketConnector;
@@ -85,11 +94,14 @@ public class HttpServer implements FilterContainer {
 
   // The ServletContext attribute where the daemon Configuration
   // gets stored.
-  static final String CONF_CONTEXT_ATTRIBUTE = "hadoop.conf";
+  public static final String CONF_CONTEXT_ATTRIBUTE = "hadoop.conf";
   static final String ADMINS_ACL = "admins.acl";
+  public static final String SPNEGO_FILTER = "SpnegoFilter";
+  public static final String KRB5_FILTER = "krb5Filter";
+
+  public static final String BIND_ADDRESS = "bind.address";
 
   private AccessControlList adminsAcl;
-
   protected final Server webServer;
   protected final Connector listener;
   protected final WebAppContext webAppContext;
@@ -170,13 +182,15 @@ public class HttpServer implements FilterContainer {
 
     addDefaultApps(contexts, appDir);
     
-    defineFilter(webAppContext, "krb5Filter", 
+    defineFilter(webAppContext, KRB5_FILTER, 
         Krb5AndCertsSslSocketConnector.Krb5SslFilter.class.getName(), 
         null, null);
     
     addGlobalFilter("safety", QuotingInputFilter.class.getName(), null);
     final FilterInitializer[] initializers = getFilterInitializers(conf); 
     if (initializers != null) {
+      conf = new Configuration(conf);
+      conf.set(BIND_ADDRESS, bindAddress);
       for(FilterInitializer c : initializers) {
         c.initFilter(this, conf);
       }
@@ -261,6 +275,8 @@ public class HttpServer implements FilterContainer {
     // set up default servlets
     addServlet("stacks", "/stacks", StackServlet.class);
     addServlet("logLevel", "/logLevel", LogLevel.Servlet.class);
+    addServlet("metrics", "/metrics", MetricsServlet.class);
+    addServlet("conf", "/conf", ConfServlet.class);
     addServlet("jmx", "/jmx", JMXJsonServlet.class);
   }
 
@@ -294,18 +310,7 @@ public class HttpServer implements FilterContainer {
    * @param value The value of the attribute
    */
   public void setAttribute(String name, Object value) {
-    setAttribute(webAppContext, name, value);
-  }
-
-  /**
-   * Set a value in the webapp context. These values are available to the jsp
-   * pages as "application.getAttribute(name)".
-   * @param context Context to add attribute
-   * @param name The name of the attribute
-   * @param value The value of the attribute
-   */
-  public void setAttribute(Context context, String name, Object value) {
-    context.setAttribute(name, value);
+    webAppContext.setAttribute(name, value);
   }
 
   /** 
@@ -332,7 +337,7 @@ public class HttpServer implements FilterContainer {
    */
   public void addServlet(String name, String pathSpec,
       Class<? extends HttpServlet> clazz) {
-    addInternalServlet(name, pathSpec, clazz, false);
+    addInternalServlet(name, pathSpec, clazz, false, false);
     addFilterPathMapping(pathSpec, webAppContext);
   }
 
@@ -346,7 +351,7 @@ public class HttpServer implements FilterContainer {
   @Deprecated
   public void addInternalServlet(String name, String pathSpec,
       Class<? extends HttpServlet> clazz) {
-    addInternalServlet(name, pathSpec, clazz, false);
+    addInternalServlet(name, pathSpec, clazz, false, false);
   }
 
   /**
@@ -354,15 +359,18 @@ public class HttpServer implements FilterContainer {
    * protect with Kerberos authentication. 
    * Note: This method is to be used for adding servlets that facilitate
    * internal communication and not for user facing functionality. For
-   * servlets added using this method, filters (except internal Kerberized
+   * servlets added using this method, filters (except internal Kerberos
    * filters) are not enabled. 
    * 
    * @param name The name of the servlet (can be passed as null)
    * @param pathSpec The path spec for the servlet
    * @param clazz The servlet class
+   * @param requireAuth Require Kerberos authenticate to access servlet
+   * @param useKsslForAuth true to use KSSL for auth, false to use SPNEGO
    */
   public void addInternalServlet(String name, String pathSpec, 
-      Class<? extends HttpServlet> clazz, boolean requireAuth) {
+      Class<? extends HttpServlet> clazz, boolean requireAuth,
+      boolean useKsslForAuth) {
     ServletHolder holder = new ServletHolder(clazz);
     if (name != null) {
       holder.setName(name);
@@ -370,11 +378,16 @@ public class HttpServer implements FilterContainer {
     webAppContext.addServlet(holder, pathSpec);
     
     if(requireAuth && UserGroupInformation.isSecurityEnabled()) {
-       LOG.info("Adding Kerberos filter to " + name);
        ServletHandler handler = webAppContext.getServletHandler();
        FilterMapping fmap = new FilterMapping();
        fmap.setPathSpec(pathSpec);
-       fmap.setFilterName("krb5Filter");
+       if (useKsslForAuth) {
+         LOG.info("Adding Kerberos (KSSL) filter to " + name);
+         fmap.setFilterName(KRB5_FILTER);
+       } else {
+         LOG.info("Adding Kerberos (SPNEGO) filter to " + name);
+         fmap.setFilterName(SPNEGO_FILTER);
+       }
        fmap.setDispatches(Handler.ALL);
        handler.addFilterMapping(fmap);
     }
@@ -654,6 +667,37 @@ public class HttpServer implements FilterContainer {
   }
 
   /**
+   * Checks the user has privileges to access to instrumentation servlets.
+   * <p/>
+   * If <code>hadoop.security.instrumentation.requires.admin</code> is set to FALSE
+   * (default value) it always returns TRUE.
+   * <p/>
+   * If <code>hadoop.security.instrumentation.requires.admin</code> is set to TRUE
+   * it will check that if the current user is in the admin ACLS. If the user is
+   * in the admin ACLs it returns TRUE, otherwise it returns FALSE.
+   *
+   * @param servletContext the servlet context.
+   * @param request the servlet request.
+   * @param response the servlet response.
+   * @return TRUE/FALSE based on the logic decribed above.
+   */
+  public static boolean isInstrumentationAccessAllowed(
+    ServletContext servletContext, HttpServletRequest request,
+    HttpServletResponse response) throws IOException {
+    Configuration conf =
+      (Configuration) servletContext.getAttribute(CONF_CONTEXT_ATTRIBUTE);
+
+    boolean access = true;
+    boolean adminAccess = conf.getBoolean(
+      CommonConfigurationKeys.HADOOP_SECURITY_INSTRUMENTATION_REQUIRES_ADMIN,
+      false);
+    if (adminAccess) {
+      access = hasAdministratorAccess(servletContext, request, response);
+    }
+    return access;
+  }
+
+  /**
    * Does the user sending the HttpServletRequest has the administrator ACLs? If
    * it isn't the case, response will be modified to send an error to the user.
    * 
@@ -677,7 +721,10 @@ public class HttpServer implements FilterContainer {
 
     String remoteUser = request.getRemoteUser();
     if (remoteUser == null) {
-      return true;
+      response.sendError(HttpServletResponse.SC_UNAUTHORIZED,
+                         "Unauthenticated users are not " +
+                         "authorized to access this page.");
+      return false;
     }
     AccessControlList adminsAcl = (AccessControlList) servletContext
         .getAttribute(ADMINS_ACL);
@@ -686,9 +733,7 @@ public class HttpServer implements FilterContainer {
     if (adminsAcl != null) {
       if (!adminsAcl.isUserAllowed(remoteUserUGI)) {
         response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "User "
-            + remoteUser + " is unauthorized to access this page. "
-            + "AccessControlList for accessing this page : "
-            + adminsAcl.toString());
+            + remoteUser + " is unauthorized to access this page.");
         return false;
       }
     }
@@ -708,14 +753,12 @@ public class HttpServer implements FilterContainer {
     public void doGet(HttpServletRequest request, HttpServletResponse response)
       throws ServletException, IOException {
 
-      // Do the authorization
-      if (!HttpServer.hasAdministratorAccess(getServletContext(), request,
-          response)) {
+      if (!HttpServer.isInstrumentationAccessAllowed(getServletContext(),
+                                                     request, response)) {
         return;
       }
-
-      PrintWriter out = new PrintWriter
-                    (HtmlQuoting.quoteOutputStream(response.getOutputStream()));
+      response.setContentType("text/plain; charset=UTF-8");
+      PrintWriter out = response.getWriter();
       ReflectionUtils.printThreadInfo(out, "");
       out.close();
       ReflectionUtils.logThreadInfo(LOG, "jsp requested", 1);      
@@ -728,6 +771,7 @@ public class HttpServer implements FilterContainer {
    * all of the servlets resistant to cross-site scripting attacks.
    */
   public static class QuotingInputFilter implements Filter {
+    private FilterConfig config;
 
     public static class RequestQuoter extends HttpServletRequestWrapper {
       private final HttpServletRequest rawRequest;
@@ -770,6 +814,9 @@ public class HttpServer implements FilterContainer {
       public String[] getParameterValues(String name) {
         String unquoteName = HtmlQuoting.unquoteHtmlChars(name);
         String[] unquoteValue = rawRequest.getParameterValues(unquoteName);
+        if (unquoteValue == null) {
+          return null;
+        }
         String[] result = new String[unquoteValue.length];
         for(int i=0; i < result.length; ++i) {
           result[i] = HtmlQuoting.quoteHtmlChars(unquoteValue[i]);
@@ -815,6 +862,7 @@ public class HttpServer implements FilterContainer {
 
     @Override
     public void init(FilterConfig config) throws ServletException {
+      this.config = config;
     }
 
     @Override
@@ -829,10 +877,33 @@ public class HttpServer implements FilterContainer {
       HttpServletRequestWrapper quoted = 
         new RequestQuoter((HttpServletRequest) request);
       final HttpServletResponse httpResponse = (HttpServletResponse) response;
-      // set the default to UTF-8 so that we don't need to worry about IE7
-      // choosing to interpret the special characters as UTF-7
-      httpResponse.setContentType("text/html;charset=utf-8");
-      chain.doFilter(quoted, response);
+
+      String mime = inferMimeType(request);
+      if (mime == null) {
+        httpResponse.setContentType("text/plain; charset=utf-8");
+      } else if (mime.startsWith("text/html")) {
+        // HTML with unspecified encoding, we want to
+        // force HTML with utf-8 encoding
+        // This is to avoid the following security issue:
+        // http://openmya.hacker.jp/hasegawa/security/utf7cs.html
+        httpResponse.setContentType("text/html; charset=utf-8");
+      } else if (mime.startsWith("application/xml")) {
+        httpResponse.setContentType("text/xml; charset=utf-8");
+      }
+
+      chain.doFilter(quoted, httpResponse);
+    }
+
+    /**
+     * Infer the mime type for the response based on the extension of the request
+     * URI. Returns null if unknown.
+     */
+    private String inferMimeType(ServletRequest request) {
+      String path = ((HttpServletRequest)request).getRequestURI();
+      ContextHandler.SContext sContext = (ContextHandler.SContext)config.getServletContext();
+      MimeTypes mimes = sContext.getContextHandler().getMimeTypes();
+      Buffer mimeBuffer = mimes.getMimeByExtension(path);
+      return (mimeBuffer == null) ? null : mimeBuffer.toString();
     }
 
   }

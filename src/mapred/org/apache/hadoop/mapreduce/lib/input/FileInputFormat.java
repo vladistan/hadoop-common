@@ -51,10 +51,6 @@ import org.apache.hadoop.util.StringUtils;
  */
 public abstract class FileInputFormat<K, V> extends InputFormat<K, V> {
 
-  public static enum Counter { 
-    BYTES_READ
-  }
-  
   private static final Log LOG = LogFactory.getLog(FileInputFormat.class);
 
   private static final double SPLIT_SLOP = 1.1;   // 10% slop

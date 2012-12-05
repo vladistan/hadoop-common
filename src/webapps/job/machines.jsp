@@ -167,7 +167,6 @@
   }
 %>
 
-<!DOCTYPE html>
 <html>
 <head>
 <title><%=trackerName%> Hadoop Machine List</title>

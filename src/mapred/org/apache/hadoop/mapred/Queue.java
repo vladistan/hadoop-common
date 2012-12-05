@@ -37,7 +37,6 @@ class Queue {
   private String name;
   private Map<String,AccessControlList> acls;
   private QueueState state = QueueState.RUNNING;
-  private QueueMetrics queueMetrics;
 
   /**
    * An Object that can be used by schedulers to fill in
@@ -70,12 +69,10 @@ class Queue {
    * @param acls ACLs for the queue
    * @param state state of the queue
    */
-  Queue(String name, Map<String, AccessControlList> acls, QueueState state,
-        QueueMetrics metrics) {
+  Queue(String name, Map<String, AccessControlList> acls, QueueState state) {
 	  this.name = name;
 	  this.acls = acls;
 	  this.state = state;
-	  this.queueMetrics = metrics;
   }
 
   /**
@@ -151,13 +148,5 @@ class Queue {
    */
   void setSchedulingInfo(Object schedulingInfo) {
     this.schedulingInfo = schedulingInfo;
-  }
-
-  /**
-   * Return the QueueMetrics object for this queue
-   * @return QueueMetrics
-   */
-  public QueueMetrics getMetrics() {
-    return this.queueMetrics;
   }
 }

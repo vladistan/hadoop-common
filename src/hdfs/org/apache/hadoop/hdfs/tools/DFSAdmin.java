@@ -24,13 +24,12 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FsShell;
+import org.apache.hadoop.fs.FsStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.shell.Command;
 import org.apache.hadoop.fs.shell.CommandFormat;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
-import org.apache.hadoop.hdfs.DistributedFileSystem.DiskStatus;
-import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.FSConstants;
 import org.apache.hadoop.hdfs.protocol.FSConstants.DatanodeReportType;
@@ -262,9 +261,9 @@ public class DFSAdmin extends FsShell {
   public void report() throws IOException {
     if (fs instanceof DistributedFileSystem) {
       DistributedFileSystem dfs = (DistributedFileSystem) fs;
-      DiskStatus ds = dfs.getDiskStatus();
+      FsStatus ds = dfs.getStatus();
       long capacity = ds.getCapacity();
-      long used = ds.getDfsUsed();
+      long used = ds.getUsed();
       long remaining = ds.getRemaining();
       long presentCapacity = used + remaining;
       boolean mode = dfs.setSafeMode(FSConstants.SafeModeAction.SAFEMODE_GET);
@@ -425,7 +424,7 @@ public class DFSAdmin extends FsShell {
    * Usage: java DFSAdmin -setBalancerBandwidth bandwidth
    * @param argv List of of command line parameters.
    * @param idx The index of the command that is being processed.
-   * @exception IOException 
+   * @exception IOException
    */
   public int setBalancerBandwidth(String[] argv, int idx) throws IOException {
     long bandwidth;
@@ -448,7 +447,7 @@ public class DFSAdmin extends FsShell {
     DistributedFileSystem dfs = (DistributedFileSystem) fs;
     dfs.setBalancerBandwidth(bandwidth);
     exitCode = 0;
-   
+
     return exitCode;
   }
 

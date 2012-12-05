@@ -828,20 +828,12 @@ public class UtilsForTests {
   }
 
   static JobTracker getJobTracker() {
-    return(getJobTracker(null));
-  }
-
-  static JobTracker getJobTracker(QueueManager qm) {
     JobConf conf = new JobConf();
     conf.set("mapred.job.tracker", "localhost:0");
     conf.set("mapred.job.tracker.http.address", "0.0.0.0:0");
     JobTracker jt;
     try {
-      if (qm == null) {
-       jt = new JobTracker(conf);
-      } else {
-        jt = new JobTracker(conf, qm);
-      }
+      jt = new JobTracker(conf);
       return jt;
     } catch (Exception e) {
       throw new RuntimeException("Could not start jt", e);

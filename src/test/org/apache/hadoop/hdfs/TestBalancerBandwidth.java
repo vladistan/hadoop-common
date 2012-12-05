@@ -46,7 +46,7 @@ public class TestBalancerBandwidth extends TestCase {
         DEFAULT_BANDWIDTH);
 
     /* Create and start cluster */
-    MiniDFSCluster cluster = 
+    MiniDFSCluster cluster =
       new MiniDFSCluster(conf, NUM_OF_DATANODES, true, null);
     try {
       cluster.waitActive();
@@ -86,7 +86,7 @@ public class TestBalancerBandwidth extends TestCase {
       cluster.shutdown();
     }
   }
- 
+
   public static void main(String[] args) throws Exception {
     new TestBalancerBandwidth().testBalancerBandwidth();
   }

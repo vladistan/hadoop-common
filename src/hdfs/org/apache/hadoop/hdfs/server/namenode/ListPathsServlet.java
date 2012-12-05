@@ -61,11 +61,10 @@ public class ListPathsServlet extends DfsServlet {
    * Node information includes path, modification, permission, owner and group.
    * For files, it also includes size, replication and block-size. 
    */
-  static void writeInfo(final Path fullpath, final HdfsFileStatus i,
-      final XMLOutputter doc) throws IOException {
+  static void writeInfo(String parent, HdfsFileStatus i, XMLOutputter doc) throws IOException {
     final SimpleDateFormat ldf = df.get();
     doc.startTag(i.isDir() ? "directory" : "file");
-    doc.attribute("path", fullpath.toUri().getPath());
+    doc.attribute("path", i.getFullPath(new Path(parent)).toUri().getPath());
     doc.attribute("modified", ldf.format(new Date(i.getModificationTime())));
     doc.attribute("accesstime", ldf.format(new Date(i.getAccessTime())));
     if (!i.isDir()) {
@@ -86,7 +85,7 @@ public class ListPathsServlet extends DfsServlet {
       XMLOutputter doc) {
     final String path = ServletUtil.getDecodedPath(request, "/listPaths");
     final String exclude = request.getParameter("exclude") != null
-      ? request.getParameter("exclude") : "";
+      ? request.getParameter("exclude") : "\\..*\\.crc";
     final String filter = request.getParameter("filter") != null
       ? request.getParameter("filter") : ".*";
     final boolean recur = request.getParameter("recursive") != null
@@ -154,7 +153,7 @@ public class ListPathsServlet extends DfsServlet {
 
           HdfsFileStatus base = nn.getFileInfo(filePath);
           if ((base != null) && base.isDir()) {
-            writeInfo(base.getFullPath(new Path(path)), base, doc);
+            writeInfo(path, base, doc);
           }
 
           Stack<String> pathstack = new Stack<String>();
@@ -175,8 +174,7 @@ public class ListPathsServlet extends DfsServlet {
                 }
                 HdfsFileStatus[] listing = thisListing.getPartialListing();
                 for (HdfsFileStatus i : listing) {
-                  final Path fullpath = i.getFullPath(new Path(p));
-                  final String localName = fullpath.getName();
+                  String localName = i.getLocalName();
                   if (exclude.matcher(localName).matches()
                       || !filter.matcher(localName).matches()) {
                     continue;
@@ -184,7 +182,7 @@ public class ListPathsServlet extends DfsServlet {
                   if (recur && i.isDir()) {
                     pathstack.push(new Path(p, localName).toUri().getPath());
                   }
-                  writeInfo(fullpath, i, doc);
+                  writeInfo(p, i, doc);
                 }
                 lastReturnedName = thisListing.getLastName();
               } while (thisListing.hasMore());

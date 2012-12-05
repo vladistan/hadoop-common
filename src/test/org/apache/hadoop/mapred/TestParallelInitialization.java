@@ -91,13 +91,13 @@ public class TestParallelInitialization extends TestCase {
       JobConf conf = new JobConf();
       queueManager = new QueueManager(conf);
       trackers.put("tt1", new TaskTrackerStatus("tt1", "tt1.host", 1,
-                   new ArrayList<TaskStatus>(), 0,
+                   new ArrayList<TaskStatus>(), 0, 0,
                    maxMapTasksPerTracker, maxReduceTasksPerTracker));
     }
     
     public ClusterStatus getClusterStatus() {
       int numTrackers = trackers.size();
-      return new ClusterStatus(numTrackers, 0, 0,
+      return new ClusterStatus(numTrackers, 0, 
                                JobTracker.TASKTRACKER_EXPIRY_INTERVAL,
                                maps, reduces,
                                numTrackers * maxMapTasksPerTracker,
@@ -127,7 +127,7 @@ public class TestParallelInitialization extends TestCase {
     }
     
     public int getNextHeartbeatInterval() {
-      return MRConstants.HEARTBEAT_INTERVAL_MIN;
+      return MRConstants.HEARTBEAT_INTERVAL_MIN_DEFAULT;
     }
 
     public void killJob(JobID jobid) {
@@ -155,11 +155,9 @@ public class TestParallelInitialization extends TestCase {
         failJob(job);
       }
     }
-    
-    @Override
-    public boolean killTask(TaskAttemptID taskid, boolean shouldFail)
-      throws IOException {
-      return false;
+
+    public boolean killTask(TaskAttemptID attemptId, boolean shouldFail) {
+      return true;
     }
 
     // Test methods

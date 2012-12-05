@@ -167,16 +167,18 @@ public class AppendTestUtil {
     DistributedFileSystem dfs = (DistributedFileSystem)whichfs;
     dfs.dfs.leasechecker.interruptAndJoin();
   }
-  
   public static void recoverFile(MiniDFSCluster cluster, FileSystem fs,
       Path file1) throws IOException {
-    
-    // set the soft limit to be 1 second so that the
-    // namenode triggers lease recovery upon append request
-    cluster.setLeasePeriod(1000, FSConstants.LEASE_HARDLIMIT_PERIOD);
+   
+    int tries = 90;
+    if (cluster != null) {
+      // set the soft limit to be 1 second so that the
+      // namenode triggers lease recovery upon append request
+      cluster.setLeasePeriod(1000, FSConstants.LEASE_HARDLIMIT_PERIOD);
+      tries = 40;
+    }
 
     // Trying recovery
-    int tries = 60;
     boolean recovered = false;
     FSDataOutputStream out = null;
     while (!recovered && tries-- > 0) {
@@ -185,6 +187,10 @@ public class AppendTestUtil {
         LOG.info("Successfully opened for appends");
         recovered = true;
       } catch (IOException e) {
+        if (!e.getMessage().contains("being recovered") &&
+            !e.getMessage().contains("being created")) {
+          throw e;
+        }
         LOG.info("Failed open for append, waiting on lease recovery");
         try {
           Thread.sleep(1000);

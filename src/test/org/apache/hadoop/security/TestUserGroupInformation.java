@@ -16,33 +16,30 @@
  */
 package org.apache.hadoop.security;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.*;
 
+import org.mockito.Mockito;
 import static org.mockito.Mockito.mock;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.security.PrivilegedExceptionAction;
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
+import javax.security.auth.Subject;
 import javax.security.auth.login.AppConfigurationEntry;
+import javax.security.auth.login.LoginContext;
 
 import junit.framework.Assert;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.junit.Test;
-import static org.apache.hadoop.test.MetricsAsserts.*;
 
 public class TestUserGroupInformation {
   final private static String USER_NAME = "user1@HADOOP.APACHE.ORG";
@@ -52,22 +49,23 @@ public class TestUserGroupInformation {
   final private static String[] GROUP_NAMES = 
     new String[]{GROUP1_NAME, GROUP2_NAME, GROUP3_NAME};
 
-  // UGI should not use the default security conf, else it will collide
-  // with other classes that may change the default conf.  Using this dummy
-  // class that simply throws an exception will ensure that the tests fail
-  // if UGI uses the static default config instead of its own config
-  private static class DummyLoginConfiguration extends
-    javax.security.auth.login.Configuration
-  {
-    @Override
-    public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
-      throw new RuntimeException("UGI is not using its own security conf!");
-    } 
-  }
-  
+   // UGI should not use the default security conf, else it will collide
+   // with other classes that may change the default conf.  Using this dummy
+   // class that simply throws an exception will ensure that the tests fail
+   // if UGI uses the static default config instead of its own config
+   private static class DummyLoginConfiguration extends
+     javax.security.auth.login.Configuration
+   {
+     @Override
+     public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
+       throw new RuntimeException("UGI is not using its own security conf!");
+     }
+   }
+
   static {
     javax.security.auth.login.Configuration.setConfiguration(
-    		new DummyLoginConfiguration());
+              new DummyLoginConfiguration());
+
     Configuration conf = new Configuration();
     conf.set("hadoop.security.auth_to_local",
         "RULE:[2:$1@$0](.*@HADOOP.APACHE.ORG)s/@.*//" +
@@ -94,7 +92,7 @@ public class TestUserGroupInformation {
     String line = br.readLine();
     System.out.println(userName + ":" + line);
    
-    List<String> groups = new ArrayList<String> ();    
+    Set<String> groups = new LinkedHashSet<String> ();    
     for(String s: line.split("[\\s]")) {
       groups.add(s);
     }
@@ -104,7 +102,7 @@ public class TestUserGroupInformation {
     String[] gi = login.getGroupNames();
     assertEquals(groups.size(), gi.length);
     for(int i=0; i < gi.length; i++) {
-      assertEquals(groups.get(i), gi[i]);
+      assertTrue(groups.contains(gi[i]));
     }
     
     final UserGroupInformation fakeUser = 
@@ -327,16 +325,33 @@ public class TestUserGroupInformation {
   public static void verifyLoginMetrics(int success, int failure)
       throws IOException {
     // Ensure metrics related to kerberos login is updated.
-    UgiInstrumentation metrics = UserGroupInformation.metrics;
-    MetricsRecordBuilder rb = getMetrics(metrics);
-
+    UserGroupInformation.UgiMetrics metrics = UserGroupInformation.metrics;
+    metrics.doUpdates(null);
     if (success > 0) {
-      assertCounter("loginSuccess_num_ops", success, rb);
-      assertGaugeGt("loginSuccess_avg_time", 0, rb);
+      assertEquals(success, metrics.loginSuccess.getPreviousIntervalNumOps());
+      assertTrue(metrics.loginSuccess.getPreviousIntervalAverageTime() > 0);
     }
     if (failure > 0) {
-      assertEquals("loginFailure_num_ops", failure, rb);
-      assertGaugeGt("loginFailure_avg_time", 0, rb);
+      assertEquals(failure, metrics.loginFailure.getPreviousIntervalNumOps());
+      assertTrue(metrics.loginFailure.getPreviousIntervalAverageTime() > 0);
     }
+  }
+
+  /**
+   * Test for the case that UserGroupInformation.getCurrentUser()
+   * is called when the AccessControlContext has a Subject associated
+   * with it, but that Subject was not created by Hadoop (ie it has no
+   * associated User principal)
+   */
+  @Test
+  public void testUGIUnderNonHadoopContext() throws Exception {
+    Subject nonHadoopSubject = new Subject();
+    Subject.doAs(nonHadoopSubject, new PrivilegedExceptionAction<Void>() {
+        public Void run() throws IOException {
+          UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+          assertNotNull(ugi);
+          return null;
+        }
+      });
   }
 }

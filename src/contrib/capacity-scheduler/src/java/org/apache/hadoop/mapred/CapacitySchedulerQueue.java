@@ -197,13 +197,13 @@ class CapacitySchedulerQueue {
       }
     }
     
-    void updateSlotsUsage(String user, boolean pendingTasks, int numRunningTasks, int numSlotsOccupied) {
+    void updateSlotsUsage(String user, int pendingTasks, int numRunningTasks, int numSlotsOccupied) {
       this.numRunningTasks += numRunningTasks;
       this.numSlotsOccupied += numSlotsOccupied;
       Integer i = this.numSlotsOccupiedByUser.get(user);
       int slots = numSlotsOccupied + ((i == null) ? 0 : i.intValue());
       this.numSlotsOccupiedByUser.put(user, slots);
-      if (pendingTasks) {
+      if (pendingTasks > 0) {
         users.add(user);
       }
     }
@@ -581,25 +581,12 @@ class CapacitySchedulerQueue {
    */
   void update(TaskType type, JobInProgress job, String user, 
       int numRunningTasks, int numSlotsOccupied) {
-    // pendingTasks keeps tracking of whether a user's job has tasks that
-    // still need to be scheduled. The number of users with pending tasks is
-    // used in the limit calculations.
-    boolean pendingTasks = false;
     if (type == TaskType.MAP) {
-      // A job has map tasks to be scheduled when job.pendingMaps > 0
-      if (job.pendingMaps() > 0) {
-        pendingTasks = true;
-      }
-      mapSlots.updateSlotsUsage(user, pendingTasks,
+      mapSlots.updateSlotsUsage(user, job.pendingMaps(), 
           numRunningTasks, numSlotsOccupied);
     } else if (type == TaskType.REDUCE) {
-      // A job has reduce tasks to be scheduled when job.pendingReduces() > 0 &&
-      // the minimum number of maps have been completed
-      if (job.scheduleReduces() && (job.pendingReduces() > 0)) {
-        pendingTasks = true;
-      }
-      reduceSlots.updateSlotsUsage(user, pendingTasks,
-        numRunningTasks, numSlotsOccupied);
+      reduceSlots.updateSlotsUsage(user, job.pendingReduces(), 
+          numRunningTasks, numSlotsOccupied);
     }
   }
   

@@ -22,7 +22,6 @@ import java.io.IOException;
 
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.mapreduce.TaskType;
 
 /**
  * A pluggable object that manages the load on each {@link TaskTracker}, telling
@@ -49,7 +48,7 @@ public abstract class LoadManager implements Configurable {
   public void setEventLog(FairSchedulerEventLog schedulingLog) {
     this.schedulingLog = schedulingLog;
   }
-  
+ 
   /**
    * Lifecycle method to allow the LoadManager to start any work in separate
    * threads.
@@ -67,37 +66,25 @@ public abstract class LoadManager implements Configurable {
   
   /**
    * Can a given {@link TaskTracker} run another map task?
-   * This method may check whether the specified tracker has
-   * enough resources to run another map task.
    * @param tracker The machine we wish to run a new map on
    * @param totalRunnableMaps Set of running jobs in the cluster
    * @param totalMapSlots The total number of map slots in the cluster
+   * @param alreadyAssigned the number of maps already assigned to
+   *        this tracker during this heartbeat
    * @return true if another map can be launched on <code>tracker</code>
    */
   public abstract boolean canAssignMap(TaskTrackerStatus tracker,
-      int totalRunnableMaps, int totalMapSlots);
+      int totalRunnableMaps, int totalMapSlots, int alreadyAssigned);
 
   /**
    * Can a given {@link TaskTracker} run another reduce task?
-   * This method may check whether the specified tracker has
-   * enough resources to run another reduce task.
    * @param tracker The machine we wish to run a new map on
    * @param totalRunnableReduces Set of running jobs in the cluster
    * @param totalReduceSlots The total number of reduce slots in the cluster
+   * @param alreadyAssigned the number of reduces already assigned to
+   *        this tracker during this heartbeat
    * @return true if another reduce can be launched on <code>tracker</code>
    */
   public abstract boolean canAssignReduce(TaskTrackerStatus tracker,
-      int totalRunnableReduces, int totalReduceSlots);
-
-  /**
-   * Can a given {@link TaskTracker} run another new task from a given job? 
-   * This method is provided for use by LoadManagers that take into 
-   * account jobs' individual resource needs when placing tasks.
-   * @param tracker The machine we wish to run a new map on
-   * @param job The job from which we want to run a task on this machine
-   * @param type The type of task that we want to run on
-   * @return true if this task can be launched on <code>tracker</code>
-   */
-  public abstract boolean canLaunchTask(TaskTrackerStatus tracker,
-      JobInProgress job,  TaskType type);
+      int totalRunnableReduces, int totalReduceSlots, int alreadyAssigned);
 }

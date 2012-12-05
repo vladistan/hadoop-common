@@ -19,7 +19,7 @@ package org.apache.hadoop.mapred;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.PrintWriter;
+import java.io.FileWriter;
 import java.net.InetSocketAddress;
 import java.util.List;
 
@@ -50,7 +50,7 @@ import org.apache.hadoop.util.ProcessTree.Signal;
 public abstract class TaskController implements Configurable {
   
   private Configuration conf;
-
+  
   public static final Log LOG = LogFactory.getLog(TaskController.class);
   
   //Name of the executable script that will contain the child
@@ -78,11 +78,11 @@ public abstract class TaskController implements Configurable {
   /**
    * Does initialization and setup.
    * @param allocator the local dir allocator to use
-   * @param localStorage local storage to obtain dirs from
+   * @param localStorage TaskTracker's LocalStorage object
    */
   public abstract void setup(LocalDirAllocator allocator,
       LocalStorage localStorage) throws IOException;
-  
+
   /**
    * Create all of the directories necessary for the job to start and download
    * all of the job and private distributed cache files.
@@ -101,7 +101,7 @@ public abstract class TaskController implements Configurable {
                                      TaskUmbilicalProtocol taskTracker,
                                      InetSocketAddress ttAddr) 
   throws IOException, InterruptedException;
-  
+
   /**
    * Create all of the directories for the task and launches the child jvm.
    * @param user the user name
@@ -125,6 +125,7 @@ public abstract class TaskController implements Configurable {
                  String stdout,
                  String stderr) throws IOException;
   
+
   /**
    * Send a signal to a task pid as the user.
    * @param user the user name
@@ -133,7 +134,7 @@ public abstract class TaskController implements Configurable {
    */
   public abstract void signalTask(String user, int taskPid, 
                                   Signal signal) throws IOException;
-  
+
   /**
    * Delete the user's files under all of the task tracker root directories.
    * @param user the user name
@@ -150,11 +151,9 @@ public abstract class TaskController implements Configurable {
    * @param isCleanup If the task is cleanup task or not
    * @throws IOException
    */
-  public void createLogDir(TaskAttemptID taskID, 
-			boolean isCleanup) throws IOException {
-	  
-  }
-  
+  public abstract void createLogDir(TaskAttemptID taskID,
+                                    boolean isCleanup) throws IOException;
+
   /**
    * Delete the user's files under the userlogs directory.
    * @param user the user to work as
@@ -163,7 +162,7 @@ public abstract class TaskController implements Configurable {
    */
   public abstract void deleteLogAsUser(String user, 
                                        String subDir) throws IOException;
-  
+
   /**
    * Run the passed command as the user
    * @param user 
@@ -186,7 +185,7 @@ public abstract class TaskController implements Configurable {
       this.user = user;
       this.subDir = subDir;
     }
-    
+
     @Override
     protected void deletePath() throws IOException {
       if (isLog) {
@@ -202,7 +201,7 @@ public abstract class TaskController implements Configurable {
         user + "," + subDir + ")";
     }
   }
-  
+
    /**
     * Returns the local unix user that a given job will run as.
     */
@@ -217,21 +216,28 @@ public abstract class TaskController implements Configurable {
   // a file and execute it.
   protected static String writeCommand(String cmdLine, FileSystem fs,
       Path commandFile) throws IOException {
-    PrintWriter pw = null;
-    LOG.info("Writing commands to " + commandFile);
+    String path = commandFile.makeQualified(fs).toUri().getPath();
+    FileWriter w = null;
+    LOG.info("Writing commands to " + path);
     try {
-      pw = new PrintWriter(FileSystem.create(
-            fs, commandFile, TASK_LAUNCH_SCRIPT_PERMISSION));
-      pw.write(cmdLine);
+      File parent = new File(path).getParentFile();
+      if (!parent.isDirectory() && !parent.mkdirs()) {
+        throw new IOException(
+          "Couldn't ensure directory for task script: " + parent);
+      }
+      w = new FileWriter(path);
+      w.write(cmdLine);
     } catch (IOException ioe) {
       LOG.error("Caught IOException while writing JVM command line to file. ",
           ioe);
+      throw ioe;
     } finally {
-      if (pw != null) {
-        pw.close();
+      if (w != null) {
+        w.close();
       }
     }
-    return commandFile.makeQualified(fs).toUri().getPath();
+    fs.setPermission(commandFile, TASK_LAUNCH_SCRIPT_PERMISSION);
+    return path;
   }
   
   protected void logOutput(String output) {

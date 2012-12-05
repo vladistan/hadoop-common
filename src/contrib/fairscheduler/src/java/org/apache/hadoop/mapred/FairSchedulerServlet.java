@@ -30,7 +30,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
-import java.util.Iterator;
 import java.util.List;
 
 import javax.servlet.ServletContext;
@@ -82,9 +81,8 @@ public class FairSchedulerServlet extends HttpServlet {
     // If the request has a set* param, handle that and redirect to the regular
     // view page so that the user won't resubmit the data if they hit refresh.
     boolean advancedView = request.getParameter("advanced") != null;
-    if (JSPUtil.privateActionsAllowed(jobTracker.conf)
-        && request.getParameter("setPool") != null) {
-      Collection<JobInProgress> runningJobs = getInitedJobs();
+    if (request.getParameter("setPool") != null) {
+      Collection<JobInProgress> runningJobs = jobTracker.getRunningJobs();
       PoolManager poolMgr = null;
       synchronized (scheduler) {
         poolMgr = scheduler.getPoolManager();
@@ -103,9 +101,8 @@ public class FairSchedulerServlet extends HttpServlet {
       response.sendRedirect("/scheduler" + (advancedView ? "?advanced" : ""));
       return;
     }
-    if (JSPUtil.privateActionsAllowed(jobTracker.conf)
-        && request.getParameter("setPriority") != null) {
-      Collection<JobInProgress> runningJobs = getInitedJobs();
+    if (request.getParameter("setPriority") != null) {
+      Collection<JobInProgress> runningJobs = jobTracker.getRunningJobs();      
       JobPriority priority = JobPriority.valueOf(request.getParameter(
           "setPriority"));
       String jobId = request.getParameter("jobid");
@@ -123,7 +120,7 @@ public class FairSchedulerServlet extends HttpServlet {
     response.setContentType("text/html");
 
     // Because the client may read arbitrarily slow, and we hold locks while
-    // the servlet outputs, we want to write to our own buffer which we know
+    // the servlet output, we want to write to our own buffer which we know
     // won't block.
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     PrintWriter out = new PrintWriter(baos);
@@ -247,7 +244,7 @@ public class FairSchedulerServlet extends HttpServlet {
         (advancedView ? "<th>Weight</th>" : ""));
     out.print("</tr>\n");
     synchronized (jobTracker) {
-      Collection<JobInProgress> runningJobs = getInitedJobs();
+      Collection<JobInProgress> runningJobs = jobTracker.getRunningJobs();
       synchronized (scheduler) {
         for (JobInProgress job: runningJobs) {
           JobProfile profile = job.getProfile();
@@ -257,45 +254,41 @@ public class FairSchedulerServlet extends HttpServlet {
           }
           out.print("<tr>\n");
           out.printf("<td>%s</td>\n", DATE_FORMAT.format(
-              new Date(job.getStartTime())));
+                       new Date(job.getStartTime())));
           out.printf("<td><a href=\"jobdetails.jsp?jobid=%s\">%s</a></td>",
-              profile.getJobID(), profile.getJobID());
+                     profile.getJobID(), profile.getJobID());
           out.printf("<td>%s</td>\n", profile.getUser());
           out.printf("<td>%s</td>\n", profile.getJobName());
-          if (JSPUtil.privateActionsAllowed(jobTracker.conf)) {
-            out.printf("<td>%s</td>\n", generateSelect(scheduler
-                .getPoolManager().getPoolNames(), scheduler.getPoolManager()
-                .getPoolName(job), "/scheduler?setPool=<CHOICE>&jobid="
-                + profile.getJobID() + (advancedView ? "&advanced" : "")));
-            out.printf("<td>%s</td>\n", generateSelect(Arrays
-                .asList(new String[] { "VERY_LOW", "LOW", "NORMAL", "HIGH",
-                    "VERY_HIGH" }), job.getPriority().toString(),
-                "/scheduler?setPriority=<CHOICE>&jobid=" + profile.getJobID()
-                    + (advancedView ? "&advanced" : "")));
-          } else {
-            out.printf("<td>%s</td>\n", scheduler.getPoolManager().getPoolName(job));
-            out.printf("<td>%s</td>\n", job.getPriority().toString());
-          }
+          out.printf("<td>%s</td>\n", generateSelect(
+                       scheduler.getPoolManager().getPoolNames(),
+                       scheduler.getPoolManager().getPoolName(job),
+                       "/scheduler?setPool=<CHOICE>&jobid=" + profile.getJobID() +
+                       (advancedView ? "&advanced" : "")));
+          out.printf("<td>%s</td>\n", generateSelect(
+                       Arrays.asList(new String[]
+                         {"VERY_LOW", "LOW", "NORMAL", "HIGH", "VERY_HIGH"}),
+                       job.getPriority().toString(),
+                       "/scheduler?setPriority=<CHOICE>&jobid=" + profile.getJobID() +
+                       (advancedView ? "&advanced" : "")));
           Pool pool = scheduler.getPoolManager().getPool(job);
           String mapShare = (pool.getSchedulingMode() == SchedulingMode.FAIR) ?
-              String.format("%.1f", info.mapSchedulable.getFairShare()) : "NA";
+            String.format("%.1f", info.mapSchedulable.getFairShare()) : "NA";
           out.printf("<td>%d / %d</td><td>%d</td><td>%s</td>\n",
-              job.finishedMaps(), job.desiredMaps(), 
-              info.mapSchedulable.getRunningTasks(),
-              mapShare);
+                     job.finishedMaps(), job.desiredMaps(), 
+                     info.mapSchedulable.getRunningTasks(),
+                     mapShare);
           if (advancedView) {
             out.printf("<td>%.1f</td>\n", info.mapSchedulable.getWeight());
           }
           String reduceShare = (pool.getSchedulingMode() == SchedulingMode.FAIR) ?
-              String.format("%.1f", info.reduceSchedulable.getFairShare()) : "NA";
+            String.format("%.1f", info.reduceSchedulable.getFairShare()) : "NA";
           out.printf("<td>%d / %d</td><td>%d</td><td>%s</td>\n",
-              job.finishedReduces(), job.desiredReduces(), 
-              info.reduceSchedulable.getRunningTasks(),
-              reduceShare);
+                     job.finishedReduces(), job.desiredReduces(), 
+                     info.reduceSchedulable.getRunningTasks(),
+                     reduceShare);
           if (advancedView) {
             out.printf("<td>%.1f</td>\n", info.reduceSchedulable.getWeight());
           }
-          out.print("</tr>\n");
         }
       }
     }
@@ -324,19 +317,4 @@ public class FairSchedulerServlet extends HttpServlet {
     html.append("</select>\n");
     return html.toString();
   }
-
-  /**
-   * Obtained all initialized jobs
-   */
-  private Collection<JobInProgress> getInitedJobs() {
-    Collection<JobInProgress> runningJobs = jobTracker.getRunningJobs();
-    for (Iterator<JobInProgress> it = runningJobs.iterator(); it.hasNext();) {
-      JobInProgress job = it.next();
-      if (!job.inited()) {
-        it.remove();
-      }
-    }
-    return runningJobs;
-  }
-
 }

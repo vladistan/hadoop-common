@@ -22,7 +22,7 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
-import org.apache.hadoop.classification.InterfaceAudience;
+//import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
@@ -85,7 +85,7 @@ public class JobTokenIdentifier extends TokenIdentifier {
     jobid.write(out);
   }
 
-  @InterfaceAudience.Private
+  //@InterfaceAudience.Private
   public static class Renewer extends Token.TrivialRenewer {
     @Override
     protected Text getKind() {

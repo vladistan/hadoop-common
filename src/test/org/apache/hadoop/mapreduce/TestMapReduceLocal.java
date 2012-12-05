@@ -27,6 +27,7 @@ import java.io.InputStreamReader;
 import junit.framework.TestCase;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.examples.MultiFileWordCount;
 import org.apache.hadoop.examples.WordCount;
 import org.apache.hadoop.examples.WordCount.IntSumReducer;
 import org.apache.hadoop.examples.WordCount.TokenizerMapper;
@@ -40,6 +41,7 @@ import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.input.LineRecordReader;
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.util.ToolRunner;
 
 /**
  * A JUnit test to test min map-reduce cluster with local file system.
@@ -86,6 +88,7 @@ public class TestMapReduceLocal extends TestCase {
       mr = new MiniMRCluster(2, "file:///", 3);
       Configuration conf = mr.createJobConf();
       runWordCount(conf);
+      runMultiFileWordCount(conf);
     } finally {
       if (mr != null) { mr.shutdown(); }
     }
@@ -137,14 +140,9 @@ public class TestMapReduceLocal extends TestCase {
     job.setInputFormatClass(TrackingTextInputFormat.class);
     FileInputFormat.addInputPath(job, new Path(TEST_ROOT_DIR + "/in"));
     FileOutputFormat.setOutputPath(job, new Path(TEST_ROOT_DIR + "/out"));
-    assertNull("job.getJobID() must be null before the job is submitted",
-	       job.getJobID());
-    job.submit();
-    assertNotNull("job.getJobID() can't be null after the job is submitted",
-		  job.getJobID());
+    assertNull(job.getJobID());
     assertTrue(job.waitForCompletion(false));
-    assertNotNull("job.getJobID() can't be null again after the job is finished",
-		  job.getJobID());
+    assertNotNull(job.getJobID());
     String out = readFile("out/part-r-00000");
     System.out.println(out);
     assertEquals("a\t1\ncount\t1\nis\t1\nmore\t1\nof\t1\ntest\t4\nthis\t1\nword\t1\n",
@@ -170,6 +168,22 @@ public class TestMapReduceLocal extends TestCase {
     String group = "Random Group";
     CounterGroup ctrGrp = ctrs.getGroup(group);
     assertEquals(0, ctrGrp.size());
+  }
+ 
+  public void runMultiFileWordCount(Configuration  conf) throws Exception  {
+    localFs.delete(new Path(TEST_ROOT_DIR + "/in"), true);
+    localFs.delete(new Path(TEST_ROOT_DIR + "/out"), true);    
+    writeFile("in/part1", "this is a test\nof " +
+              "multi file word count test\ntest\n");
+    writeFile("in/part2", "more test");
+
+    int ret = ToolRunner.run(conf, new MultiFileWordCount(), 
+                new String[] {TEST_ROOT_DIR + "/in", TEST_ROOT_DIR + "/out"});
+    assertTrue("MultiFileWordCount failed", ret == 0);
+    String out = readFile("out/part-r-00000");
+    System.out.println(out);
+    assertEquals("a\t1\ncount\t1\nfile\t1\nis\t1\n" +
+      "more\t1\nmulti\t1\nof\t1\ntest\t4\nthis\t1\nword\t1\n", out);
   }
 
 }

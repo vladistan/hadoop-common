@@ -34,6 +34,7 @@ import org.apache.hadoop.mapreduce.test.system.TaskInfo;
 import org.apache.hadoop.mapreduce.test.system.TTClient;
 import org.apache.hadoop.mapreduce.test.system.JTClient;
 import org.apache.hadoop.mapreduce.test.system.FinishTaskControlAction;
+import org.apache.hadoop.mapred.JobClient.NetworkedJob;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
@@ -99,7 +100,7 @@ public class TestTaskKilling {
         jtClient.isTaskStarted(taskInfo));
 
     // Fail the running task.
-    RunningJob networkJob = jobClient.getJob(jobId);
+    NetworkedJob networkJob = jobClient.new NetworkedJob(jInfo.getStatus());
     TaskID tID = TaskID.downgrade(taskInfo.getTaskID());
     TaskAttemptID taskAttID = new TaskAttemptID(tID , 0);
     networkJob.killTask(taskAttID, true);
@@ -205,7 +206,7 @@ public class TestTaskKilling {
             taskAttID + " has not been found while task was running.", 
                     isTempFolderExists);
     
-    RunningJob networkJob = jobClient.getJob(id);
+    NetworkedJob networkJob = jobClient.new NetworkedJob(jInfo.getStatus());
     networkJob.killTask(taskAttID, false);
     ttClient.getProxy().sendAction(action);
     taskInfo = remoteJTClient.getTaskInfo(tID);
@@ -352,7 +353,8 @@ public class TestTaskKilling {
         TaskAttemptID tAttID = new TaskAttemptID(taskId, 
             taskInfo.numFailedAttempts());
         while(taskInfo.numFailedAttempts() < MAX_MAP_TASK_ATTEMPTS) {
-          RunningJob networkJob = jobClient.getJob(id);
+          NetworkedJob networkJob = jtClient.getClient().
+             new NetworkedJob(jobInfo.getStatus());
           networkJob.killTask(taskAttID, true);
           taskInfo = remoteJTClient.getTaskInfo(taskInfo.getTaskID());
           taskAttID = new TaskAttemptID(taskId, taskInfo.numFailedAttempts());
@@ -482,7 +484,8 @@ public class TestTaskKilling {
             taskIdKilled = taskid.toString();
             taskAttemptID = new TaskAttemptID(taskid, i);
             LOG.info("taskAttemptid going to be killed is : " + taskAttemptID);
-            rJob.killTask(taskAttemptID,true);
+            (jobClient.new NetworkedJob(jInfo.getStatus())).
+                killTask(taskAttemptID,true);
             checkTaskCompletionEvent(taskAttemptID, jInfo);
             break;
           } else {
@@ -492,7 +495,8 @@ public class TestTaskKilling {
               UtilsForTests.waitFor(20000);
               LOG.info("taskAttemptid going to be killed is : " +
                   taskAttemptID);
-              rJob.killTask(taskAttemptID,true);
+              (jobClient.new NetworkedJob(jInfo.getStatus())).
+                  killTask(taskAttemptID,true);
               checkTaskCompletionEvent(taskAttemptID,jInfo);
               break;
             }
@@ -532,10 +536,8 @@ public class TestTaskKilling {
     boolean match = false;
     int count = 0;
     while (!match) {
-      org.apache.hadoop.mapreduce.JobID temp = jInfo.getID();
-      RunningJob rJob = jobClient.getJob(new JobID(temp.getJtIdentifier(), temp.getId()));
- 
-      TaskCompletionEvent[] taskCompletionEvents =  rJob.getTaskCompletionEvents(0);
+      TaskCompletionEvent[] taskCompletionEvents =  jobClient.new
+        NetworkedJob(jInfo.getStatus()).getTaskCompletionEvents(0);
       for (TaskCompletionEvent taskCompletionEvent : taskCompletionEvents) {
         LOG.info("taskCompletionEvent.getTaskAttemptId().toString() is : " + 
           taskCompletionEvent.getTaskAttemptId().toString());

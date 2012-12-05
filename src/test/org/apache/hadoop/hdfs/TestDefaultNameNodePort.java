@@ -17,9 +17,7 @@
  */
 package org.apache.hadoop.hdfs;
 
-import org.junit.*;
-import static org.junit.Assert.*;
-
+import junit.framework.TestCase;
 import java.io.*;
 import java.net.*;
 import java.util.*;
@@ -29,8 +27,8 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 
 /** Test NameNode port defaulting code. */
-public class TestDefaultNameNodePort {
-  @Test
+public class TestDefaultNameNodePort extends TestCase {
+
   public void testGetAddressFromString() throws Exception {
     assertEquals(NameNode.getAddress("foo").getPort(),
                  NameNode.DEFAULT_PORT);
@@ -42,7 +40,6 @@ public class TestDefaultNameNodePort {
                  555);
   }
 
-  @Test
   public void testGetAddressFromConf() throws Exception {
     Configuration conf = new Configuration();
     FileSystem.setDefaultUri(conf, "hdfs://foo/");
@@ -60,36 +57,4 @@ public class TestDefaultNameNodePort {
                                                        NameNode.DEFAULT_PORT)),
                  URI.create("hdfs://foo"));
   }
-
-  @Test
-  public void testSlashAddress() throws Exception {
-    verifyBadAuthAddress("/junk");
-  } 
-
-  @Test
-  public void testSlashSlashAddress() throws Exception {
-    verifyBadAuthAddress("//junk");
-  } 
-
-  @Test
-  public void testNoAuthAddress() throws Exception {
-    // this is actually the default value if the default fs isn't configured!
-    verifyBadAuthAddress("file:///");
-  } 
-
-  public void verifyBadAuthAddress(String noAuth) throws Exception {
-    Configuration conf = new Configuration();
-    FileSystem.setDefaultUri(conf, noAuth);
-    try {
-      InetSocketAddress addr = NameNode.getAddress(conf);
-      // this will show what we got back in case the test fails
-      assertEquals(null, addr);
-    } catch (IllegalArgumentException e) {
-      assertEquals(
-          "Does not contain a valid host:port authority: " + noAuth,
-          e.getMessage());
-    }
-  } 
-
-
 }

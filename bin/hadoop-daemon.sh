@@ -20,7 +20,7 @@
 #
 # Environment Variables
 #
-#   HADOOP_CONF_DIR  Alternate conf dir. Default is ${HADOOP_PREFIX}/conf.
+#   HADOOP_CONF_DIR  Alternate conf dir. Default is ${HADOOP_HOME}/conf.
 #   HADOOP_LOG_DIR   Where log files are stored.  PWD by default.
 #   HADOOP_MASTER    host:path where hadoop code should be rsync'd from
 #   HADOOP_PID_DIR   The pid files are stored. /tmp by default.
@@ -39,11 +39,7 @@ fi
 bin=`dirname "$0"`
 bin=`cd "$bin"; pwd`
 
-if [ -e "$bin/../libexec/hadoop-config.sh" ]; then
-  . "$bin"/../libexec/hadoop-config.sh
-else
-  . "$bin/hadoop-config.sh"
-fi
+. "$bin"/hadoop-config.sh
 
 # get arguments
 startStop=$1
@@ -58,25 +54,18 @@ hadoop_rotate_log ()
     if [ -n "$2" ]; then
 	num=$2
     fi
-    if [ -f "$log" ]; then # rotate logs
+    if [ -f "$_HADOOP_DAEMON_OUT" ]; then # rotate logs
 	while [ $num -gt 1 ]; do
 	    prev=`expr $num - 1`
-	    [ -f "$log.$prev" ] && mv "$log.$prev" "$log.$num"
+	    [ -f "$_HADOOP_DAEMON_OUT.$prev" ] && mv "$_HADOOP_DAEMON_OUT.$prev" "$_HADOOP_DAEMON_OUT.$num"
 	    num=$prev
 	done
-	mv "$log" "$log.$num";
+	mv "$_HADOOP_DAEMON_OUT" "$_HADOOP_DAEMON_OUT.$num";
     fi
 }
 
 if [ -f "${HADOOP_CONF_DIR}/hadoop-env.sh" ]; then
   . "${HADOOP_CONF_DIR}/hadoop-env.sh"
-fi
-
-# Determine if we're starting a secure datanode, and if so, redefine appropriate variables
-if [ "$command" == "datanode" ] && [ "$EUID" -eq 0 ] && [ -n "$HADOOP_SECURE_DN_USER" ]; then
-  export HADOOP_PID_DIR=$HADOOP_SECURE_DN_PID_DIR
-  export HADOOP_LOG_DIR=$HADOOP_SECURE_DN_LOG_DIR
-  export HADOOP_IDENT_STRING=$HADOOP_SECURE_DN_USER   
 fi
 
 if [ "$HADOOP_IDENT_STRING" = "" ]; then
@@ -88,13 +77,6 @@ if [ "$HADOOP_LOG_DIR" = "" ]; then
   export HADOOP_LOG_DIR="$HADOOP_HOME/logs"
 fi
 mkdir -p "$HADOOP_LOG_DIR"
-touch $HADOOP_LOG_DIR/.hadoop_test > /dev/null 2>&1
-TEST_LOG_DIR=$?
-if [ "${TEST_LOG_DIR}" = "0" ]; then
-  rm -f $HADOOP_LOG_DIR/.hadoop_test
-else
-  chown $HADOOP_IDENT_STRING $HADOOP_LOG_DIR 
-fi
 
 if [ "$HADOOP_PID_DIR" = "" ]; then
   HADOOP_PID_DIR=/tmp
@@ -103,8 +85,10 @@ fi
 # some variables
 export HADOOP_LOGFILE=hadoop-$HADOOP_IDENT_STRING-$command-$HOSTNAME.log
 export HADOOP_ROOT_LOGGER="INFO,DRFA"
-log=$HADOOP_LOG_DIR/hadoop-$HADOOP_IDENT_STRING-$command-$HOSTNAME.out
-pid=$HADOOP_PID_DIR/hadoop-$HADOOP_IDENT_STRING-$command.pid
+export HADOOP_SECURITY_LOGGER="INFO,DRFAS"
+export _HADOOP_DAEMON_OUT=$HADOOP_LOG_DIR/hadoop-$HADOOP_IDENT_STRING-$command-$HOSTNAME.out
+export _HADOOP_DAEMON_PIDFILE=$HADOOP_PID_DIR/hadoop-$HADOOP_IDENT_STRING-$command.pid
+export _HADOOP_DAEMON_DETACHED="true"
 
 # Set default scheduling priority
 if [ "$HADOOP_NICENESS" = "" ]; then
@@ -117,9 +101,9 @@ case $startStop in
 
     mkdir -p "$HADOOP_PID_DIR"
 
-    if [ -f $pid ]; then
-      if kill -0 `cat $pid` > /dev/null 2>&1; then
-        echo $command running as process `cat $pid`.  Stop it first.
+    if [ -f $_HADOOP_DAEMON_PIDFILE ]; then
+      if kill -0 `cat $_HADOOP_DAEMON_PIDFILE` > /dev/null 2>&1; then
+        echo $command running as process `cat $_HADOOP_DAEMON_PIDFILE`.  Stop it first.
         exit 1
       fi
     fi
@@ -129,20 +113,19 @@ case $startStop in
       rsync -a -e ssh --delete --exclude=.svn --exclude='logs/*' --exclude='contrib/hod/logs/*' $HADOOP_MASTER/ "$HADOOP_HOME"
     fi
 
-    hadoop_rotate_log $log
-    echo starting $command, logging to $log
-    cd "$HADOOP_PREFIX"
-    nohup nice -n $HADOOP_NICENESS "$HADOOP_PREFIX"/bin/hadoop --config $HADOOP_CONF_DIR $command "$@" > "$log" 2>&1 < /dev/null &
-    echo $! > $pid
-    sleep 1; head "$log"
+    hadoop_rotate_log $_HADOOP_DAEMON_OUT
+    echo starting $command, logging to $_HADOOP_DAEMON_OUT
+    cd "$HADOOP_HOME"
+
+    nice -n $HADOOP_NICENESS "$HADOOP_HOME"/bin/hadoop --config $HADOOP_CONF_DIR $command "$@" < /dev/null
     ;;
           
   (stop)
 
-    if [ -f $pid ]; then
-      if kill -0 `cat $pid` > /dev/null 2>&1; then
+    if [ -f $_HADOOP_DAEMON_PIDFILE ]; then
+      if kill -0 `cat $_HADOOP_DAEMON_PIDFILE` > /dev/null 2>&1; then
         echo stopping $command
-        kill `cat $pid`
+        kill `cat $_HADOOP_DAEMON_PIDFILE`
       else
         echo no $command to stop
       fi

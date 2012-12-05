@@ -18,8 +18,6 @@
 
 package org.apache.hadoop.metrics.spi;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.metrics.ContextFactory;
 import org.apache.hadoop.metrics.MetricsException;
 
@@ -34,21 +32,16 @@ import org.apache.hadoop.metrics.MetricsException;
  * The default impl of start and stop monitoring:
  *  is the AbstractMetricsContext is good enough.
  * 
- * @deprecated in favor of <code>org.apache.hadoop.metrics2</code> usage.
  */
-@Deprecated
-@InterfaceAudience.Public
-@InterfaceStability.Evolving
+
 public class NullContextWithUpdateThread extends AbstractMetricsContext {
   
   private static final String PERIOD_PROPERTY = "period";
     
   /** Creates a new instance of NullContextWithUpdateThread */
-  @InterfaceAudience.Private
   public NullContextWithUpdateThread() {
   }
   
-  @InterfaceAudience.Private
   public void init(String contextName, ContextFactory factory) {
     super.init(contextName, factory);
     parseAndSetPeriod(PERIOD_PROPERTY);
@@ -58,7 +51,6 @@ public class NullContextWithUpdateThread extends AbstractMetricsContext {
   /**
    * Do-nothing version of emitRecord
    */
-  @InterfaceAudience.Private
   protected void emitRecord(String contextName, String recordName,
                             OutputRecord outRec) 
   {}
@@ -66,14 +58,12 @@ public class NullContextWithUpdateThread extends AbstractMetricsContext {
   /**
    * Do-nothing version of update
    */
-  @InterfaceAudience.Private
   protected void update(MetricsRecordImpl record) {
   }
     
   /**
    * Do-nothing version of remove
    */
-  @InterfaceAudience.Private
   protected void remove(MetricsRecordImpl record) {
   }
 }

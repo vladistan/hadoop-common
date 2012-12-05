@@ -338,6 +338,7 @@ public class TestHarFileSystem extends TestCase {
     assertTrue("Empty read.", readBytes > 0);
     fin.close();
     assertTrue("strings are equal ", (b[0] == "c".getBytes()[0]));
+
     // ok all files match 
     // run a map reduce job
     FileSystem fsHar = harPath.getFileSystem(conf);

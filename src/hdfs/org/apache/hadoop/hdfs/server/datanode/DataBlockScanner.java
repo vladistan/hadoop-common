@@ -49,6 +49,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.util.DataTransferThrottler;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.StringUtils;
 
@@ -94,7 +95,7 @@ class DataBlockScanner implements Runnable {
   
   Random random = new Random();
   
-  BlockTransferThrottler throttler = null;
+  DataTransferThrottler throttler = null;
   
   private static enum ScanType {
     REMOTE_READ,           // Verified when a block read by a client etc
@@ -197,7 +198,7 @@ class DataBlockScanner implements Runnable {
     }
   }
 
-  private void init() {
+  private void init() throws InterruptedException {
     
     // get the list of blocks and arrange them in random order
     Block arr[] = dataset.getBlockReport();
@@ -238,7 +239,7 @@ class DataBlockScanner implements Runnable {
     }
     
     synchronized (this) {
-      throttler = new BlockTransferThrottler(200, MAX_SCAN_RATE);
+      throttler = new DataTransferThrottler(200, MAX_SCAN_RATE);
     }
   }
 
@@ -248,8 +249,9 @@ class DataBlockScanner implements Runnable {
      */
     long period = Math.min(scanPeriod, 
                            Math.max(blockMap.size(),1) * 600 * 1000L);
+    int periodInt = Math.abs((int)period);
     return System.currentTimeMillis() - scanPeriod + 
-           random.nextInt((int)period);    
+           random.nextInt(periodInt);
   }
 
   /** Adds block to list of blocks */
@@ -299,36 +301,41 @@ class DataBlockScanner implements Runnable {
   }
   
   /*
-   * A reader will try to indicate a block is verified and will add blocks to
-   * the DataBlockScanner before they are finished (due to concurrent readers).
-   * 
-   * fixed so a read verification can't add the block
-   */
+    A reader will try to indicate a block is verified and will add blocks 
+    to the DataBlockScanner before they are finished (due to concurrent 
+    readers).
+    
+    fixed so a read verification can't add the block
+  */
   synchronized void verifiedByClient(Block block) {
     updateScanStatusInternal(block, ScanType.REMOTE_READ, true, true);
   }
   
-  private synchronized void updateScanStatus(Block block, ScanType type,
-      boolean scanOk) {
+  private synchronized void updateScanStatus(
+    Block block, 
+    ScanType type,
+    boolean scanOk
+  ) {
     updateScanStatusInternal(block, type, scanOk, false);
   }
-      
-  /**
-   * @param block
-   *          - block to update status for
-   * @param type
-   *          - client, DN, ...
-   * @param scanOk
-   *          - result of scan
-   * @param updateOnly
-   *          - if true, cannot add a block, but only update an existing block
-   */
-  private synchronized void updateScanStatusInternal(Block block,
-      ScanType type, boolean scanOk, boolean updateOnly) {
 
+  /**
+   * @param block  - block to update status for 
+   * @param type - client, DN, ...
+   * @param scanOk - result of scan
+   * @param updateOnly - if true, cannot add a block, but only update an
+   *                     existing block
+   */
+  private synchronized void updateScanStatusInternal(
+    Block block, 
+    ScanType type,
+    boolean scanOk,
+    boolean updateOnly
+  ) {
     if (!isInitialized()) {
       return;
     }
+
     BlockScanInfo info = blockMap.get(block);
     
     if ( info != null ) {
@@ -486,13 +493,13 @@ class DataBlockScanner implements Runnable {
                  StringUtils.stringifyException(e));
         
         if (second) {
-          datanode.getMetrics().incrBlockVerificationFailures();
+          datanode.getMetrics().blockVerificationFailures.inc(); 
           handleScanFailure(block);
           return;
         } 
       } finally {
         IOUtils.closeStream(blockSender);
-        datanode.getMetrics().incrBlocksVerified();
+        datanode.getMetrics().blocksVerified.inc();
         totalScans++;
         totalVerifications++;
       }
@@ -621,9 +628,11 @@ class DataBlockScanner implements Runnable {
           } catch (InterruptedException ignored) {}
         }
       }
+    } catch (InterruptedException ie) {
+      LOG.info("DataBlockScanner interrupted");
     } catch (RuntimeException e) {
       LOG.warn("RuntimeException during DataBlockScanner.run() : " +
-               StringUtils.stringifyException(e));
+          e.getMessage() + "  " + StringUtils.stringifyException(e));
       throw e;
     } finally {
       shutdown();
@@ -785,9 +794,6 @@ class DataBlockScanner implements Runnable {
      * return true if append was successful.
      */
     synchronized boolean appendLine(String line) {
-      if (out == null) {
-        return false;
-      }
       out.println();
       out.print(line);
       curNumLines += (curNumLines < 0) ? -1 : 1;

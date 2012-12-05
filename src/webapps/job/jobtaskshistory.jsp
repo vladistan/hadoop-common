@@ -53,7 +53,6 @@
   }
   Map<String, JobHistory.Task> tasks = job.getAllTasks(); 
 %>
-<!DOCTYPE html>
 <html>
 <head>
   <title><%=taskStatus%> <%=taskType %> task list for <%=jobid %></title>

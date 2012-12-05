@@ -43,18 +43,6 @@ public class LocalFileSystem extends ChecksumFileSystem {
     super(rawLocalFileSystem);
     rfs = rawLocalFileSystem;
   }
-  
-  /**
-   * Get file status.
-   */
-  public boolean exists(Path f) throws IOException {
-    File path = pathToFile(f);
-    if (path.exists()) {
-      return true;
-    } else {
-      return false;
-    }
-  }
     
   /** Convert a path to a File. */
   public File pathToFile(Path path) {

@@ -20,14 +20,14 @@ package org.apache.hadoop.mapred;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.URL;
-import java.net.URLConnection;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -97,14 +97,10 @@ public class PoolManager {
   // Preemption timeout for jobs below fair share in seconds. If a job remains
   // below half its fair share for this long, it is allowed to preempt tasks.
   private long fairSharePreemptionTimeout = Long.MAX_VALUE;
-  
+
   SchedulingMode defaultSchedulingMode = SchedulingMode.FAIR;
-  
-  private Object allocFile; // Path to XML file containing allocations. This
-                            // is either a URL to specify a classpath resource
-                            // (if the fair-scheduler.xml on the classpath is
-                            // used) or a String to specify an absolute path (if
-                            // mapred.fairscheduler.allocation.file is used).
+
+  private String allocFile; // Path to XML file containing allocations
   private String poolNameProperty; // Jobconf property to use for determining a
                                    // job's pool name (default: user.name)
   
@@ -113,6 +109,8 @@ public class PoolManager {
   private long lastReloadAttempt; // Last time we tried to reload the pools file
   private long lastSuccessfulReload; // Last time we successfully reloaded pools
   private boolean lastReloadAttemptFailed = false;
+
+  private Set<String> declaredPools = new TreeSet<String>();
 
   public PoolManager(FairScheduler scheduler) {
     this.scheduler = scheduler;
@@ -125,14 +123,8 @@ public class PoolManager {
         "mapred.fairscheduler.poolnameproperty", "user.name");
     this.allocFile = conf.get("mapred.fairscheduler.allocation.file");
     if (allocFile == null) {
-      // No allocation file specified in jobconf. Use the default allocation
-      // file, fair-scheduler.xml, looking for it on the classpath.
-      allocFile = new Configuration().getResource("fair-scheduler.xml");
-      if (allocFile == null) {
-        LOG.error("The fair scheduler allocation file fair-scheduler.xml was "
-            + "not found on the classpath, and no other config file is given "
-            + "through mapred.fairscheduler.allocation.file.");
-      }
+      LOG.warn("No mapred.fairscheduler.allocation.file given in jobconf - " +
+          "the fair scheduler will not use any queues.");
     }
     reloadAllocs();
     lastSuccessfulReload = System.currentTimeMillis();
@@ -168,20 +160,9 @@ public class PoolManager {
     long time = System.currentTimeMillis();
     if (time > lastReloadAttempt + ALLOC_RELOAD_INTERVAL) {
       lastReloadAttempt = time;
-      if (null == allocFile) {
-        return;
-      }
       try {
-        // Get last modified time of alloc file depending whether it's a String
-        // (for a path name) or an URL (for a classloader resource)
-        long lastModified;
-        if (allocFile instanceof String) {
-          File file = new File((String) allocFile);
-          lastModified = file.lastModified();
-        } else { // allocFile is an URL
-          URLConnection conn = ((URL) allocFile).openConnection();
-          lastModified = conn.getLastModified();
-        }
+        File file = new File(allocFile);
+        long lastModified = file.lastModified();
         if (lastModified > lastSuccessfulReload &&
             time > lastModified + ALLOC_RELOAD_WAIT) {
           reloadAllocs();
@@ -236,24 +217,19 @@ public class PoolManager {
     Map<String, Long> minSharePreemptionTimeouts = new HashMap<String, Long>();
     int userMaxJobsDefault = Integer.MAX_VALUE;
     int poolMaxJobsDefault = Integer.MAX_VALUE;
-    long fairSharePreemptionTimeout = Long.MAX_VALUE;
-    long defaultMinSharePreemptionTimeout = Long.MAX_VALUE;
-    SchedulingMode defaultSchedulingMode = SchedulingMode.FAIR;
     
     // Remember all pool names so we can display them on web UI, etc.
     List<String> poolNamesInAllocFile = new ArrayList<String>();
+    long fairSharePreemptionTimeout = Long.MAX_VALUE;
+    long defaultMinSharePreemptionTimeout = Long.MAX_VALUE;
+    SchedulingMode defaultSchedulingMode = SchedulingMode.FAIR;
     
     // Read and parse the allocations file.
     DocumentBuilderFactory docBuilderFactory =
       DocumentBuilderFactory.newInstance();
     docBuilderFactory.setIgnoringComments(true);
     DocumentBuilder builder = docBuilderFactory.newDocumentBuilder();
-    Document doc;
-    if (allocFile instanceof String) {
-      doc = builder.parse(new File((String) allocFile));
-    } else {
-      doc = builder.parse(allocFile.toString());
-    }
+    Document doc = builder.parse(new File(allocFile));
     Element root = doc.getDocumentElement();
     if (!"allocations".equals(root.getTagName()))
       throw new AllocationConfigurationException("Bad fair scheduler config " + 
@@ -363,13 +339,15 @@ public class PoolManager {
       this.poolMaxReduces = poolMaxReduces;
       this.poolMaxJobs = poolMaxJobs;
       this.userMaxJobs = userMaxJobs;
-      this.poolWeights = poolWeights;
-      this.minSharePreemptionTimeouts = minSharePreemptionTimeouts;
       this.userMaxJobsDefault = userMaxJobsDefault;
       this.poolMaxJobsDefault = poolMaxJobsDefault;
+      this.poolWeights = poolWeights;
+      this.minSharePreemptionTimeouts = minSharePreemptionTimeouts;
       this.fairSharePreemptionTimeout = fairSharePreemptionTimeout;
       this.defaultMinSharePreemptionTimeout = defaultMinSharePreemptionTimeout;
       this.defaultSchedulingMode = defaultSchedulingMode;
+      this.declaredPools = Collections.unmodifiableSet(new TreeSet<String>(
+          poolNamesInAllocFile));
       for (String name: poolNamesInAllocFile) {
         Pool pool = getPool(name);
         if (poolModes.containsKey(name)) {
@@ -543,4 +521,9 @@ public class PoolManager {
       pool.updateMetrics();
     }
   }
+
+  public synchronized Set<String> getDeclaredPools() {
+    return declaredPools;
+  }
+
 }

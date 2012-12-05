@@ -66,8 +66,6 @@ import org.apache.hadoop.fs.FSDataInputStream;
 abstract public class Task implements Writable, Configurable {
   private static final Log LOG =
     LogFactory.getLog(Task.class);
-  public static final String MR_COMBINE_RECORDS_BEFORE_PROGRESS = "mapred.combine.recordsBeforeProgress";
-  public static final long DEFAULT_MR_COMBINE_RECORDS_BEFORE_PROGRESS = 10000;
 
   // Counters used by Task subclasses
   public static enum Counter { 
@@ -76,7 +74,6 @@ abstract public class Task implements Writable, Configurable {
     MAP_SKIPPED_RECORDS,
     MAP_INPUT_BYTES, 
     MAP_OUTPUT_BYTES,
-    MAP_OUTPUT_MATERIALIZED_BYTES,
     COMBINE_INPUT_RECORDS,
     COMBINE_OUTPUT_RECORDS,
     REDUCE_INPUT_GROUPS,
@@ -546,8 +543,6 @@ abstract public class Task implements Writable, Configurable {
     private JvmContext jvmContext;
     private Thread pingThread = null;
     private static final int PROGRESS_STATUS_LEN_LIMIT = 512;
-    private boolean done = true;
-    private Object lock = new Object();
     
     /**
      * flag that indicates whether progress update needs to be sent to parent.
@@ -643,9 +638,6 @@ abstract public class Task implements Writable, Configurable {
       // get current flag value and reset it as well
       boolean sendProgress = resetProgressFlag();
       while (!taskDone.get()) {
-        synchronized(lock) {
-          done = false;
-        }
         try {
           boolean taskFound = true; // whether TT knows about this task
           // sleep for a bit
@@ -678,7 +670,6 @@ abstract public class Task implements Writable, Configurable {
           // came back up), kill ourselves
           if (!taskFound) {
             LOG.warn("Parent died.  Exiting "+taskId);
-            resetDoneFlag();
             System.exit(66);
           }
 
@@ -691,22 +682,11 @@ abstract public class Task implements Writable, Configurable {
           if (remainingRetries == 0) {
             ReflectionUtils.logThreadInfo(LOG, "Communication exception", 0);
             LOG.warn("Last retry, killing "+taskId);
-            resetDoneFlag();
             System.exit(65);
           }
         }
       }
-      //Notify that we are done with the work
-      resetDoneFlag();
     }
-
-    void resetDoneFlag() {
-      synchronized(lock) {
-        done = true;
-        lock.notify();
-      }
-    }
-
     public void startCommunicationThread() {
       if (pingThread == null) {
         pingThread = new Thread(this, "communication thread");
@@ -717,11 +697,6 @@ abstract public class Task implements Writable, Configurable {
     public void stopCommunicationThread() throws InterruptedException {
       // Updating resources specified in ResourceCalculatorPlugin
       if (pingThread != null) {
-        synchronized(lock) {
-          while(!done) {
-            lock.wait();
-          }
-        }
         pingThread.interrupt();
         pingThread.join();
       }
@@ -1084,27 +1059,6 @@ abstract public class Task implements Writable, Configurable {
     done(umbilical, reporter);
   }
   
-  /**
-   * Gets a handle to the Statistics instance based on the scheme associated
-   * with path.
-   * 
-   * @param path
-   *          the path.
-   * @return a Statistics instance, or null if none is found for the scheme.
-   */
-  protected static Statistics getFsStatistics(Path path, Configuration conf)
-      throws IOException {
-    Statistics matchedStats = null;
-    path = path.getFileSystem(conf).makeQualified(path);
-    for (Statistics stats : FileSystem.getAllStatistics()) {
-      if (stats.getScheme().equals(path.toUri().getScheme())) {
-        matchedStats = stats;
-        break;
-      }
-    }
-    return matchedStats;
-  }
-
   public void setConf(Configuration conf) {
     if (conf instanceof JobConf) {
       this.conf = (JobConf) conf;
@@ -1137,26 +1091,16 @@ abstract public class Task implements Writable, Configurable {
   implements OutputCollector<K, V> {
     private Writer<K, V> writer;
     private Counters.Counter outCounter;
-    private Progressable progressable;
-    private long progressBar;
-
-    public CombineOutputCollector(Counters.Counter outCounter, Progressable progressable, Configuration conf) {
+    public CombineOutputCollector(Counters.Counter outCounter) {
       this.outCounter = outCounter;
-      this.progressable=progressable;
-      progressBar = conf.getLong(MR_COMBINE_RECORDS_BEFORE_PROGRESS, DEFAULT_MR_COMBINE_RECORDS_BEFORE_PROGRESS);
     }
-    
     public synchronized void setWriter(Writer<K, V> writer) {
       this.writer = writer;
     }
-    
     public synchronized void collect(K key, V value)
         throws IOException {
       outCounter.increment(1);
       writer.append(key, value);
-      if ((outCounter.getValue() % progressBar) == 0) {
-        progressable.progress();
-      }
     }
   }
 

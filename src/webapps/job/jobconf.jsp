@@ -40,7 +40,6 @@
   }
 %>
   
-<!DOCTYPE html>
 <html>
 <head>
 <title>Job Configuration: JobId - <%= jobId %></title>

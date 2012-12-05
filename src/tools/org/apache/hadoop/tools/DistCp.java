@@ -1026,8 +1026,7 @@ public class DistCp implements Tool {
     Path jobDirectory = new Path(stagingArea + NAME + "_" + randomId);
     FsPermission mapredSysPerms =
       new FsPermission(JobSubmissionFiles.JOB_DIR_PERMISSION);
-    // FileSystem.mkdirs(jClient.getFs(), jobDirectory, mapredSysPerms);
-    FileSystem.mkdirs(FileSystem.get(jobDirectory.toUri(),conf), jobDirectory, mapredSysPerms);
+    FileSystem.mkdirs(jClient.getFs(), jobDirectory, mapredSysPerms);
     jobConf.set(JOB_DIR_LABEL, jobDirectory.toString());
 
     long maxBytesPerMap = conf.getLong(BYTES_PER_MAP_LABEL, BYTES_PER_MAP);

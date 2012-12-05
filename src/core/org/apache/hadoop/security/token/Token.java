@@ -28,7 +28,7 @@ import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
-import org.apache.hadoop.classification.InterfaceAudience;
+//import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.io.DataOutputBuffer;
@@ -125,7 +125,7 @@ public class Token<T extends TokenIdentifier> implements Writable {
    * wrap another service's token, such as HFTP wrapping HDFS.
    * @param newKind
    */
-  @InterfaceAudience.Private
+  //@InterfaceAudience.Private
   public synchronized void setKind(Text newKind) {
     kind = newKind;
     // removed the cached renewer so that it will be looked up with the new
@@ -265,8 +265,6 @@ public class Token<T extends TokenIdentifier> implements Writable {
     StringBuilder buffer = new StringBuilder();
     buffer.append("Ident: ");
     addBinaryBuffer(buffer, identifier);
-    buffer.append(", Pass: ");
-    addBinaryBuffer(buffer, password);
     buffer.append(", Kind: ");
     buffer.append(kind.toString());
     buffer.append(", Service: ");

@@ -34,8 +34,6 @@ import java.util.TimerTask;
 import java.util.TreeMap;
 import java.util.Map.Entry;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.metrics.ContextFactory;
 import org.apache.hadoop.metrics.MetricsContext;
 import org.apache.hadoop.metrics.MetricsException;
@@ -51,11 +49,7 @@ import org.apache.hadoop.metrics.Updater;
  * on which data is to be sent to the metrics system.  Subclasses must
  * override the abstract <code>emitRecord</code> method in order to transmit
  * the data. <p/>
- * @deprecated in favor of <code>org.apache.hadoop.metrics2</code> usage.
  */
-@Deprecated
-@InterfaceAudience.Public
-@InterfaceStability.Evolving
 public abstract class AbstractMetricsContext implements MetricsContext {
     
   private int period = MetricsContext.DEFAULT_PERIOD;
@@ -67,7 +61,6 @@ public abstract class AbstractMetricsContext implements MetricsContext {
   private ContextFactory factory = null;
   private String contextName = null;
     
-  @InterfaceAudience.Private
   public static class TagMap extends TreeMap<String,Object> {
     private static final long serialVersionUID = 3546309335061952993L;
     TagMap() {
@@ -91,7 +84,6 @@ public abstract class AbstractMetricsContext implements MetricsContext {
     }
   }
   
-  @InterfaceAudience.Private
   public static class MetricMap extends TreeMap<String,Number> {
     private static final long serialVersionUID = -7495051861141631609L;
     MetricMap() {

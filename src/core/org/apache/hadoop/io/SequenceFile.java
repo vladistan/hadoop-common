@@ -419,7 +419,6 @@ public class SequenceFile {
    * @param createParent create parent directory if non-existent
    * @param compressionType The compression type.
    * @param codec The compression codec.
-   * @param progress The Progressable object to track progress.
    * @param metadata The metadata of the file.
    * @return Returns the handle to the constructed SequenceFile Writer.
    * @throws IOException
@@ -437,19 +436,24 @@ public class SequenceFile {
                                          "GzipCodec without native-hadoop code!");
     }
 
+
+    FSDataOutputStream fsos;
+    if (createParent) {
+      fsos = fs.create(name, true, bufferSize, replication, blockSize);
+    } else {
+      fsos = fs.createNonRecursive(name, true, bufferSize, replication,
+          blockSize, null);
+    }
+
     switch (compressionType) {
     case NONE:
-      return new Writer(conf, 
-          fs.createNonRecursive(name, true, bufferSize, replication, blockSize, null),
-          keyClass, valClass, metadata).ownStream();
+      return new Writer(conf, fsos, keyClass, valClass, metadata).ownStream();
     case RECORD:
-      return new RecordCompressWriter(conf, 
-          fs.createNonRecursive(name, true, bufferSize, replication, blockSize, null),
-          keyClass, valClass, codec, metadata).ownStream();
+      return new RecordCompressWriter(conf, fsos, keyClass, valClass, codec,
+          metadata).ownStream();
     case BLOCK:
-      return new BlockCompressWriter(conf,
-          fs.createNonRecursive(name, true, bufferSize, replication, blockSize, null),
-          keyClass, valClass, codec, metadata).ownStream();
+      return new BlockCompressWriter(conf, fsos, keyClass, valClass, codec,
+          metadata).ownStream();
     default:
       return null;
     }
@@ -1256,7 +1260,7 @@ public class SequenceFile {
       super.init(name, conf,
                  fs.create(name, true, bufferSize, replication, blockSize, progress),
                  keyClass, valClass, true, codec, metadata);
-      init(conf.getInt("io.seqfile.compress.blocksize", 1000000));
+      init(1000000);
 
       initializeFileHeader();
       writeFileHeader();
@@ -1481,9 +1485,17 @@ public class SequenceFile {
       this.file = file;
       this.in = openFile(fs, file, bufferSize, length);
       this.conf = conf;
-      seek(start);
-      this.end = in.getPos() + length;
-      init(tempReader);
+      boolean succeeded = false;
+      try {
+        seek(start);
+        this.end = in.getPos() + length;
+        init(tempReader);
+        succeeded = true;
+      } finally {
+        if (!succeeded) {
+          IOUtils.cleanup(LOG, in);
+        }
+      }
     }
 
     /**

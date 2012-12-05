@@ -117,10 +117,8 @@ public class DatanodeDescriptor extends DatanodeInfo {
   private int prevApproxBlocksScheduled = 0;
   private long lastBlocksScheduledRollTime = 0;
   private static final int BLOCKS_SCHEDULED_ROLL_INTERVAL = 600*1000; //10min
-  
-  // Set to false after processing first block report
-  private boolean firstBlockReport = true; 
-  
+  private int volumeFailures = 0;
+
   /** Default constructor */
   public DatanodeDescriptor() {}
   
@@ -128,7 +126,7 @@ public class DatanodeDescriptor extends DatanodeInfo {
    * @param nodeID id of the data node
    */
   public DatanodeDescriptor(DatanodeID nodeID) {
-    this(nodeID, 0L, 0L, 0L, 0);
+    this(nodeID, 0L, 0L, 0L, 0, 0);
   }
 
   /** DatanodeDescriptor constructor
@@ -150,7 +148,7 @@ public class DatanodeDescriptor extends DatanodeInfo {
   public DatanodeDescriptor(DatanodeID nodeID, 
                             String networkLocation,
                             String hostName) {
-    this(nodeID, networkLocation, hostName, 0L, 0L, 0L, 0);
+    this(nodeID, networkLocation, hostName, 0L, 0L, 0L, 0, 0);
   }
   
   /** DatanodeDescriptor constructor
@@ -165,9 +163,10 @@ public class DatanodeDescriptor extends DatanodeInfo {
                             long capacity,
                             long dfsUsed,
                             long remaining,
-                            int xceiverCount) {
+                            int xceiverCount,
+                            int failedVolumes) {
     super(nodeID);
-    updateHeartbeat(capacity, dfsUsed, remaining, xceiverCount);
+    updateHeartbeat(capacity, dfsUsed, remaining, xceiverCount, failedVolumes);
   }
 
   /** DatanodeDescriptor constructor
@@ -185,9 +184,10 @@ public class DatanodeDescriptor extends DatanodeInfo {
                             long capacity,
                             long dfsUsed,
                             long remaining,
-                            int xceiverCount) {
+                            int xceiverCount,
+                            int failedVolumes) {
     super(nodeID, networkLocation, hostName);
-    updateHeartbeat(capacity, dfsUsed, remaining, xceiverCount);
+    updateHeartbeat(capacity, dfsUsed, remaining, xceiverCount, failedVolumes);
   }
 
   /**
@@ -226,6 +226,7 @@ public class DatanodeDescriptor extends DatanodeInfo {
     this.xceiverCount = 0;
     this.blockList = null;
     this.invalidateBlocks.clear();
+    this.volumeFailures = 0;
   }
 
   public int numBlocks() {
@@ -235,12 +236,13 @@ public class DatanodeDescriptor extends DatanodeInfo {
   /**
    */
   void updateHeartbeat(long capacity, long dfsUsed, long remaining,
-      int xceiverCount) {
+      int xceiverCount, int volFailures) {
     this.capacity = capacity;
     this.dfsUsed = dfsUsed;
     this.remaining = remaining;
     this.lastUpdate = System.currentTimeMillis();
     this.xceiverCount = xceiverCount;
+    this.volumeFailures = volFailures;
     rollBlocksScheduled(lastUpdate);
   }
 
@@ -550,26 +552,32 @@ public class DatanodeDescriptor extends DatanodeInfo {
       return startTime;
     }
   } // End of class DecommissioningStatus
-  
+
   /**
-   * @return Blanacer bandwidth in bytes per second for this datanode.
-   */
+  * @return Balancer bandwidth in bytes per second for this datanode.
+  */
   public long getBalancerBandwidth() {
     return this.bandwidth;
   }
-  
+
   /**
-   * @param bandwidth Blanacer bandwidth in bytes per second for this datanode.
-   */
+  * @param bandwidth Balancer bandwidth in bytes per second for this datanode.
+  */
   public void setBalancerBandwidth(long bandwidth) {
     this.bandwidth = bandwidth;
   }
 
-  boolean firstBlockReport() {
-    return firstBlockReport;
+  /**
+   * @return number of failed volumes in the datanode.
+   */
+  public int getVolumeFailures() {
+    return volumeFailures;
   }
-  
-  void processedBlockReport() {
-    firstBlockReport = false;
+
+  /**
+   * @param nodeReg DatanodeID to update registration for.
+   */
+  public void updateRegInfo(DatanodeID nodeReg) {
+    super.updateRegInfo(nodeReg);
   }
 }

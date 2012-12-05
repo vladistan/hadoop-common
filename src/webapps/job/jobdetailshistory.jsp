@@ -1,3 +1,22 @@
+<%
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file 
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+%>
 <%@ page
   contentType="text/html; charset=UTF-8"
   import="javax.servlet.http.*"
@@ -24,26 +43,26 @@
     String jobid = JSPUtil.getJobID(new Path(logFile).getName());
 	
     FileSystem fs = (FileSystem) application.getAttribute("fileSys");
-    JobConf jobConf = (JobConf) application.getAttribute("jobConf");
-    ACLsManager aclsManager = (ACLsManager) application.getAttribute("aclManager");
+    JobTracker jobTracker = (JobTracker) application.getAttribute("job.tracker");
     JobHistory.JobInfo job = JSPUtil.checkAccessAndGetJobInfo(request,
-        response, jobConf, aclsManager, fs, new Path(logFile));
+        response, jobTracker, fs, new Path(logFile));
     if (job == null) {
       return;
     }
 
   	String encodedLogFileName = JobHistory.JobInfo.encodeJobHistoryFilePath(logFile);
 %>
-
-<!DOCTYPE html>
 <html>
 <head>
-<title>Hadoop Job <%=jobid%> on History Viewer</title>
+<title>
+Hadoop Job <%=jobid %> on History Viewer
+</title>
 <link rel="stylesheet" type="text/css" href="/static/hadoop.css">
+<link rel="icon" type="image/vnd.microsoft.icon" href="/static/images/favicon.ico" />
 </head>
 <body>
 
-<h2>Hadoop Job <%=jobid %> on <a href="jobhistoryhome.jsp">History Viewer</a></h2>
+<h2>Hadoop Job <%=jobid %> on <a href="jobhistory.jsp">History Viewer</a></h2>
 
 <b>User: </b> <%=HtmlQuoting.quoteHtmlChars(job.get(Keys.USER)) %><br/> 
 <b>JobName: </b> <%=HtmlQuoting.quoteHtmlChars(job.get(Keys.JOBNAME)) %><br/>  
@@ -51,13 +70,12 @@
                  <%=job.get(Keys.JOBCONF) %></a><br/> 
 <%         
   Map<JobACL, AccessControlList> jobAcls = job.getJobACLs();
-  JSPUtil.printJobACLs(jobConf, jobAcls, out);
+  JSPUtil.printJobACLs(jobTracker, jobAcls, out);
 %> 
 <b>Submitted At: </b> <%=StringUtils.getFormattedTimeWithDiff(dateFormat, job.getLong(Keys.SUBMIT_TIME), 0 )  %><br/> 
 <b>Launched At: </b> <%=StringUtils.getFormattedTimeWithDiff(dateFormat, job.getLong(Keys.LAUNCH_TIME), job.getLong(Keys.SUBMIT_TIME)) %><br/>
 <b>Finished At: </b>  <%=StringUtils.getFormattedTimeWithDiff(dateFormat, job.getLong(Keys.FINISH_TIME), job.getLong(Keys.LAUNCH_TIME)) %><br/>
 <b>Status: </b> <%= ((job.get(Keys.JOB_STATUS) == "")?"Incomplete" :job.get(Keys.JOB_STATUS)) %><br/> 
-<b>Failure Info: </b> <%= ((job.get(Keys.FAIL_REASON) == null)?"NA" : job.get(Keys.FAIL_REASON)) %><br/>
 <%
     Map<String, JobHistory.Task> tasks = job.getAllTasks();
     int totalMaps = 0 ; 
@@ -154,12 +172,12 @@
 <b><a href="analysejobhistory.jsp?logFile=<%=encodedLogFileName%>">Analyse This Job</a></b> 
 <hr/>
 <center>
-<table border="2" cellpadding="5" cellspacing="2">
+<table>
 <tr>
-<td>Kind</td><td>Total Tasks(successful+failed+killed)</td><td>Successful tasks</td><td>Failed tasks</td><td>Killed tasks</td><td>Start Time</td><td>Finish Time</td>
+<th>Kind</th><th>Total Tasks(successful+failed+killed)</th><th>Successful tasks</th><th>Failed tasks</th><th>Killed tasks</th><th>Start Time</th><th>Finish Time</th>
 </tr>
 <tr>
-<td>Setup</td>
+<th>Setup</th>
     <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=all">
         <%=totalSetups%></a></td>
     <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=<%=Values.SUCCESS %>">
@@ -172,7 +190,7 @@
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, setupFinished, setupStarted) %></td>
 </tr>
 <tr>
-<td>Map</td>
+<th>Map</th>
     <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=all">
         <%=totalMaps %></a></td>
     <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=<%=Values.SUCCESS %>">
@@ -185,7 +203,7 @@
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, mapFinished, mapStarted) %></td>
 </tr>
 <tr>
-<td>Reduce</td>
+<th>Reduce</th>
     <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=all">
         <%=totalReduces%></a></td>
     <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=<%=Values.SUCCESS %>">
@@ -198,7 +216,7 @@
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, reduceFinished, reduceStarted) %></td>
 </tr>
 <tr>
-<td>Cleanup</td>
+<th>Cleanup</th>
     <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=all">
         <%=totalCleanups%></a></td>
     <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=<%=Values.SUCCESS %>">

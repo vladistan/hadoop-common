@@ -138,6 +138,28 @@
   http://&lt;HOST&gt;:&lt;HTTP_PORT&gt;/webhdfs/v1/&lt;PATH&gt;?op=...
 </source>
       </section>
+<!-- ***************************************************************************** -->
+      <section>
+        <title>HDFS Configuration Options</title>
+<p>
+  Below are the HDFS configuration options for WebHDFS.
+</p>
+<table>
+<tr><th>Property Name</th><th>Description</th></tr>
+<tr><td><code>dfs.webhdfs.enabled</code></td>
+<td>Enable/disable WebHDFS in Namenodes and Datanodes
+</td></tr>
+<tr><td><code>dfs.web.authentication.kerberos.principal</code></td>
+<td>The HTTP Kerberos principal used by Hadoop-Auth in the HTTP endpoint.
+    The HTTP Kerberos principal MUST start with 'HTTP/' per Kerberos
+    HTTP SPNEGO specification.
+</td></tr>
+<tr><td><code>dfs.web.authentication.kerberos.keytab</code></td>
+<td>The Kerberos keytab file with the credentials for the
+    HTTP Kerberos principal used by Hadoop-Auth in the HTTP endpoint.
+</td></tr>
+</table>
+      </section>
     </section>
 <!-- ***************************************************************************** -->
     <section id="Authentication">
@@ -327,7 +349,7 @@ Hello, webhdfs user!
 <ul>
   <li>Submit a HTTP PUT request.
     <source>
-curl -i -X PUT "http://&lt;HOST&gt;:&lt;PORT&gt;/&lt;PATH&gt;?op=MKDIRS[&amp;permission=&lt;OCTAL&gt;]"
+        curl -i -X PUT "http://&lt;HOST&gt;:&lt;PORT&gt;/webhdfs/v1/&lt;PATH&gt;?op=MKDIRS[&amp;permission=&lt;OCTAL&gt;]"
     </source>
 The client receives a response with a <a href="#boolean"><code>boolean</code> JSON object</a>:
     <source>

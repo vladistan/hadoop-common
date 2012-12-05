@@ -24,7 +24,7 @@ import java.util.concurrent.DelayQueue;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.hadoop.classification.InterfaceAudience;
+//import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
@@ -32,7 +32,7 @@ import org.apache.hadoop.security.token.TokenIdentifier;
 /**
  * A daemon thread that waits for the next file system to renew.
  */
-@InterfaceAudience.Private
+//@InterfaceAudience.Private
 public class DelegationTokenRenewer<T extends FileSystem & DelegationTokenRenewer.Renewable>
     extends Thread {
   /** The renewable interface used by the renewer. */
@@ -139,9 +139,15 @@ public class DelegationTokenRenewer<T extends FileSystem & DelegationTokenRenewe
     setDaemon(true);
   }
 
+  @Override
+  public void start() {
+    return; // lazy start when addRenewAction is actually called
+  }
+  
   /** Add a renew action to the queue. */
   public void addRenewAction(final T fs) {
     queue.add(new RenewAction<T>(fs));
+    if (!isAlive()) super.start();
   }
 
   @Override

@@ -145,16 +145,6 @@ public interface ClientProtocol extends VersionedProtocol {
    * @throws IOException if other errors occur.
    */
   public LocatedBlock append(String src, String clientName) throws IOException;
-  
-  /**
-   * Start lease recovery
-   * 
-   * @param src path of the file to start lease recovery
-   * @param clientName name of the current client
-   * @return true if the file is already closed
-   * @throws IOException
-   */
-  public boolean recoverLease(String src, String clientName) throws IOException;
 
   /**
    * Start lease recovery

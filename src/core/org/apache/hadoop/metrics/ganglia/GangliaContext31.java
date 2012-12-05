@@ -74,10 +74,8 @@ public class GangliaContext31 extends GangliaContext {
       return;
     } else if (value == null) {
       LOG.warn("Metric name " + name +" was emitted with a null value.");
-      return;
     } else if (type == null) {
       LOG.warn("Metric name " + name + ", value " + value + " has no type.");
-      return;
     }
 
     LOG.debug("Emitting metric " + name + ", type " + type + ", value " + 

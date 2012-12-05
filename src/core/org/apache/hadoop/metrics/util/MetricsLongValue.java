@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.metrics.util;
 
-import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.metrics.MetricsRecord;
 
 
@@ -27,10 +26,7 @@ import org.apache.hadoop.metrics.MetricsRecord;
  * Each time its value is set, it is published only *once* at the next update
  * call.
  *
- * @deprecated in favor of <code>org.apache.hadoop.metrics2</code> usage.
  */
-@Deprecated
-@InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
 public class MetricsLongValue extends MetricsBase{  
   private long value;
   private boolean changed;

@@ -115,12 +115,8 @@ class QueueManager {
     String[] queueNameValues = conf.getStrings("mapred.queue.names",
         new String[]{JobConf.DEFAULT_QUEUE_NAME});
     for (String name : queueNameValues) {
-      Map queueACLs = getQueueAcls(name, conf);
-      if (queueACLs == null) {
-        LOG.error("The queue, " + name + " does not have a configured ACL list");
-      }
       queues.put(name, new Queue(name, getQueueAcls(name, conf),
-          getQueueState(name, conf), QueueMetrics.create(name, conf)));
+          getQueueState(name, conf)));
     }
     
     return queues;
@@ -138,17 +134,7 @@ class QueueManager {
   public synchronized Set<String> getQueues() {
     return queues.keySet();
   }
-
-  /**
-   * Return a specific queue configured in the system.
-   * 
-   * @param queueName Name of the queue requested
-   * @return Queue object corresponding to queueName
-   */
-  public synchronized Queue getQueue(String queueName) {
-    return queues.get(queueName);
-  }
-
+  
   /**
    * Return true if the given user is part of the ACL for the given
    * {@link QueueACL} name for the given queue.
@@ -392,16 +378,8 @@ class QueueManager {
   synchronized AccessControlList getQueueACL(String queueName, QueueACL qACL) {
     if (aclsEnabled) {
       Queue q = queues.get(queueName);
-      if (q == null) {
-        throw new IllegalArgumentException(
-            "There is no queue named " + queueName);
-      }
-      Map<String, AccessControlList> acls = q.getAcls();
-      if (acls == null) {
-        throw new IllegalArgumentException("The queue named " + queueName +
-            " is misconfigured: its access control lists are undefined.");
-      }
-      return acls.get(toFullPropertyName(queueName, qACL.getAclName()));
+      assert q != null;
+      return q.getAcls().get(toFullPropertyName(queueName, qACL.getAclName()));
     }
     return new AccessControlList("*");
   }

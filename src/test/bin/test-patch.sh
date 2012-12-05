@@ -1,23 +1,10 @@
 #!/usr/bin/env bash
-#   Licensed under the Apache License, Version 2.0 (the "License");
-#   you may not use this file except in compliance with the License.
-#   You may obtain a copy of the License at
-#
-#       http://www.apache.org/licenses/LICENSE-2.0
-#
-#   Unless required by applicable law or agreed to in writing, software
-#   distributed under the License is distributed on an "AS IS" BASIS,
-#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#   See the License for the specific language governing permissions and
-#   limitations under the License.
 
 #set -x
 ulimit -n 1024
 
 ### Setup some variables.  
 ### JOB_NAME, SVN_REVISION, and BUILD_NUMBER are set by Hudson if it is run by patch process
-### Read variables from properties file
-. `dirname $0`/../test-patch.properties
 
 ###############################################################################
 parseArgs() {
@@ -25,8 +12,8 @@ parseArgs() {
     HUDSON)
       ### Set HUDSON to true to indicate that this script is being run by Hudson
       HUDSON=true
-      if [[ $# != 17 ]] ; then
-        echo "ERROR: usage $0 HUDSON <PATCH_DIR> <SUPPORT_DIR> <PS_CMD> <WGET_CMD> <JIRACLI> <SVN_CMD> <GREP_CMD> <PATCH_CMD> <FINDBUGS_HOME> <FORREST_HOME> <ECLIPSE_HOME> <PYTHON_HOME> <WORKSPACE_BASEDIR> <TRIGGER_BUILD> <JIRA_PASSWD> <JAVA5_HOME> "
+      if [[ $# != 16 ]] ; then
+        echo "ERROR: usage $0 HUDSON <PATCH_DIR> <SUPPORT_DIR> <PS_CMD> <WGET_CMD> <JIRACLI> <SVN_CMD> <GREP_CMD> <PATCH_CMD> <FINDBUGS_HOME> <FORREST_HOME> <ECLIPSE_HOME> <PYTHON_HOME> <WORKSPACE_BASEDIR> <TRIGGER_BUILD> <JIRA_PASSWD> "
         cleanupAndExit 0
       fi
       PATCH_DIR=$2
@@ -44,7 +31,6 @@ parseArgs() {
       BASEDIR=${14}
       TRIGGER_BUILD_URL=${15}
       JIRA_PASSWD=${16}
-      JAVA5_HOME=${17}
       ### Retrieve the defect number
       if [ ! -e $PATCH_DIR/defectNum ] ; then
         echo "Could not determine the patch to test.  Exiting."
@@ -61,8 +47,8 @@ parseArgs() {
     DEVELOPER)
       ### Set HUDSON to false to indicate that this script is being run by a developer
       HUDSON=false
-      if [[ $# != 10 ]] ; then
-        echo "ERROR: usage $0 DEVELOPER <PATCH_FILE> <SCRATCH_DIR> <SVN_CMD> <GREP_CMD> <PATCH_CMD> <FINDBUGS_HOME> <FORREST_HOME> <WORKSPACE_BASEDIR> <JAVA5_HOME>"
+      if [[ $# != 9 ]] ; then
+        echo "ERROR: usage $0 DEVELOPER <PATCH_FILE> <SCRATCH_DIR> <SVN_CMD> <GREP_CMD> <PATCH_CMD> <FINDBUGS_HOME> <FORREST_HOME> <WORKSPACE_BASEDIR>"
         cleanupAndExit 0
       fi
       ### PATCH_FILE contains the location of the patchfile
@@ -88,7 +74,6 @@ parseArgs() {
       FINDBUGS_HOME=$7
       FORREST_HOME=$8
       BASEDIR=$9
-      JAVA5_HOME=${10}
       ### Obtain the patch filename to append it to the version number
       defect=`basename $PATCH_FILE` 
       ;;
@@ -161,19 +146,12 @@ setup () {
       cleanupAndExit 0
     fi
   fi
-  ### exit if warnings are NOT defined in the properties file
-  if [ -z "$OK_FINDBUGS_WARNINGS" ] || [[ -z "$OK_JAVADOC_WARNINGS" ]] || [[ -z $OK_RELEASEAUDIT_WARNINGS ]]; then
-  echo "Please define the following properties in test-patch.properties file"
-  echo "OK_FINDBUGS_WARNINGS"
-  echo "OK_RELEASEAUDIT_WARNINGS"
-  echo "OK_JAVADOC_WARNINGS"
-  cleanupAndExit 1
-  fi
   echo ""
   echo ""
   echo "======================================================================"
   echo "======================================================================"
-  echo " Pre-build trunk to verify trunk stability and javac warnings" 
+  echo "    Pre-building trunk to determine trunk number"
+  echo "    of release audit, javac, and Findbugs warnings."
   echo "======================================================================"
   echo "======================================================================"
   echo ""
@@ -184,12 +162,19 @@ setup () {
     ### echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -DHadoopPatchProcess= releaseaudit > $PATCH_DIR/trunkReleaseAuditWarnings.txt 2>&1"
     ### $ANT_HOME/bin/ant -Dversion="${VERSION}" -DHadoopPatchProcess= releaseaudit > $PATCH_DIR/trunkReleaseAuditWarnings.txt 2>&1
   ### fi
-  echo "$ANT_HOME/bin/ant -Djavac.args="-Xlint -Xmaxwarns 1000" $ECLIPSE_PROPERTY -Djava5.home=${JAVA5_HOME} -Dforrest.home=${FORREST_HOME} -D${PROJECT_NAME}PatchProcess= clean tar > $PATCH_DIR/trunkJavacWarnings.txt 2>&1"
-  $ANT_HOME/bin/ant -Djavac.args="-Xlint -Xmaxwarns 1000" $ECLIPSE_PROPERTY -Djava5.home=${JAVA5_HOME} -Dforrest.home=${FORREST_HOME} -D${PROJECT_NAME}PatchProcess= clean tar > $PATCH_DIR/trunkJavacWarnings.txt 2>&1
+  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -Djavac.args="-Xlint -Xmaxwarns 1000" $ECLIPSE_PROPERTY -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= clean tar > $PATCH_DIR/trunkJavacWarnings.txt 2>&1"
+  $ANT_HOME/bin/ant -Dversion="${VERSION}" -Djavac.args="-Xlint -Xmaxwarns 1000" $ECLIPSE_PROPERTY -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= clean tar > $PATCH_DIR/trunkJavacWarnings.txt 2>&1
   if [[ $? != 0 ]] ; then
     echo "Trunk compilation is broken?"
     cleanupAndExit 1
   fi
+  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -Dfindbugs.home=$FINDBUGS_HOME -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= findbugs > /dev/null 2>&1"
+  $ANT_HOME/bin/ant -Dversion="${VERSION}" -Dfindbugs.home=$FINDBUGS_HOME -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= findbugs > /dev/null 2>&1
+  if [[ $? != 0 ]] ; then
+    echo "Trunk findbugs is broken?"
+    cleanupAndExit 1
+  fi
+  cp $BASEDIR/build/test/findbugs/*.xml $PATCH_DIR/trunkFindbugsWarnings.xml
 }
 
 ###############################################################################
@@ -292,16 +277,14 @@ checkJavadocWarnings () {
   echo ""
   echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -DHadoopPatchProcess= clean javadoc | tee $PATCH_DIR/patchJavadocWarnings.txt"
   $ANT_HOME/bin/ant -Dversion="${VERSION}" -DHadoopPatchProcess= clean javadoc | tee $PATCH_DIR/patchJavadocWarnings.txt
-  javadocWarnings=`$GREP -o '\[javadoc\] [0-9]* warning' $PATCH_DIR/patchJavadocWarnings.txt | awk '{total += $2} END {print total}'`
+  javadocWarnings=`$GREP -c '\[javadoc\] [0-9]* warning' $PATCH_DIR/patchJavadocWarnings.txt`
   echo ""
   echo ""
   echo "There appear to be $javadocWarnings javadoc warnings generated by the patched build."
-
-  ### if current warnings greater than OK_JAVADOC_WARNINGS
-  if [[ $javadocWarnings > $OK_JAVADOC_WARNINGS ]] ; then
+  if [[ $javadocWarnings != 0 ]] ; then
     JIRA_COMMENT="$JIRA_COMMENT
 
-    -1 javadoc.  The javadoc tool appears to have generated `expr $(($javadocWarnings-$OK_JAVADOC_WARNINGS))` warning messages."
+    -1 javadoc.  The javadoc tool appears to have generated $javadocWarnings warning messages."
     return 1
   fi
   JIRA_COMMENT="$JIRA_COMMENT
@@ -322,14 +305,8 @@ checkJavacWarnings () {
   echo "======================================================================"
   echo ""
   echo ""
-  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -Djavac.args="-Xlint -Xmaxwarns 1000" $ECLIPSE_PROPERTY -Djava5.home=${JAVA5_HOME} -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= tar > $PATCH_DIR/patchJavacWarnings.txt 2>&1"
-  $ANT_HOME/bin/ant -Dversion="${VERSION}" -Djavac.args="-Xlint -Xmaxwarns 1000" $ECLIPSE_PROPERTY -Djava5.home=${JAVA5_HOME} -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= tar > $PATCH_DIR/patchJavacWarnings.txt 2>&1
-  if [[ $? != 0 ]] ; then
-    JIRA_COMMENT="$JIRA_COMMENT
-
-    -1 javac.  The patch appears to cause tar ant target to fail."
-    return 1
-  fi
+  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -Djavac.args="-Xlint -Xmaxwarns 1000" $ECLIPSE_PROPERTY -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= tar > $PATCH_DIR/patchJavacWarnings.txt 2>&1"
+  $ANT_HOME/bin/ant -Dversion="${VERSION}" -Djavac.args="-Xlint -Xmaxwarns 1000" $ECLIPSE_PROPERTY -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= tar > $PATCH_DIR/patchJavacWarnings.txt 2>&1
 
   ### Compare trunk and patch javac warning numbers
   if [[ -f $PATCH_DIR/patchJavacWarnings.txt ]] ; then
@@ -337,7 +314,7 @@ checkJavacWarnings () {
     patchJavacWarnings=`$GREP -o '\[javac\] [0-9]* warning' $PATCH_DIR/patchJavacWarnings.txt | awk '{total += $2} END {print total}'`
     echo "There appear to be $trunkJavacWarnings javac compiler warnings before the patch and $patchJavacWarnings javac compiler warnings after applying the patch."
     if [[ $patchJavacWarnings != "" && $trunkJavacWarnings != "" ]] ; then
-      if [[ $patchJavacWarnings -gt $trunkJavacWarnings ]] ; then
+      if [[ $patchJavacWarnings > $trunkJavacWarnings ]] ; then
         JIRA_COMMENT="$JIRA_COMMENT
 
     -1 javac.  The applied patch generated $patchJavacWarnings javac compiler warnings (more than the trunk's current $trunkJavacWarnings warnings)."
@@ -363,23 +340,28 @@ checkReleaseAuditWarnings () {
   echo "======================================================================"
   echo ""
   echo ""
-  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -Djava5.home=${JAVA5_HOME} -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= releaseaudit > $PATCH_DIR/patchReleaseAuditWarnings.txt 2>&1"
-  $ANT_HOME/bin/ant -Dversion="${VERSION}" -Djava5.home=${JAVA5_HOME} -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= releaseaudit > $PATCH_DIR/patchReleaseAuditWarnings.txt 2>&1
+  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= releaseaudit > $PATCH_DIR/patchReleaseAuditWarnings.txt 2>&1"
+  $ANT_HOME/bin/ant -Dversion="${VERSION}" -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= releaseaudit > $PATCH_DIR/patchReleaseAuditWarnings.txt 2>&1
 
   ### Compare trunk and patch release audit warning numbers
   if [[ -f $PATCH_DIR/patchReleaseAuditWarnings.txt ]] ; then
+    trunkReleaseAuditWarnings=`$GREP -c '\!?????' $PATCH_DIR/trunkReleaseAuditWarnings.txt`
     patchReleaseAuditWarnings=`$GREP -c '\!?????' $PATCH_DIR/patchReleaseAuditWarnings.txt`
     echo ""
     echo ""
-    echo "There appear to be $OK_RELEASEAUDIT_WARNINGS release audit warnings before the patch and $patchReleaseAuditWarnings release audit warnings after applying the patch."
-    if [[ $patchReleaseAuditWarnings != "" && $OK_RELEASEAUDIT_WARNINGS != "" ]] ; then
-      if [[ $patchReleaseAuditWarnings -gt $OK_RELEASEAUDIT_WARNINGS ]] ; then
+    echo "There appear to be $trunkReleaseAuditWarnings release audit warnings before the patch and $patchReleaseAuditWarnings release audit warnings after applying the patch."
+    if [[ $patchReleaseAuditWarnings != "" && $trunkReleaseAuditWarnings != "" ]] ; then
+      if [[ $patchReleaseAuditWarnings > $trunkReleaseAuditWarnings ]] ; then
         JIRA_COMMENT="$JIRA_COMMENT
 
-    -1 release audit.  The applied patch generated $patchReleaseAuditWarnings release audit warnings (more than the trunk's current $OK_RELEASEAUDIT_WARNINGS warnings)."
+    -1 release audit.  The applied patch generated $patchReleaseAuditWarnings release audit warnings (more than the trunk's current $trunkReleaseAuditWarnings warnings)."
         $GREP '\!?????' $PATCH_DIR/patchReleaseAuditWarnings.txt > $PATCH_DIR/patchReleaseAuditProblems.txt
-        echo "Lines that start with ????? in the release audit report indicate files that do not have an Apache license header." >> $PATCH_DIR/patchReleaseAuditProblems.txt
-        JIRA_COMMENT_FOOTER="Release audit warnings: $BUILD_URL/artifact/trunk/patchprocess/patchReleaseAuditProblems.txt
+        $GREP '\!?????' $PATCH_DIR/trunkReleaseAuditWarnings.txt > $PATCH_DIR/trunkReleaseAuditProblems.txt
+        echo "A diff of patched release audit warnings with trunk release audit warnings." > $PATCH_DIR/releaseAuditDiffWarnings.txt
+        echo "Lines that start with ????? in the release audit report indicate files that do not have an Apache license header." > $PATCH_DIR/releaseAuditDiffWarnings.txt
+        echo "" > $PATCH_DIR/releaseAuditDiffWarnings.txt
+        diff $PATCH_DIR/patchReleaseAuditProblems.txt $PATCH_DIR/trunkReleaseAuditProblems.txt >> $PATCH_DIR/releaseAuditDiffWarnings.txt
+        JIRA_COMMENT_FOOTER="Release audit warnings: http://hudson.zones.apache.org/hudson/job/$JOB_NAME/$BUILD_NUMBER/artifact/trunk/current/releaseAuditDiffWarnings.txt
 $JIRA_COMMENT_FOOTER"
         return 1
       fi
@@ -427,7 +409,6 @@ $JIRA_COMMENT_FOOTER"
 ###############################################################################
 ### Check there are no changes in the number of Findbugs warnings
 checkFindbugsWarnings () {
-  findbugs_version=`${FINDBUGS_HOME}/bin/findbugs -version`
   echo ""
   echo ""
   echo "======================================================================"
@@ -437,38 +418,42 @@ checkFindbugsWarnings () {
   echo "======================================================================"
   echo ""
   echo ""
-  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -Dfindbugs.home=${FINDBUGS_HOME} -Djava5.home=${JAVA5_HOME} -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= findbugs"
-  $ANT_HOME/bin/ant -Dversion="${VERSION}" -Dfindbugs.home=${FINDBUGS_HOME} -Djava5.home=${JAVA5_HOME} -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= findbugs
+  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -Dfindbugs.home=$FINDBUGS_HOME -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= findbugs"
+  $ANT_HOME/bin/ant -Dversion="${VERSION}" -Dfindbugs.home=$FINDBUGS_HOME} -Dforrest.home=${FORREST_HOME} -DHadoopPatchProcess= findbugs
   if [ $? != 0 ] ; then
     JIRA_COMMENT="$JIRA_COMMENT
 
-    -1 findbugs.  The patch appears to cause Findbugs (version ${findbugs_version}) to fail."
+    -1 findbugs.  The patch appears to cause Findbugs to fail."
     return 1
   fi
 JIRA_COMMENT_FOOTER="Findbugs warnings: http://hudson.zones.apache.org/hudson/job/$JOB_NAME/$BUILD_NUMBER/artifact/trunk/build/test/findbugs/newPatchFindbugsWarnings.html
 $JIRA_COMMENT_FOOTER"
   cp $BASEDIR/build/test/findbugs/*.xml $PATCH_DIR/patchFindbugsWarnings.xml
+$FINDBUGS_HOME/bin/setBugDatabaseInfo -timestamp "01/01/1999" \
+    $PATCH_DIR/trunkFindbugsWarnings.xml \
+    $PATCH_DIR/trunkFindbugsWarnings.xml
   $FINDBUGS_HOME/bin/setBugDatabaseInfo -timestamp "01/01/2000" \
     $PATCH_DIR/patchFindbugsWarnings.xml \
     $PATCH_DIR/patchFindbugsWarnings.xml
-  findbugsWarnings=`$FINDBUGS_HOME/bin/filterBugs -first "01/01/2000" $PATCH_DIR/patchFindbugsWarnings.xml \
+  $FINDBUGS_HOME/bin/computeBugHistory -output $PATCH_DIR/findbugsMerge.xml \
+    $PATCH_DIR/trunkFindbugsWarnings.xml \
+    $PATCH_DIR/patchFindbugsWarnings.xml
+  findbugsWarnings=`$FINDBUGS_HOME/bin/filterBugs -first "01/01/2000" $PATCH_DIR/findbugsMerge.xml \
     $BASEDIR/build/test/findbugs/newPatchFindbugsWarnings.xml | /usr/bin/awk '{print $1}'`
   $FINDBUGS_HOME/bin/convertXmlToText -html \
     $BASEDIR/build/test/findbugs/newPatchFindbugsWarnings.xml \
     $BASEDIR/build/test/findbugs/newPatchFindbugsWarnings.html
   cp $BASEDIR/build/test/findbugs/newPatchFindbugsWarnings.html $PATCH_DIR/newPatchFindbugsWarnings.html
   cp $BASEDIR/build/test/findbugs/newPatchFindbugsWarnings.xml $PATCH_DIR/newPatchFindbugsWarnings.xml
-
-  ### if current warnings greater than OK_FINDBUGS_WARNINGS
-  if [[ $findbugsWarnings > $OK_FINDBUGS_WARNINGS ]] ; then
+  if [[ $findbugsWarnings != 0 ]] ; then
     JIRA_COMMENT="$JIRA_COMMENT
 
-    -1 findbugs.  The patch appears to introduce `expr $(($findbugsWarnings-$OK_FINDBUGS_WARNINGS))` new Findbugs (version ${findbugs_version}) warnings."
+    -1 findbugs.  The patch appears to introduce $findbugsWarnings new Findbugs warnings."
     return 1
   fi
   JIRA_COMMENT="$JIRA_COMMENT
 
-    +1 findbugs.  The patch does not introduce any new Findbugs (version ${findbugs_version}) warnings."
+    +1 findbugs.  The patch does not introduce any new Findbugs warnings."
   return 0
 }
 
@@ -486,16 +471,14 @@ runCoreTests () {
   echo ""
   
   ### Kill any rogue build processes from the last attempt
-  $PS auxwww | $GREP HadoopPatchProcess | /usr/bin/nawk '{print $2}' | /usr/bin/xargs -t -I {} /bin/kill -9 {} > /dev/null
+  $PS -auxwww | $GREP HadoopPatchProcess | /usr/bin/nawk '{print $2}' | /usr/bin/xargs -t -I {} /usr/bin/kill -9 {} > /dev/null
 
-  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -DHadoopPatchProcess= -Dtest.junit.output.format=xml -Dtest.output=yes -Dcompile.c++=yes -Dforrest.home=$FORREST_HOME -Djava5.home=$JAVA5_HOME create-c++-configure docs tar test-core"
-  $ANT_HOME/bin/ant -Dversion="${VERSION}" -DHadoopPatchProcess= -Dtest.junit.output.format=xml -Dtest.output=yes -Dcompile.c++=yes -Dforrest.home=$FORREST_HOME -Djava5.home=$JAVA5_HOME create-c++-configure docs tar test-core
+  echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" -DHadoopPatchProcess= -Dtest.junit.output.format=xml -Dtest.output=yes -Dcompile.c++=yes -Dforrest.home=$FORREST_HOME create-c++-configure docs tar test-core"
+  $ANT_HOME/bin/ant -Dversion="${VERSION}" -DHadoopPatchProcess= -Dtest.junit.output.format=xml -Dtest.output=yes -Dcompile.c++=yes -Dforrest.home=$FORREST_HOME create-c++-configure docs tar test-core
   if [[ $? != 0 ]] ; then
-    failed_tests=`grep -l "<failure" build/test/*.xml | sed -e "s|build/test/TEST-|                  |g" | sed -e "s|\.xml||g"`
     JIRA_COMMENT="$JIRA_COMMENT
 
-    -1 core tests.  The patch failed these core unit tests:
-    $failed_tests"
+    -1 core tests.  The patch failed core unit tests."
     return 1
   fi
   JIRA_COMMENT="$JIRA_COMMENT
@@ -504,6 +487,55 @@ runCoreTests () {
   return 0
 }
 
+###############################################################################
+### Tests parts of contrib specific to the eclipse files
+checkJarFilesDeclaredInEclipse () {
+  export DECLARED_JARS=$(sed -n 's@.*kind="lib".*path="\(.*jar\)".*@\1@p' < .eclipse.templates/.classpath)
+  export PRESENT_JARS=$(find build/ivy/lib/Hadoop/common/ lib/ src/test/lib/ -name '*.jar' |sort)
+  # When run by Hudson, consider libs from ${SUPPORT_DIR} declared
+  if [[ ${HUDSON} == "true" ]]; then
+      DECLARED_JARS="${DECLARED_JARS} $(cd "${SUPPORT_DIR}"; find lib -name '*.jar')"
+  fi
+  DECLARED_JARS=$(sed 'y/ /\n/' <<< ${DECLARED_JARS} | sort)
+  export ECLIPSE_DECLARED_SRC=$(sed -n 's@.*kind="src".*path="\(.*\)".*@\1@p' < .eclipse.templates/.classpath |sort)
+
+  if [ "${DECLARED_JARS}" != "${PRESENT_JARS}" ]; then
+    echo "
+FAILED. Some jars are not declared in the Eclipse project.
+  Declared jars: ${DECLARED_JARS}
+  Present jars:  ${PRESENT_JARS}"
+    return 1
+  fi
+  for dir in $ECLIPSE_DECLARED_SRC; do
+    [ '!' -d $dir ] && echo "
+FAILED: $dir is referenced in the Eclipse project although it doesn't exists anymore." && return 1
+  done
+  return 0
+}
+
+checkEclipse () {
+  echo ""
+  echo ""
+  echo "======================================================================"
+  echo "======================================================================"
+  echo "    Running Eclipse classpath verification."
+  echo "======================================================================"
+  echo "======================================================================"
+  echo ""
+  echo ""
+
+  checkJarFilesDeclaredInEclipse
+  if [[ $? != 0 ]] ; then
+    JIRA_COMMENT="$JIRA_COMMENT
+
+    -1 Eclipse classpath. The patch causes the Eclipse classpath to differ from the contents of the lib directories."
+    return 1
+  fi
+  JIRA_COMMENT="$JIRA_COMMENT
+
+    +1 Eclipse classpath. The patch retains Eclipse classpath integrity."
+  return 0
+}
 ###############################################################################
 ### Run the test-contrib target
 runContribTests () {
@@ -518,7 +550,7 @@ runContribTests () {
   echo ""
 
   ### Kill any rogue build processes from the last attempt
-  $PS -auxwww | $GREP HadoopPatchProcess | /usr/bin/nawk '{print $2}' | /usr/bin/xargs -t -I {} /bin/kill -9 {} > /dev/null
+  $PS -auxwww | $GREP HadoopPatchProcess | /usr/bin/nawk '{print $2}' | /usr/bin/xargs -t -I {} /usr/bin/kill -9 {} > /dev/null
 
   echo "$ANT_HOME/bin/ant -Dversion="${VERSION}" $ECLIPSE_PROPERTY $PYTHON_PROPERTY -DHadoopPatchProcess= -Dtest.junit.output.format=xml -Dtest.output=yes test-contrib"
   $ANT_HOME/bin/ant -Dversion="${VERSION}" $ECLIPSE_PROPERTY $PYTHON_PROPERTY -DHadoopPatchProcess= -Dtest.junit.output.format=xml -Dtest.output=yes test-contrib
@@ -638,6 +670,8 @@ checkJavacWarnings
 checkStyle
 (( RESULT = RESULT + $? ))
 checkFindbugsWarnings
+(( RESULT = RESULT + $? ))
+checkEclipse
 (( RESULT = RESULT + $? ))
 ### Do not call these when run by a developer 
 if [[ $HUDSON == "true" ]] ; then

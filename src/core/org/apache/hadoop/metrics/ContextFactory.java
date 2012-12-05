@@ -28,19 +28,13 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Properties;
-
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.metrics.spi.AbstractMetricsContext;
 import org.apache.hadoop.metrics.spi.NullContext;
 
 /**
  * Factory class for creating MetricsContext objects.  To obtain an instance
  * of this class, use the static <code>getFactory()</code> method.
- * @deprecated in favor of <code>org.apache.hadoop.metrics2</code> usage.
  */
-@Deprecated
-@InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
-@InterfaceStability.Evolving
 public class ContextFactory {
     
   private static final String PROPERTIES_FILE = 
@@ -194,18 +188,14 @@ public class ContextFactory {
   private void setAttributes() throws IOException {
     InputStream is = getClass().getResourceAsStream(PROPERTIES_FILE);
     if (is != null) {
-      try {
-        Properties properties = new Properties();
-        properties.load(is);
-        //for (Object propertyNameObj : properties.keySet()) {
-        Iterator it = properties.keySet().iterator();
-        while (it.hasNext()) {
-          String propertyName = (String) it.next();
-          String propertyValue = properties.getProperty(propertyName);
-          setAttribute(propertyName, propertyValue);
-        }
-      } finally {
-        is.close();
+      Properties properties = new Properties();
+      properties.load(is);
+      //for (Object propertyNameObj : properties.keySet()) {
+      Iterator it = properties.keySet().iterator();
+      while (it.hasNext()) {
+        String propertyName = (String) it.next();
+        String propertyValue = properties.getProperty(propertyName);
+        setAttribute(propertyName, propertyValue);
       }
     }
   }

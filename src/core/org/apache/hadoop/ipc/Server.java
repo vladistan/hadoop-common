@@ -53,7 +53,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 import javax.security.sasl.Sasl;
 import javax.security.sasl.SaslException;
@@ -62,12 +61,14 @@ import javax.security.sasl.SaslServer;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.io.IntWritable;
 import static org.apache.hadoop.fs.CommonConfigurationKeys.*;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableUtils;
-import org.apache.hadoop.ipc.metrics.RpcInstrumentation;
+import org.apache.hadoop.ipc.metrics.RpcDetailedMetrics;
+import org.apache.hadoop.ipc.metrics.RpcMetrics;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.SaslRpcServer;
 import org.apache.hadoop.security.SaslRpcServer.SaslStatus;
@@ -77,6 +78,7 @@ import org.apache.hadoop.security.SaslRpcServer.SaslDigestCallbackHandler;
 import org.apache.hadoop.security.SaslRpcServer.SaslGssCallbackHandler;
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.authorize.AuthorizationException;
+import org.apache.hadoop.security.authorize.PolicyProvider;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.security.authorize.ServiceAuthorizationManager;
 import org.apache.hadoop.security.token.SecretManager;
@@ -187,10 +189,12 @@ public abstract class Server {
                                                   // connections to nuke
                                                   //during a cleanup
   
-  protected RpcInstrumentation rpcMetrics;
+  protected RpcMetrics rpcMetrics;
+  protected RpcDetailedMetrics rpcDetailedMetrics;
   
   private Configuration conf;
   private SecretManager<TokenIdentifier> secretManager;
+  private ServiceAuthorizationManager serviceAuthorizationManager = new ServiceAuthorizationManager();
 
   private int maxQueueSize;
   private final int maxRespSize;
@@ -244,8 +248,24 @@ public abstract class Server {
    * Returns a handle to the rpcMetrics (required in tests)
    * @return rpc metrics
    */
-  public RpcInstrumentation getRpcMetrics() {
+  public RpcMetrics getRpcMetrics() {
     return rpcMetrics;
+  }
+
+  /**
+   * Refresh the service authorization ACL for the service handled by this server.
+   */
+  public void refreshServiceAcl(Configuration conf, PolicyProvider provider) {
+    serviceAuthorizationManager.refresh(conf, provider);
+  }
+
+  /**
+   * Returns a handle to the serviceAuthorizationManager (required in tests)
+   * @return instance of ServiceAuthorizationManager for this server
+   */
+  //@InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
+  public ServiceAuthorizationManager getServiceAuthorizationManager() {
+    return serviceAuthorizationManager;
   }
 
   /** A call queued for handling. */
@@ -289,7 +309,6 @@ public abstract class Server {
     private long cleanupInterval = 10000; //the minimum interval between 
                                           //two cleanup runs
     private int backlogLength = conf.getInt("ipc.server.listen.queue.size", 128);
-    private ExecutorService readPool; 
    
     public Listener() throws IOException {
       address = new InetSocketAddress(bindAddress, port);
@@ -303,12 +322,12 @@ public abstract class Server {
       // create a selector;
       selector= Selector.open();
       readers = new Reader[readThreads];
-      readPool = Executors.newFixedThreadPool(readThreads);
       for (int i = 0; i < readThreads; i++) {
         Selector readSelector = Selector.open();
-        Reader reader = new Reader(readSelector);
+        Reader reader = new Reader("Socket Reader #" + (i + 1) + " for port " + port,
+                                   readSelector);
         readers[i] = reader;
-        readPool.execute(reader);
+        reader.start();
       }
 
       // Register accepts on the server socket with the selector.
@@ -317,15 +336,16 @@ public abstract class Server {
       this.setDaemon(true);
     }
     
-    private class Reader implements Runnable {
+    private class Reader extends Thread {
       private volatile boolean adding = false;
       private Selector readSelector = null;
 
-      Reader(Selector readSelector) {
+      Reader(String name, Selector readSelector) {
+        super(name);
         this.readSelector = readSelector;
       }
       public void run() {
-        LOG.info("Starting SocketReader");
+        LOG.info("Starting " + getName());
         synchronized (this) {
           while (running) {
             SelectionKey key = null;
@@ -378,6 +398,16 @@ public abstract class Server {
       public synchronized void finishAdd() {
         adding = false;
         this.notify();        
+      }
+
+      void shutdown() {
+        assert !running;
+        readSelector.wakeup();
+        try {
+          join();
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+        }
       }
     }
 
@@ -539,7 +569,9 @@ public abstract class Server {
         LOG.info(getName() + ": readAndProcess caught InterruptedException", ieo);
         throw ieo;
       } catch (Exception e) {
-        LOG.info(getName() + ": readAndProcess threw exception " + e + ". Count of bytes read: " + count, e);
+        LOG.info(getName() + ": readAndProcess threw exception " + e +
+            " from client " + c.getHostAddress() +
+            ". Count of bytes read: " + count, e);
         count = -1; //so that the (count < 0) block is executed
       }
       if (count < 0) {
@@ -567,7 +599,9 @@ public abstract class Server {
           LOG.info(getName() + ":Exception in closing listener socket. " + e);
         }
       }
-      readPool.shutdown();
+      for (Reader r : readers) {
+        r.shutdown();
+      }
     }
 
     // The method that will return the next reader to work with
@@ -839,8 +873,8 @@ public abstract class Server {
     // Cache the remote host & port info so that even if the socket is 
     // disconnected, we can say where it used to connect to.
     private String hostAddress;
-    private String hostName;
     private int remotePort;
+    private InetAddress addr;
     
     ConnectionHeader header = new ConnectionHeader();
     Class<?> protocol;
@@ -857,9 +891,9 @@ public abstract class Server {
     public UserGroupInformation attemptingUser = null; // user name before auth
 
     // Fake 'call' for failed authorization response
-    private final int AUTHROIZATION_FAILED_CALLID = -1;
+    private final int AUTHORIZATION_FAILED_CALLID = -1;
     private final Call authFailedCall = 
-      new Call(AUTHROIZATION_FAILED_CALLID, null, this);
+      new Call(AUTHORIZATION_FAILED_CALLID, null, this);
     private ByteArrayOutputStream authFailedResponse = new ByteArrayOutputStream();
     // Fake 'call' for SASL context setup
     private static final int SASL_CALLID = -33;
@@ -877,12 +911,11 @@ public abstract class Server {
       this.unwrappedData = null;
       this.unwrappedDataLengthBuffer = ByteBuffer.allocate(4);
       this.socket = channel.socket();
-      InetAddress addr = socket.getInetAddress();
+      this.addr = socket.getInetAddress();
       if (addr == null) {
         this.hostAddress = "*Unknown*";
       } else {
         this.hostAddress = addr.getHostAddress();
-        this.hostName = addr.getCanonicalHostName();
       }
       this.remotePort = socket.getPort();
       this.responseQueue = new LinkedList<Call>();
@@ -905,8 +938,8 @@ public abstract class Server {
       return hostAddress;
     }
 
-    public String getHostName() {
-      return hostName;
+    public InetAddress getHostInetAddress() {
+      return addr;
     }
     
     public void setLastContact(long lastContact) {
@@ -1018,7 +1051,7 @@ public abstract class Server {
           }
           doSaslReply(SaslStatus.ERROR, null, sendToClient.getClass().getName(), 
               sendToClient.getLocalizedMessage());
-          rpcMetrics.incrAuthenticationFailures();
+          rpcMetrics.authenticationFailures.inc();
           String clientIP = this.toString();
           // attempting user could be null
           AUDITLOG.warn(AUTH_FAILED_FOR + clientIP + ":" + attemptingUser);
@@ -1042,7 +1075,7 @@ public abstract class Server {
           if (LOG.isDebugEnabled()) {
             LOG.debug("SASL server successfully authenticated client: " + user);
           }
-          rpcMetrics.incrAuthenticationSuccesses();
+          rpcMetrics.authenticationSuccesses.inc();
           AUDITLOG.info(AUTH_SUCCESSFULL_FOR + user);
           saslContextEstablished = true;
         }
@@ -1124,8 +1157,12 @@ public abstract class Server {
             throw new IOException("Unable to read authentication method");
           }
           if (isSecurityEnabled && authMethod == AuthMethod.SIMPLE) {
-            AccessControlException ae = new AccessControlException(
-                "Authentication is required");
+            AccessControlException ae = new AccessControlException("Authorization ("
+              + CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION
+              + ") is enabled but authentication ("
+              + CommonConfigurationKeys.HADOOP_SECURITY_AUTHENTICATION
+              + ") is configured as simple. Please configure another method "
+              + "like kerberos or digest.");
             setupResponse(authFailedResponse, authFailedCall, Status.FATAL,
                 null, ae.getClass().getName(), ae.getMessage());
             responder.doRespond(authFailedCall);
@@ -1299,9 +1336,22 @@ public abstract class Server {
         
       if (LOG.isDebugEnabled())
         LOG.debug(" got #" + id);
+      Writable param;
+      try {
+        param = ReflectionUtils.newInstance(paramClass, conf);//read param
+        param.readFields(dis);
+      } catch (Throwable t) {
+        LOG.warn("Unable to read call parameters for client " +
+                 getHostAddress(), t);
+        final Call readParamsFailedCall = new Call(id, null, this);
+        ByteArrayOutputStream responseBuffer = new ByteArrayOutputStream();
 
-      Writable param = ReflectionUtils.newInstance(paramClass, conf);//read param
-      param.readFields(dis);        
+        setupResponse(responseBuffer, readParamsFailedCall, Status.FATAL, null,
+            t.getClass().getName(),
+            "IPC server unable to read call parameters: " + t.getMessage());
+        responder.doRespond(readParamsFailedCall);
+        return;
+      }
         
       Call call = new Call(id, param, this);
       callQueue.put(call);              // queue the call; maybe blocked here
@@ -1318,13 +1368,13 @@ public abstract class Server {
             && (authMethod != AuthMethod.DIGEST)) {
           ProxyUsers.authorize(user, this.getHostAddress(), conf);
         }
-        authorize(user, header, getHostName());
+        authorize(user, header, getHostInetAddress());
         if (LOG.isDebugEnabled()) {
           LOG.debug("Successfully authorized " + header);
         }
-        rpcMetrics.incrAuthorizationSuccesses();
+        rpcMetrics.authorizationSuccesses.inc();
       } catch (AuthorizationException ae) {
-        rpcMetrics.incrAuthorizationFailures();
+        rpcMetrics.authorizationFailures.inc();
         setupResponse(authFailedResponse, authFailedCall, Status.FATAL, null,
             ae.getClass().getName(), ae.getMessage());
         responder.doRespond(authFailedCall);
@@ -1483,7 +1533,10 @@ public abstract class Server {
     // Start the listener here and let it bind to the port
     listener = new Listener();
     this.port = listener.getAddress().getPort();    
-    this.rpcMetrics = RpcInstrumentation.create(serverName, this.port);
+    this.rpcMetrics = new RpcMetrics(serverName,
+                          Integer.toString(this.port), this);
+    this.rpcDetailedMetrics = new RpcDetailedMetrics(serverName,
+                            Integer.toString(this.port));
     this.tcpNoDelay = conf.getBoolean("ipc.server.tcpnodelay", false);
 
     // Create the responder here
@@ -1526,7 +1579,18 @@ public abstract class Server {
     out.writeInt(status.state);           // write status
 
     if (status == Status.SUCCESS) {
-      rv.write(out);
+      try {
+        rv.write(out);
+      } catch (Throwable t) {
+        LOG.warn("Error serializing call response for call " + call, t);
+        // Call back to same function - this is OK since the
+        // buffer is reset at the top, and since status is changed
+        // to ERROR it won't infinite loop.
+        setupResponse(response, call, Status.ERROR,
+            null, t.getClass().getName(),
+            StringUtils.stringifyException(t));
+        return;
+      }
     } else {
       WritableUtils.writeString(out, errorClass);
       WritableUtils.writeString(out, error);
@@ -1603,6 +1667,9 @@ public abstract class Server {
     if (this.rpcMetrics != null) {
       this.rpcMetrics.shutdown();
     }
+    if (this.rpcDetailedMetrics != null) {
+      this.rpcDetailedMetrics.shutdown();
+    }
   }
 
   /** Wait for the server to be stopped.
@@ -1642,12 +1709,12 @@ public abstract class Server {
    * 
    * @param user client user
    * @param connection incoming connection
-   * @param hostname fully-qualified domain name of incoming connection
+   * @param addr InetAddress of incoming connection
    * @throws AuthorizationException when the client isn't authorized to talk the protocol
    */
   public void authorize(UserGroupInformation user, 
                         ConnectionHeader connection,
-                        String hostname
+                        InetAddress addr
                         ) throws AuthorizationException {
     if (authorize) {
       Class<?> protocol = null;
@@ -1657,7 +1724,7 @@ public abstract class Server {
         throw new AuthorizationException("Unknown protocol: " + 
                                          connection.getProtocol());
       }
-      ServiceAuthorizationManager.authorize(user, protocol, getConf(), hostname);
+      serviceAuthorizationManager.authorize(user, protocol, getConf(), addr);
     }
   }
   
@@ -1701,7 +1768,7 @@ public abstract class Server {
     int count =  (buffer.remaining() <= NIO_BUFFER_LIMIT) ?
                  channel.write(buffer) : channelIO(null, channel, buffer);
     if (count > 0) {
-      rpcMetrics.incrSentBytes(count);
+      rpcMetrics.sentBytes.inc(count);
     }
     return count;
   }
@@ -1721,7 +1788,7 @@ public abstract class Server {
     int count = (buffer.remaining() <= NIO_BUFFER_LIMIT) ?
                 channel.read(buffer) : channelIO(channel, null, buffer);
     if (count > 0) {
-      rpcMetrics.incrReceivedBytes(count);
+      rpcMetrics.receivedBytes.inc(count);
     }
     return count;
   }

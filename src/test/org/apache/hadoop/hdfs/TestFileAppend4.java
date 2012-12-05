@@ -1,23 +1,24 @@
 /**
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements. See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership. The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * 
- * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 package org.apache.hadoop.hdfs;
 
 import junit.framework.TestCase;
+
 
 import java.io.File;
 import java.io.IOException;
@@ -38,24 +39,30 @@ import org.apache.hadoop.hdfs.DFSClient.DFSOutputStream;
 import org.apache.hadoop.hdfs.MiniDFSCluster.DataNodeProperties;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.FSConstants;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.protocol.FSConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.FSDataset;
 import org.apache.hadoop.hdfs.server.datanode.FSDatasetTestUtil;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.hdfs.server.namenode.LeaseExpiredException;
 import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLog;
 import org.apache.hadoop.hdfs.server.namenode.FSImageAdapter;
-import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.hdfs.protocol.FSConstants;
 import static org.apache.hadoop.hdfs.AppendTestUtil.loseLeases;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.log4j.Level;
+import org.mockito.Matchers;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
@@ -97,7 +104,7 @@ public class TestFileAppend4 extends TestCase {
     if (simulatedStorage) {
       conf.setBoolean(SimulatedFSDataset.CONFIG_PROPERTY_SIMULATED, true);
     }
-    conf.setBoolean("dfs.support.append", true);
+    conf.setBoolean("dfs.support.broken.append", true);
 
     // lower heartbeat interval for fast recognition of DN death
     conf.setInt("heartbeat.recheck.interval", 1000);
@@ -139,9 +146,11 @@ public class TestFileAppend4 extends TestCase {
   }
   
   private void assertNumCurrentReplicas(short rep) throws Exception {
-    DFSClient.DFSOutputStream hdfs_out = (DFSClient.DFSOutputStream) stm
-        .getWrappedStream();
-    int actualRepl = hdfs_out.getNumCurrentReplicas();
+    OutputStream hdfs_out = stm.getWrappedStream();
+    Method r = hdfs_out.getClass().getMethod("getNumCurrentReplicas",
+                                             new Class<?> []{});
+    r.setAccessible(true);
+    int actualRepl = ((Integer)r.invoke(hdfs_out, NO_ARGS)).intValue();
     assertTrue(file1 + " should be replicated to " + rep + " datanodes, not " +
                actualRepl + ".", actualRepl == rep);
   }
@@ -474,8 +483,12 @@ public class TestFileAppend4 extends TestCase {
           fs1.getFileStatus(file1), 0, BLOCK_SIZE);
       LOG.info("Checking blocks");
       assertTrue("Should have one block", bl.length == 1);
-      assertTrue("Should have 2 replicas for that block, not " + 
-                 bl[0].getNames().length, bl[0].getNames().length == 2);  
+      
+      // Wait up to 1 second for block replication - we may have
+      // only replication 1 for a brief moment after close, since
+      // closing only waits for fs.replcation.min replicas, and
+      // it may take some millis before the other DN reports block
+      waitForBlockReplication(fs1, file1.toString(), 2, 1);
 
       assertFileSize(fs1, BLOCK_SIZE*3/4);
       checkFile(fs1, BLOCK_SIZE*3/4);
@@ -676,7 +689,8 @@ public class TestFileAppend4 extends TestCase {
       Throwable thrownByClose = err.get();
       assertNotNull(thrownByClose);
       assertTrue(thrownByClose instanceof IOException);
-      if (!thrownByClose.getMessage().contains("does not have any open files")) {
+      if (!thrownByClose.getMessage().contains(
+        "File is not open for writing.")) {
         throw thrownByClose;
       }
     } finally {
@@ -1142,71 +1156,6 @@ public class TestFileAppend4 extends TestCase {
       cluster.shutdown();
     }    
   }
-
-  /**
-   * Mockito answer helper that triggers one latch as soon as the
-   * method is called, then waits on another before continuing.
-   */
-  public static class DelayAnswer implements Answer {
-    private final CountDownLatch fireLatch = new CountDownLatch(1);
-    private final CountDownLatch waitLatch = new CountDownLatch(1);
-
-    boolean delayBefore = true;
-
-    int numTimes = 1;
-
-    public DelayAnswer() {
-    }
-
-    /**
-     * @param delayBefore
-     *          if true, the delay is before the method is called. if false, the
-     *          delay is after the method returns.
-     */
-    public DelayAnswer(boolean delayBefore) {
-      this.delayBefore = delayBefore;
-    }
-    
-    /**
-     * Wait until the method is called.
-     */
-    public void waitForCall() throws InterruptedException {
-      fireLatch.await();
-    }
-
-    /**
-     * Tell the method to proceed.
-     * This should only be called after waitForCall()
-     */
-    public void proceed() {
-      waitLatch.countDown();
-    }
-
-    public Object answer(InvocationOnMock invocation) throws Throwable {
-      if (delayBefore)
-        doDelay();
-      Object ret = invocation.callRealMethod();
-      if (!delayBefore)
-        doDelay();
-      return ret;
-    }
-    
-    private void doDelay() throws Throwable {
-      synchronized (this) {
-        if (--numTimes < 0)
-          return;
-      }
-      LOG.info("DelayAnswer firing fireLatch");
-      fireLatch.countDown();
-      try {
-        LOG.info("DelayAnswer waiting on waitLatch");
-        waitLatch.await();
-        LOG.info("DelayAnswer delay complete");
-      } catch (InterruptedException ie) {
-        throw new IOException("Interrupted waiting on latch", ie);
-      }
-    }
-  }
   
   /**
    * Test that a file is not considered complete when it only has in-progress
@@ -1348,7 +1297,7 @@ public class TestFileAppend4 extends TestCase {
    * recovery from the first one, since it has a lower gen stamp.
    */
   public void testSimultaneousRecoveries() throws Exception {
-        LOG.info("START");
+    LOG.info("START");
     cluster = new MiniDFSCluster(conf, 3, true, null);
     FileSystem fs1 = cluster.getFileSystem();;
     final FileSystem fs2 = AppendTestUtil.createHdfsWithDifferentUsername(fs1.getConf());
@@ -1405,6 +1354,67 @@ public class TestFileAppend4 extends TestCase {
   }
 
   
+  /**
+   * Mockito answer helper that triggers one latch as soon as the
+   * method is called, then waits on another before continuing.
+   */
+  private static class DelayAnswer implements Answer {
+    private final CountDownLatch fireLatch = new CountDownLatch(1);
+    private final CountDownLatch waitLatch = new CountDownLatch(1);
+
+    boolean delayBefore = true;
+
+    int numTimes = 1;
+
+    public DelayAnswer() {}
+
+    /**
+     * @param delayBefore if true, the delay is before the method is called.
+     * if false, the delay is after the method returns.
+     */
+    public DelayAnswer(boolean delayBefore) {
+      this.delayBefore = delayBefore;
+    }
+
+    /**
+     * Wait until the method is called.
+     */
+    public void waitForCall() throws InterruptedException {
+      fireLatch.await();
+    }
+
+    /**
+     * Tell the method to proceed.
+     * This should only be called after waitForCall()
+     */
+    public void proceed() {
+      waitLatch.countDown();
+    }
+
+    private void doDelay() throws Throwable {
+      synchronized (this) {
+        if (--numTimes < 0) return;
+      }
+
+      LOG.info("DelayAnswer firing fireLatch");
+      fireLatch.countDown();
+      try {
+        LOG.info("DelayAnswer waiting on waitLatch");
+        waitLatch.await();
+        LOG.info("DelayAnswer delay complete");
+      } catch (InterruptedException ie) {
+        throw new IOException("Interrupted waiting on latch", ie);
+      }
+    }
+
+    public Object answer(InvocationOnMock invocation) throws Throwable {
+      if (delayBefore) doDelay();
+      Object ret = invocation.callRealMethod();
+      if (!delayBefore) doDelay();
+      return ret;
+    }
+  }
+
   /**
    * Mockito answer helper that will throw an exception a given number
    * of times before eventually succeding.

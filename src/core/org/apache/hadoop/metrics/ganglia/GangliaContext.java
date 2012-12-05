@@ -32,8 +32,6 @@ import java.util.Map;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.metrics.ContextFactory;
 import org.apache.hadoop.metrics.MetricsException;
 import org.apache.hadoop.metrics.spi.AbstractMetricsContext;
@@ -43,11 +41,7 @@ import org.apache.hadoop.metrics.spi.Util;
 /**
  * Context for sending metrics to Ganglia.
  * 
- * @deprecated in favor of <code>org.apache.hadoop.metrics2</code> usage.
  */
-@Deprecated
-@InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class GangliaContext extends AbstractMetricsContext {
     
   private static final String PERIOD_PROPERTY = "period";
@@ -89,11 +83,9 @@ public class GangliaContext extends AbstractMetricsContext {
   protected DatagramSocket datagramSocket;
     
   /** Creates a new instance of GangliaContext */
-  @InterfaceAudience.Private
   public GangliaContext() {
   }
     
-  @InterfaceAudience.Private
   public void init(String contextName, ContextFactory factory) {
     super.init(contextName, factory);
     parseAndSetPeriod(PERIOD_PROPERTY);
@@ -114,7 +106,6 @@ public class GangliaContext extends AbstractMetricsContext {
     }
   }
 
-  @InterfaceAudience.Private
   public void emitRecord(String contextName, String recordName,
     OutputRecord outRec) 
   throws IOException {
@@ -123,6 +114,12 @@ public class GangliaContext extends AbstractMetricsContext {
     StringBuilder sb = new StringBuilder();
     sb.append(contextName);
     sb.append('.');
+
+    if (contextName.equals("jvm") && outRec.getTag("processName") != null) {
+      sb.append(outRec.getTag("processName"));
+      sb.append('.');
+    }
+
     sb.append(recordName);
     sb.append('.');
     int sbBaseLen = sb.length();
@@ -182,6 +179,9 @@ public class GangliaContext extends AbstractMetricsContext {
   }
     
   protected int getTmax(String metricName) {
+    if (tmaxTable == null) {
+      return DEFAULT_TMAX;
+    }
     if (tmaxTable == null) {
       return DEFAULT_TMAX;
     }

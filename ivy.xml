@@ -70,7 +70,7 @@
     <conf name="lucene" visibility="private"/>
     <conf name="jdiff" visibility="private" extends="log4j,s3-client,jetty,server"/>
     <conf name="checkstyle" visibility="private"/>
-    <conf name="packaging" visibility="private"/>
+
   </configurations>
 
   <publications>
@@ -83,6 +83,11 @@
     <dependency org="commons-cli"
       name="commons-cli"
       rev="${commons-cli.version}"
+      conf="client->default"/>
+
+    <dependency org="commons-io"
+      name="commons-io"
+      rev="${commons-io.version}"
       conf="client->default"/>
 
     <dependency org="checkstyle"
@@ -103,6 +108,11 @@
       name="xmlenc"
       rev="${xmlenc.version}"
       conf="server->default"/>
+
+    <dependency org="org.apache.hadoop.thirdparty.guava"
+      name="guava"
+      rev="r09-jarjar"
+      conf="client->default" />
 
     <!--Configuration: httpclient-->
 
@@ -126,16 +136,6 @@
       rev="${commons-net.version}"
       conf="ftp->default"/>
 
-    <dependency org="commons-configuration"
-      name="commons-configuration"
-      rev="${commons-configuration.version}"
-      conf="common->default"/>
-
-    <dependency org="org.apache.commons"
-      name="commons-math"
-      rev="${commons-math.version}"
-      conf="common->default"/>
-
     <!--Configuration: Jetty -->
 
 <!-- <dependency org="javax.servlet"
@@ -145,7 +145,7 @@
     <dependency org="org.mortbay.jetty"
       name="jetty"
       rev="${jetty.version}"
-      conf="jetty->default"/>
+      conf="jetty->master"/>
     <dependency org="org.mortbay.jetty"
       name="jetty-util"
       rev="${jetty-util.version}"
@@ -192,6 +192,12 @@
       rev="${commons-daemon.version}"
       conf="server->default" /> 
 
+    <dependency org="com.jcraft"
+      name="jsch"
+      rev="${jsch.version}"
+      conf="common->master">
+    </dependency>
+    
     <!--Configuration: commons-logging -->
 
     <!--it is essential that only the master JAR of commons logging
@@ -223,6 +229,10 @@
       name="commons-net"
       rev="${commons-net.version}"
       conf="s3-client->master"/> 
+    <dependency org="org.mortbay.jetty"
+      name="servlet-api-2.5"
+      rev="${servlet-api-2.5.version}"
+      conf="s3-client->master"/>
 
     <!--Configuration: kfs -->
 
@@ -246,7 +256,7 @@
     <dependency org="commons-lang"
       name="commons-lang"
       rev="${commons-lang.version}"
-      conf="releaseaudit->default"/>
+      conf="common->default"/>
     <dependency org="commons-collections"
       name="commons-collections"
       rev="${commons-collections.version}"
@@ -284,20 +294,18 @@
       rev="${slf4j-log4j12.version}"
       conf="common->master">
     </dependency>
+    <dependency org="org.mockito"
+      name="mockito-all"
+      rev="${mockito-all.version}"
+      conf="common->master"/>
+    <dependency org="org.mortbay.jetty"
+      name="jetty-servlet-tester"
+      rev="${jetty.version}"
+      conf="common->default" />
     <dependency org="org.codehaus.jackson"
       name="jackson-mapper-asl"
-      rev="1.0.1"
+      rev="${jackson.version}"
       conf="common->default"/>
-   <dependency org="org.mockito" 
-       name="mockito-all" 
-       rev="${mockito-all.version}" 
-       conf="common->default">
-    </dependency>
-    <dependency org="com.jcraft"
-      name="jsch"
-      rev="${jsch.version}"
-      conf="common->default">
-    </dependency>
     <dependency org="org.aspectj"
       name="aspectjrt"
       rev="${aspectj.version}"
@@ -307,11 +315,6 @@
       name="aspectjtools"
       rev="${aspectj.version}"
       conf="common->default">
-    </dependency>
-    <dependency org="org.vafer" 
-      name="jdeb" 
-      rev="${jdeb.version}"
-      conf="common->master">
     </dependency>
  </dependencies>
 </ivy-module>

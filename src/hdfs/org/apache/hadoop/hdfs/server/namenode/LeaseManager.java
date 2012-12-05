@@ -283,7 +283,7 @@ public class LeaseManager {
     Collection<String> getPaths() {
       return paths;
     }
-
+    
     void replacePath(String oldpath, String newpath) {
       paths.remove(oldpath);
       paths.add(newpath);

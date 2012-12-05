@@ -22,7 +22,6 @@ import java.io.IOException;
 
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.mapreduce.server.jobtracker.TaskTracker;
 
 /**
  * A pluggable object for selecting tasks to run from a {@link JobInProgress} on

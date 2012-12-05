@@ -57,6 +57,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -82,6 +83,7 @@ import org.apache.hadoop.mapred.JobInProgress.KillInterruptedException;
 import org.apache.hadoop.mapred.JobStatusChangeEvent.EventType;
 import org.apache.hadoop.mapred.QueueManager.QueueACL;
 import org.apache.hadoop.mapred.TaskTrackerStatus.TaskTrackerHealthStatus;
+import org.apache.hadoop.metrics.util.MBeanUtil;
 import org.apache.hadoop.net.DNSToSwitchMapping;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.NetworkTopology;
@@ -98,22 +100,21 @@ import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.authorize.AuthorizationException;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.security.authorize.RefreshAuthorizationPolicyProtocol;
-import org.apache.hadoop.security.authorize.ServiceAuthorizationManager;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.HostsFileReader;
+import org.apache.hadoop.util.MRAsyncDiskService;
+import org.apache.hadoop.util.PluginDispatcher;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.VersionInfo;
 
 import org.apache.hadoop.mapreduce.ClusterMetrics;
-import org.apache.hadoop.mapreduce.JobSubmissionFiles;
 import org.apache.hadoop.mapreduce.TaskType;
 import org.apache.hadoop.mapreduce.security.token.DelegationTokenRenewal;
 import org.apache.hadoop.mapreduce.security.token.JobTokenSecretManager;
 import org.apache.hadoop.mapreduce.server.jobtracker.TaskTracker;
-import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
-import org.apache.hadoop.metrics2.util.MBeans;
 import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.tools.GetUserMappingsProtocol;
 import org.mortbay.util.ajax.JSON;
 
 /*******************************************************
@@ -124,7 +125,7 @@ import org.mortbay.util.ajax.JSON;
 public class JobTracker implements MRConstants, InterTrackerProtocol,
     JobSubmissionProtocol, TaskTrackerManager, RefreshUserMappingsProtocol,
     RefreshAuthorizationPolicyProtocol, AdminOperationsProtocol,
-    JobTrackerMXBean {
+    JobTrackerMXBean, GetUserMappingsProtocol {
 
   static{
     Configuration.addDefaultResource("mapred-default.xml");
@@ -138,34 +139,21 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   private final long DELEGATION_TOKEN_GC_INTERVAL = 3600000; // 1 hour
   private final DelegationTokenSecretManager secretManager;
 
-  // The maximum fraction (range [0.0-1.0]) of nodes in cluster allowed to be
-  // added to the all-jobs blacklist via heuristics.  By default, no more than
-  // 50% of the cluster can be heuristically blacklisted, but the external
-  // node-healthcheck script is not affected by this.
-  private static double MAX_BLACKLIST_FRACTION = 0.5;
-
-  // A tracker is blacklisted across jobs only if number of faults is more
-  // than X% above the average number of faults (averaged across all nodes
-  // in cluster).  X is the blacklist threshold here; 0.3 would correspond
-  // to 130% of the average, for example.
-  private double AVERAGE_BLACKLIST_THRESHOLD = 0.5;
-
-  // Fault threshold (number occurring within TRACKER_FAULT_TIMEOUT_WINDOW)
-  // to consider a task tracker bad enough to blacklist heuristically.  This
-  // is functionally the same as the older "MAX_BLACKLISTS_PER_TRACKER" value.
-  private int TRACKER_FAULT_THRESHOLD; // = 4;
-
-  // Width of overall fault-tracking sliding window (in minutes). (Default
-  // of 24 hours matches previous "UPDATE_FAULTY_TRACKER_INTERVAL" value that
-  // was used to forgive a single fault if no others occurred in the interval.)
-  private int TRACKER_FAULT_TIMEOUT_WINDOW; // = 180 (3 hours)
-
-  // Width of a single fault-tracking bucket (in minutes).
-  private int TRACKER_FAULT_BUCKET_WIDTH;   // = 15
-  private long TRACKER_FAULT_BUCKET_WIDTH_MSECS;
-
-  // Basically TRACKER_FAULT_TIMEOUT_WINDOW / TRACKER_FAULT_BUCKET_WIDTH .
-  private int NUM_FAULT_BUCKETS;
+  
+  // The interval after which one fault of a tracker will be discarded,
+  // if there are no faults during this. 
+  private static long UPDATE_FAULTY_TRACKER_INTERVAL = 24 * 60 * 60 * 1000;
+  // The maximum percentage of trackers in cluster added 
+  // to the 'blacklist' across all the jobs.
+  private static double MAX_BLACKLIST_PERCENT = 0.50;
+  // A tracker is blacklisted across jobs only if number of 
+  // blacklists are X% above the average number of blacklists.
+  // X is the blacklist threshold here.
+  private double AVERAGE_BLACKLIST_THRESHOLD = 0.50;
+  // The maximum number of blacklists for a tracker after which the 
+  // tracker could be blacklisted across all jobs
+  private int MAX_BLACKLISTS_PER_TRACKER = 4;
+  
 
   /** the maximum allowed size of the jobconf **/
   long MAX_JOBCONF_SIZE = 5*1024*1024L;
@@ -192,6 +180,10 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   static final String JT_HEARTBEATS_IN_SECOND = "mapred.heartbeats.in.second";
   private int NUM_HEARTBEATS_IN_SECOND;
   private static final int DEFAULT_NUM_HEARTBEATS_IN_SECOND = 100;
+  // Minimum time between heartbeats
+  static final String JT_HEARTBEAT_INTERVAL_MIN = "mapreduce.jobtracker.heartbeat.interval.min";
+  private int HEARTBEAT_INTERVAL_MIN;
+
   private static final int MIN_NUM_HEARTBEATS_IN_SECOND = 1;
   
   // Scaling factor for heartbeats, used for testing only
@@ -205,6 +197,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   State state = State.INITIALIZING;
   private static final int FS_ACCESS_RETRY_PERIOD = 10000;
   static final String JOB_INFO_FILE = "job-info";
+  static final String JOB_TOKEN_FILE = "jobToken";
   private DNSToSwitchMapping dnsToSwitchMapping;
   private NetworkTopology clusterMap = new NetworkTopology();
   private int numTaskCacheLevels; // the max level to which we cache tasks
@@ -233,6 +226,8 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   
   private Clock clock;
 
+  private MRAsyncDiskService asyncDiskService;
+  
   private final JobTokenSecretManager jobTokenSecretManager
     = new JobTokenSecretManager();
 
@@ -264,13 +259,16 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     */
   static final int MIN_TIME_BEFORE_RETIRE = 0;
 
+
   private int nextJobId = 1;
 
   public static final Log LOG = LogFactory.getLog(JobTracker.class);
-
+  
   static final String CONF_VERSION_KEY = "mapreduce.jobtracker.conf.version";
   static final String CONF_VERSION_DEFAULT = "default";
-  
+
+  private PluginDispatcher<JobTrackerPlugin> pluginDispatcher;
+
   public Clock getClock() {
     return clock;
   }
@@ -293,7 +291,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   
   public static JobTracker startTracker(JobConf conf, String identifier) 
   throws IOException, InterruptedException {
-    DefaultMetricsSystem.initialize("JobTracker");
     JobTracker result = null;
     while (true) {
       try {
@@ -318,8 +315,8 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
     if (result != null) {
       JobEndNotifier.startNotifier();
-      MBeans.register("JobTracker", "JobTrackerInfo", result);
-    }
+      MBeanUtil.registerMBean("JobTracker", "JobTrackerInfo", result);
+    }    
     return result;
   }
 
@@ -340,6 +337,8 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       return AdminOperationsProtocol.versionID;
     } else if (protocol.equals(RefreshUserMappingsProtocol.class.getName())){
       return RefreshUserMappingsProtocol.versionID;
+    } else if (protocol.equals(GetUserMappingsProtocol.class.getName())) {
+      return GetUserMappingsProtocol.versionID;
     } else {
       throw new IOException("Unknown protocol to job tracker: " + protocol);
     }
@@ -465,7 +464,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
           // JobInProgress.failedTask -> JobTracker.markCompleteTaskAttempt
           // Also need to lock JobTracker before locking 'taskTracker' &
           // 'trackerExpiryQueue' to prevent deadlock:
-          // @see {@link JobTracker.processHeartbeat(TaskTrackerStatus, boolean, long)} 
+          // @see {@link JobTracker.processHeartbeat(TaskTrackerStatus, boolean)} 
           synchronized (JobTracker.this) {
             synchronized (taskTrackers) {
               synchronized (trackerExpiryQueue) {
@@ -516,6 +515,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   synchronized void historyFileCopied(JobID jobid, String historyFile) {
     JobInProgress job = getJob(jobid);
     if (job != null) { //found in main cache
+      job.setHistoryFileCopied();
       if (historyFile != null) {
         job.setHistoryFile(historyFile);
       }
@@ -594,9 +594,10 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
 
     private boolean minConditionToRetire(JobInProgress job, long now) {
-      return job.getStatus().getRunState() != JobStatus.RUNNING
-          && job.getStatus().getRunState() != JobStatus.PREP
-          && (job.getFinishTime() + MIN_TIME_BEFORE_RETIRE < now);
+      return job.getStatus().getRunState() != JobStatus.RUNNING &&
+          job.getStatus().getRunState() != JobStatus.PREP &&
+          (job.getFinishTime() + MIN_TIME_BEFORE_RETIRE < now) &&
+          job.isHistoryFileCopied();
     }
     /**
      * The run method lives for the life of the JobTracker,
@@ -683,132 +684,85 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     EXCEEDING_FAILURES,
     NODE_UNHEALTHY
   }
-
-  // FaultInfo:  data structure that tracks the number of faults of a single
-  // TaskTracker, when the last fault occurred, and whether the TaskTracker
-  // is blacklisted across all jobs or not.
+  
+  // The FaultInfo which indicates the number of faults of a tracker
+  // and when the last fault occurred
+  // and whether the tracker is blacklisted across all jobs or not
   private static class FaultInfo {
     static final String FAULT_FORMAT_STRING =  "%d failures on the tracker";
-    int[] numFaults;      // timeslice buckets
-    long lastRotated;     // 1st millisecond of current bucket
+    int numFaults = 0;
+    long lastUpdated;
     boolean blacklisted; 
-    boolean graylisted; 
-
-    private int numFaultBuckets;
-    private long bucketWidth;
-    private HashMap<ReasonForBlackListing, String> blackRfbMap;
-    private HashMap<ReasonForBlackListing, String> grayRfbMap;
-
-    FaultInfo(long time, int numFaultBuckets, long bucketWidth) {
-      this.numFaultBuckets = numFaultBuckets;
-      this.bucketWidth = bucketWidth;
-      numFaults = new int[numFaultBuckets];
-      lastRotated = (time / bucketWidth) * bucketWidth;
+    
+    private boolean isHealthy;
+    private HashMap<ReasonForBlackListing, String>rfbMap;
+    
+    FaultInfo(long time) {
+      numFaults = 0;
+      lastUpdated = time;
       blacklisted = false;
-      graylisted = false;
-      blackRfbMap = new HashMap<ReasonForBlackListing, String>();
-      grayRfbMap = new HashMap<ReasonForBlackListing, String>();
+      rfbMap = new  HashMap<ReasonForBlackListing, String>();
     }
 
-    // timeStamp is presumed to be "now":  there are no checks for past or
-    // future values, etc.
-    private void checkRotation(long timeStamp) {
-      long diff = timeStamp - lastRotated;
-      // find index of the oldest bucket(s) and zero it (or them) out
-      while (diff > bucketWidth) {
-        // this is now the 1st millisecond of the oldest bucket, in a modular-
-        // arithmetic sense (i.e., about to become the newest bucket):
-        lastRotated += bucketWidth;
-        // corresponding bucket index:
-        int idx = (int)((lastRotated / bucketWidth) % numFaultBuckets);
-        // clear the bucket's contents in preparation for new faults
-        numFaults[idx] = 0;
-        diff -= bucketWidth;
-      }
+    void setFaultCount(int num) {
+      numFaults = num;
     }
 
-    private int bucketIndex(long timeStamp) {
-      // stupid Java compiler thinks an int modulus can produce a long, sigh...
-      return (int)((timeStamp / bucketWidth) % numFaultBuckets);
+    void setLastUpdated(long timeStamp) {
+      lastUpdated = timeStamp;
     }
 
-    // no longer any need for corresponding decrFaultCount() method since we
-    // implicitly auto-decrement when oldest bucket's contents get wiped on
-    // rotation
-    void incrFaultCount(long timeStamp) {
-      checkRotation(timeStamp);
-      ++numFaults[bucketIndex(timeStamp)];
+    int getFaultCount() {
+      return numFaults;
     }
 
-    int getFaultCount(long timeStamp) {
-      checkRotation(timeStamp);
-      int faultCount = 0;
-      for (int faults : numFaults) { 
-        faultCount += faults;
-      }
-      return faultCount;
+    long getLastUpdated() {
+      return lastUpdated;
     }
-
+    
     boolean isBlacklisted() {
       return blacklisted;
     }
-
-    boolean isGraylisted() {
-      return graylisted;
+    
+    void setBlacklist(ReasonForBlackListing rfb, 
+        String trackerFaultReport) {
+      blacklisted = true;
+      this.rfbMap.put(rfb, trackerFaultReport);
     }
 
-    void setBlacklist(ReasonForBlackListing rfb, String trackerFaultReport,
-                      boolean gray) {
-      if (gray) {
-        graylisted = true;
-        this.grayRfbMap.put(rfb, trackerFaultReport);
-      } else {
-        blacklisted = true;
-        this.blackRfbMap.put(rfb, trackerFaultReport);
-      }
+    public void setHealthy(boolean isHealthy) {
+      this.isHealthy = isHealthy;
     }
 
-    public String getTrackerBlackOrGraylistReport(boolean gray) {
+    public boolean isHealthy() {
+      return isHealthy;
+    }
+    
+    public String getTrackerFaultReport() {
       StringBuffer sb = new StringBuffer();
-      HashMap<ReasonForBlackListing, String> rfbMap =
-        new HashMap<ReasonForBlackListing, String>();
-      rfbMap.putAll(gray? grayRfbMap : blackRfbMap);
-      for (String reasons : rfbMap.values()) {
+      for(String reasons : rfbMap.values()) {
         sb.append(reasons);
         sb.append("\n");
       }
       return sb.toString();
     }
-
-    Set<ReasonForBlackListing> getReasonForBlacklisting(boolean gray) {
-      return (gray? this.grayRfbMap.keySet() : this.blackRfbMap.keySet());
+    
+    Set<ReasonForBlackListing> getReasonforblacklisting() {
+      return this.rfbMap.keySet();
+    }
+    
+    public void unBlacklist() {
+      this.blacklisted = false;
+      this.rfbMap.clear();
     }
 
-    // no longer on the blacklist (or graylist), but we're still tracking any
-    // faults in case issue is intermittent => don't clear numFaults[]
-    public void unBlacklist(boolean gray) {
-      if (gray) {
-        graylisted = false;
-        grayRfbMap.clear();
-      } else {
-        blacklisted = false;
-        blackRfbMap.clear();
-      }
-    }
-
-    public boolean removeBlacklistedReason(ReasonForBlackListing rfb,
-                                           boolean gray) {
-      String str = (gray? grayRfbMap.remove(rfb) : blackRfbMap.remove(rfb));
+    public boolean removeBlackListedReason(ReasonForBlackListing rfb) {
+      String str = rfbMap.remove(rfb);
       return str!=null;
     }
 
-    public void addBlacklistedReason(ReasonForBlackListing rfb,
-                                     String reason, boolean gray) {
-      if (gray) {
-        grayRfbMap.put(rfb, reason);
-      } else {
-        blackRfbMap.put(rfb, reason);
-      }
+    public void addBlackListedReason(ReasonForBlackListing rfb, String reason) {
+      this.rfbMap.put(rfb, reason);
     }
     
   }
@@ -823,7 +777,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     // this count doesn't include blacklisted trackers which are lost, 
     // although the fault info is maintained for lost trackers.  
     private volatile int numBlacklistedTrackers = 0;
-    private volatile int numGraylistedTrackers = 0;
 
     /**
      * Increments faults(blacklist by job) for the tracker by one.
@@ -835,198 +788,136 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
      */
     void incrementFaults(String hostName) {
       synchronized (potentiallyFaultyTrackers) {
-        long now = clock.getTime();
         FaultInfo fi = getFaultInfo(hostName, true);
-        fi.incrFaultCount(now);
-        // check heuristics, and add to the graylist if over the limit:
-        if (exceedsFaults(fi, now)) {
-          LOG.info("Adding " + hostName + " to the graylist across all jobs");
+        int numFaults = fi.getFaultCount();
+        ++numFaults;
+        fi.setFaultCount(numFaults);
+        fi.setLastUpdated(clock.getTime());
+        if (exceedsFaults(fi)) {
+          LOG.info("Adding " + hostName + " to the blacklist"
+              + " across all jobs");
           String reason = String.format(FaultInfo.FAULT_FORMAT_STRING,
-              fi.getFaultCount(now));
-          blacklistTracker(hostName, reason,
-              ReasonForBlackListing.EXCEEDING_FAILURES, true);
+              numFaults);
+          blackListTracker(hostName, reason,
+              ReasonForBlackListing.EXCEEDING_FAILURES);
         }
       }        
     }
 
-    /**
-     * Graylists the tracker across all jobs (similar to blacklisting except
-     * not actually removed from service) if all of the following heuristics
-     * hold:
-     * <ol>
-     * <li>number of faults within TRACKER_FAULT_TIMEOUT_WINDOW is greater
-     *     than or equal to TRACKER_FAULT_THRESHOLD (per-job blacklistings)
-     *     (both configurable)</li>
-     * <li>number of faults (per-job blacklistings) for given node is more
-     *     than (1 + AVERAGE_BLACKLIST_THRESHOLD) times the average number
-     *     of faults across all nodes (configurable)</li>
-     * <li>less than 50% of the cluster is blacklisted (NOT configurable)</li>
-     * </ol>
-     * Note that the node health-check script is not explicitly limited by
-     * the 50%-blacklist limit.
-     */
-    // this is the sole source of "heuristic blacklisting" == graylisting
-    private boolean exceedsFaults(FaultInfo fi, long timeStamp) {
-      int faultCount = fi.getFaultCount(timeStamp);
-      if (faultCount >= TRACKER_FAULT_THRESHOLD) {
-        // calculate average faults across all nodes
-        long clusterSize = getClusterStatus().getTaskTrackers();
-        long sum = 0;
-        for (FaultInfo f : potentiallyFaultyTrackers.values()) {
-          sum += f.getFaultCount(timeStamp);
-        }
-        double avg = (double) sum / clusterSize;   // avg num faults per node
-        // graylisted trackers are already included in clusterSize:
-        long totalCluster = clusterSize + numBlacklistedTrackers;
-        if ((faultCount - avg) > (AVERAGE_BLACKLIST_THRESHOLD * avg) &&
-            numGraylistedTrackers < (totalCluster * MAX_BLACKLIST_FRACTION)) {
-          return true;
-        }
-      }
-      return false;
-    }
-
-    private void incrBlacklistedTrackers(int count) {
-      LOG.info("Incrementing blacklisted trackers by " + count);
+    private void incrBlackListedTrackers(int count) {
       numBlacklistedTrackers += count;
       getInstrumentation().addBlackListedTrackers(count);
     }
 
-    private void decrBlacklistedTrackers(int count) {
-      LOG.info("Decrementing blacklisted trackers by " + count);
+    private void decrBlackListedTrackers(int count) {
       numBlacklistedTrackers -= count;
       getInstrumentation().decBlackListedTrackers(count);
     }
 
-    private void incrGraylistedTrackers(int count) {
-      LOG.info("Incrementing graylisted trackers by " + count);
-      numGraylistedTrackers += count;
-      getInstrumentation().addGrayListedTrackers(count);
-    }
-
-    private void decrGraylistedTrackers(int count) {
-      LOG.info("Decrementing graylisted trackers by " + count);
-      numGraylistedTrackers -= count;
-      getInstrumentation().decGrayListedTrackers(count);
-    }
-
-    // This may be called either as a result of the node health-check script
-    // or because of heuristics based on single-job blacklist info.
-    private void blacklistTracker(String hostName, String reason,
-                                  ReasonForBlackListing rfb,
-                                  boolean gray) {
+    private void blackListTracker(String hostName, String reason, ReasonForBlackListing rfb) {
       FaultInfo fi = getFaultInfo(hostName, true);
-      String shade = gray? "gray" : "black";
-      boolean listed = gray? fi.isGraylisted() : fi.isBlacklisted();
-      if (listed) {
+      boolean blackListed = fi.isBlacklisted();
+      if(blackListed) {
         if (LOG.isDebugEnabled()) {
-          LOG.debug("Adding/overwriting reason for " + shade +
-              "listed tracker : " + hostName + " Reason for " + shade +
-              "listing is : " + rfb + " Reason details : " + reason);
+          LOG.debug("Adding blacklisted reason for tracker : " + hostName 
+              + " Reason for blacklisting is : " + rfb);
         }
-        if (!fi.getReasonForBlacklisting(gray).contains(rfb)) {
-          LOG.info("Adding new reason for " + shade + "listed tracker : " +
-              hostName + " Reason for " + shade + "listing is : " + rfb 
-              + " Reason details : " + reason);
+        if (!fi.getReasonforblacklisting().contains(rfb)) {
+          LOG.info("Adding blacklisted reason for tracker : " + hostName
+              + " Reason for blacklisting is : " + rfb);
         }
-        fi.addBlacklistedReason(rfb, reason, gray);
+        fi.addBlackListedReason(rfb, reason);
       } else {
-        LOG.info("Adding new " + shade + "listed tracker : " + hostName 
-            + " Reason for " + shade + "listing is : " + rfb 
-            + " Reason details : " + reason);
-        if (gray) {
-          incrGraylistedTrackers(getNumTaskTrackersOnHost(hostName));
-        } else {
-          Set<TaskTracker> trackers = 
-            hostnameToTaskTracker.get(hostName);
-          synchronized (trackers) {
-            for (TaskTracker tracker : trackers) {
-              tracker.cancelAllReservations();
-            }
+        LOG.info("Blacklisting tracker : " + hostName 
+            + " Reason for blacklisting is : " + rfb);
+        Set<TaskTracker> trackers = 
+          hostnameToTaskTracker.get(hostName);
+        synchronized (trackers) {
+          for (TaskTracker tracker : trackers) {
+            tracker.cancelAllReservations();
           }
-          removeHostCapacity(hostName);
         }
-        fi.setBlacklist(rfb, reason, gray);
+        removeHostCapacity(hostName);
+        fi.setBlacklist(rfb, reason);
       }
     }
-
-    /**
-     * Check whether tasks can be assigned to the tracker.
-     *
-     * Faults are stored in a multi-bucket, circular sliding window; when
-     * the implicit "time pointer" moves across a bucket boundary into the
-     * oldest bucket, that bucket's faults are cleared, and it becomes the
-     * newest ("current") bucket.  Thus TRACKER_FAULT_TIMEOUT_WINDOW
-     * determines the timeout value for TaskTracker faults (in combination
-     * with TRACKER_FAULT_BUCKET_WIDTH), and the sum over all buckets is
-     * compared with TRACKER_FAULT_THRESHOLD to determine whether graylisting
-     * is warranted (or, alternatively, if it should be lifted).
-     *
-     * Assumes JobTracker is locked on entry.
-     * 
-     * @param hostName The tracker name
-     * @param now      The current time (milliseconds)
-     */
-    void checkTrackerFaultTimeout(String hostName, long now) {
-      synchronized (potentiallyFaultyTrackers) {
-        FaultInfo fi = potentiallyFaultyTrackers.get(hostName);
-        // getFaultCount() auto-rotates the buckets, clearing out the oldest
-        // as needed, before summing the faults:
-        if (fi != null && fi.getFaultCount(now) < TRACKER_FAULT_THRESHOLD) {
-          unBlacklistTracker(hostName, ReasonForBlackListing.EXCEEDING_FAILURES,
-                             true, now);
-        }
-      }
-    }
-
-    private void unBlacklistTracker(String hostName,
-                                    ReasonForBlackListing rfb,
-                                    boolean gray,
-                                    long timeStamp) {
+    
+    private boolean canUnBlackListTracker(String hostName,
+        ReasonForBlackListing rfb) {
       FaultInfo fi = getFaultInfo(hostName, false);
-      if (fi == null) {
-        return;
+      if(fi == null) {
+        return false;
       }
-      Set<ReasonForBlackListing> rfbSet = fi.getReasonForBlacklisting(gray);
-      boolean listed = gray? fi.isGraylisted() : fi.isBlacklisted();
-      if (listed && rfbSet.contains(rfb)) {
-        if (fi.removeBlacklistedReason(rfb, gray)) {
-          if (fi.getReasonForBlacklisting(gray).isEmpty()) {
-            LOG.info("Un" + (gray? "gray" : "black") + "listing tracker : " +
-                     hostName);
-            if (gray) {
-              decrGraylistedTrackers(getNumTaskTrackersOnHost(hostName));
-            } else {
-              addHostCapacity(hostName);
-            }
-            fi.unBlacklist(gray);
-            // We have unblack/graylisted tracker, so tracker should definitely
-            // be healthy. Check fault count; if zero, don't keep it in memory.
-            if (fi.getFaultCount(timeStamp) == 0) {
-              potentiallyFaultyTrackers.remove(hostName);
-            }
+      
+      Set<ReasonForBlackListing> rfbSet = fi.getReasonforblacklisting();
+      return fi.isBlacklisted() && rfbSet.contains(rfb);
+    }
+
+    private void unBlackListTracker(String hostName,
+        ReasonForBlackListing rfb) {
+      // check if you can black list the tracker then call this methods
+      FaultInfo fi = getFaultInfo(hostName, false);
+      if(fi.removeBlackListedReason(rfb)) {
+        if(fi.getReasonforblacklisting().isEmpty()) {
+          addHostCapacity(hostName);
+          LOG.info("Unblacklisting tracker : " + hostName);
+          fi.unBlacklist();
+          //We have unBlackListed tracker, so tracker should
+          //definitely be healthy. Check fault count if fault count
+          //is zero don't keep it memory.
+          if(fi.numFaults == 0) {
+            potentiallyFaultyTrackers.remove(hostName);
           }
         }
       }
     }
-
+    
     // Assumes JobTracker is locked on the entry
-    private FaultInfo getFaultInfo(String hostName, boolean createIfNecessary) {
+    private FaultInfo getFaultInfo(String hostName, 
+        boolean createIfNeccessary) {
       FaultInfo fi = null;
       synchronized (potentiallyFaultyTrackers) {
         fi = potentiallyFaultyTrackers.get(hostName);
-        if (fi == null && createIfNecessary) {
-          fi = new FaultInfo(clock.getTime(), NUM_FAULT_BUCKETS,
-                             TRACKER_FAULT_BUCKET_WIDTH_MSECS);
+        if (fi == null && createIfNeccessary) {
+          fi = new FaultInfo(clock.getTime());
           potentiallyFaultyTrackers.put(hostName, fi);
         }
       }
       return fi;
     }
-
+    
     /**
-     * Removes the tracker from the blacklist, graylist, and
-     * potentially-faulty list, when it is restarted.
+     * Blacklists the tracker across all jobs if
+     * <ol>
+     * <li>#faults are more than 
+     *     MAX_BLACKLISTS_PER_TRACKER (configurable) blacklists</li>
+     * <li>#faults is 50% (configurable) above the average #faults</li>
+     * <li>50% the cluster is not blacklisted yet </li>
+     * </ol>
+     */
+    private boolean exceedsFaults(FaultInfo fi) {
+      int faultCount = fi.getFaultCount();
+      if (faultCount >= MAX_BLACKLISTS_PER_TRACKER) {
+        // calculate avgBlackLists
+        long clusterSize = getClusterStatus().getTaskTrackers();
+        long sum = 0;
+        for (FaultInfo f : potentiallyFaultyTrackers.values()) {
+          sum += f.getFaultCount();
+        }
+        double avg = (double) sum / clusterSize;
+            
+        long totalCluster = clusterSize + numBlacklistedTrackers;
+        if ((faultCount - avg) > (AVERAGE_BLACKLIST_THRESHOLD * avg) &&
+            numBlacklistedTrackers < (totalCluster * MAX_BLACKLIST_PERCENT)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    
+    /**
+     * Removes the tracker from blacklist and
+     * from potentially faulty list, when it is restarted.
      * 
      * Assumes JobTracker is locked on the entry.
      * 
@@ -1035,18 +926,42 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     void markTrackerHealthy(String hostName) {
       synchronized (potentiallyFaultyTrackers) {
         FaultInfo fi = potentiallyFaultyTrackers.remove(hostName);
-        if (fi != null) {
-          // a tracker can be both blacklisted and graylisted, so check both
-          if (fi.isGraylisted()) {
-            LOG.info("Marking " + hostName + " healthy from graylist");
-            decrGraylistedTrackers(getNumTaskTrackersOnHost(hostName));
-          }
-          if (fi.isBlacklisted()) {
-            LOG.info("Marking " + hostName + " healthy from blacklist");
-            addHostCapacity(hostName);
-          }
-          // no need for fi.unBlacklist() for either one:  fi is already gone
+        if (fi != null && fi.isBlacklisted()) {
+          LOG.info("Removing " + hostName + " from blacklist");
+          addHostCapacity(hostName);
         }
+      }
+    }
+
+    /**
+     * Check whether tasks can be assigned to the tracker.
+     *
+     * One fault of the tracker is discarded if there
+     * are no faults during one day. So, the tracker will get a 
+     * chance again to run tasks of a job.
+     * Assumes JobTracker is locked on the entry.
+     * 
+     * @param hostName The tracker name
+     * @param now The current time
+     * 
+     * @return true if the tracker is blacklisted 
+     *         false otherwise
+     */
+    boolean shouldAssignTasksToTracker(String hostName, long now) {
+      synchronized (potentiallyFaultyTrackers) {
+        FaultInfo fi = potentiallyFaultyTrackers.get(hostName);
+        if (fi != null &&
+            (now - fi.getLastUpdated()) > UPDATE_FAULTY_TRACKER_INTERVAL) {
+          int numFaults = fi.getFaultCount() - 1;
+          fi.setFaultCount(numFaults);
+          fi.setLastUpdated(now);
+          if (canUnBlackListTracker(hostName, 
+              ReasonForBlackListing.EXCEEDING_FAILURES)) {
+            unBlackListTracker(hostName,
+                ReasonForBlackListing.EXCEEDING_FAILURES);
+          }
+        }
+        return (fi != null && fi.isBlacklisted());
       }
     }
 
@@ -1060,16 +975,17 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
           int reduceSlots = status.getMaxReduceSlots();
           totalReduceTaskCapacity -= reduceSlots;
           ++numTrackersOnHost;
-          getInstrumentation().addBlackListedMapSlots(mapSlots);
-          getInstrumentation().addBlackListedReduceSlots(reduceSlots);
+          getInstrumentation().addBlackListedMapSlots(
+              mapSlots);
+          getInstrumentation().addBlackListedReduceSlots(
+              reduceSlots);
         }
         uniqueHostsMap.remove(hostName);
-        incrBlacklistedTrackers(numTrackersOnHost);
+        incrBlackListedTrackers(numTrackersOnHost);
       }
     }
     
-    // This is called when a tracker is restarted or when the health-check
-    // script reports it healthy.  (Not called for graylisting.)
+    // This is called on tracker's restart or after a day of blacklist.
     private void addHostCapacity(String hostName) {
       synchronized (taskTrackers) {
         int numTrackersOnHost = 0;
@@ -1083,18 +999,18 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
           getInstrumentation().decBlackListedMapSlots(mapSlots);
           getInstrumentation().decBlackListedReduceSlots(reduceSlots);
         }
-        uniqueHostsMap.put(hostName, numTrackersOnHost);
-        decrBlacklistedTrackers(numTrackersOnHost);
+        uniqueHostsMap.put(hostName,
+                           numTrackersOnHost);
+        decrBlackListedTrackers(numTrackersOnHost);
       }
     }
 
     /**
-     * Whether a host is blacklisted (by health-check script) across all jobs.
+     * Whether a host is blacklisted across all the jobs. 
      * 
      * Assumes JobTracker is locked on the entry.
-     * 
-     * @param hostName - hostname to check
-     * @return true if blacklisted
+     * @param hostName
+     * @return
      */
     boolean isBlacklisted(String hostName) {
       synchronized (potentiallyFaultyTrackers) {
@@ -1105,60 +1021,56 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       }
       return false;
     }
-
-    /**
-     * Whether a host is graylisted (by heuristics) "across all jobs".
-     * 
-     * Assumes JobTracker is locked on the entry.
-     * 
-     * @param hostName - hostname to check
-     * @return true if graylisted
-     */
-    boolean isGraylisted(String hostName) {
-      synchronized (potentiallyFaultyTrackers) {
-        FaultInfo fi = null;
-        if ((fi = potentiallyFaultyTrackers.get(hostName)) != null) {
-          return fi.isGraylisted();
-        }
-      }
-      return false;
-    }
-
+    
     // Assumes JobTracker is locked on the entry.
     int getFaultCount(String hostName) {
       synchronized (potentiallyFaultyTrackers) {
         FaultInfo fi = null;
         if ((fi = potentiallyFaultyTrackers.get(hostName)) != null) {
-          return fi.getFaultCount(clock.getTime());
+          return fi.getFaultCount();
         }
       }
       return 0;
     }
+    
+    // Assumes JobTracker is locked on the entry.
+    Set<ReasonForBlackListing> getReasonForBlackListing(String hostName) {
+      synchronized (potentiallyFaultyTrackers) {
+        FaultInfo fi = null;
+        if ((fi = potentiallyFaultyTrackers.get(hostName)) != null) {
+          return fi.getReasonforblacklisting();
+        }
+      }
+      return null;
+    }
 
 
     // Assumes JobTracker is locked on the entry.
-    void setNodeHealthStatus(String hostName, boolean isHealthy, String reason,
-                             long timeStamp) {
+    void setNodeHealthStatus(String hostName, boolean isHealthy, String reason) {
       FaultInfo fi = null;
-      // If TaskTracker node is not healthy, get or create a fault info object
-      // and blacklist it.  (This path to blacklisting ultimately comes from
-      // the health-check script called in NodeHealthCheckerService; see JIRA
-      // MAPREDUCE-211 for details.  We never use graylisting for this path.)
+      // If tracker is not healthy, create a fault info object
+      // blacklist it.
       if (!isHealthy) {
         fi = getFaultInfo(hostName, true);
+        fi.setHealthy(isHealthy);
         synchronized (potentiallyFaultyTrackers) {
-          blacklistTracker(hostName, reason,
-                           ReasonForBlackListing.NODE_UNHEALTHY, false);
+          blackListTracker(hostName, reason,
+              ReasonForBlackListing.NODE_UNHEALTHY);
         }
       } else {
-        if ((fi = getFaultInfo(hostName, false)) != null) {
-          unBlacklistTracker(hostName, ReasonForBlackListing.NODE_UNHEALTHY,
-                             false, timeStamp);
+        fi = getFaultInfo(hostName, false);
+        if (fi == null) {
+          return;
+        } else {
+          if (canUnBlackListTracker(hostName,
+              ReasonForBlackListing.NODE_UNHEALTHY)) {
+            unBlackListTracker(hostName, ReasonForBlackListing.NODE_UNHEALTHY);
+          }
         }
       }
     }
   }
-
+  
   /**
    * Get all task tracker statuses on given host
    * 
@@ -1178,27 +1090,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
     return statuses;
   }
-
-  /**
-   * Get total number of task trackers on given host
-   * 
-   * Assumes JobTracker is locked on the entry
-   * @param hostName
-   * @return number of task trackers running on given host
-   */
-  private int getNumTaskTrackersOnHost(String hostName) {
-    int numTrackers = 0;
-    synchronized (taskTrackers) {
-      for (TaskTracker tt : taskTrackers.values()) {
-        TaskTrackerStatus status = tt.getStatus(); 
-        if (hostName.equals(status.getHost())) {
-          ++numTrackers;
-        }
-      }
-    }
-    return numTrackers;
-  }
-
+  
   ///////////////////////////////////////////////////////
   // Used to recover the jobs upon restart
   ///////////////////////////////////////////////////////
@@ -1215,179 +1107,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     /** A custom listener that replays the events in the order in which the 
      * events (task attempts) occurred. 
      */
-    class JobRecoveryListener implements Listener {
-      // The owner job
-      private JobInProgress jip;
-      
-      private JobHistory.JobInfo job; // current job's info object
-      
-      // Maintain the count of the (attempt) events recovered
-      private int numEventsRecovered = 0;
-      
-      // Maintains open transactions
-      private Map<String, String> hangingAttempts = 
-        new HashMap<String, String>();
-      
-      // Whether there are any updates for this job
-      private boolean hasUpdates = false;
-      
-      public JobRecoveryListener(JobInProgress jip) {
-        this.jip = jip;
-        this.job = new JobHistory.JobInfo(jip.getJobID().toString());
-      }
-
-      /**
-       * Process a task. Note that a task might commit a previously pending 
-       * transaction.
-       */
-      private void processTask(String taskId, JobHistory.Task task) {
-        // Any TASK info commits the previous transaction
-        boolean hasHanging = hangingAttempts.remove(taskId) != null;
-        if (hasHanging) {
-          numEventsRecovered += 2;
-        }
-        
-        TaskID id = TaskID.forName(taskId);
-        TaskInProgress tip = getTip(id);
-
-        updateTip(tip, task);
-      }
-
-      /**
-       * Adds a task-attempt in the listener
-       */
-      private void processTaskAttempt(String taskAttemptId, 
-                                      JobHistory.TaskAttempt attempt) 
-        throws UnknownHostException {
-        TaskAttemptID id = TaskAttemptID.forName(taskAttemptId);
-        
-        // Check if the transaction for this attempt can be committed
-        String taskStatus = attempt.get(Keys.TASK_STATUS);
-        TaskAttemptID taskID = TaskAttemptID.forName(taskAttemptId);
-        JobInProgress jip = getJob(taskID.getJobID());
-        JobStatus prevStatus = (JobStatus)jip.getStatus().clone();
-
-        if (taskStatus.length() > 0) {
-          // This means this is an update event
-          if (taskStatus.equals(Values.SUCCESS.name())) {
-            // Mark this attempt as hanging
-            hangingAttempts.put(id.getTaskID().toString(), taskAttemptId);
-            addSuccessfulAttempt(jip, id, attempt);
-          } else {
-            addUnsuccessfulAttempt(jip, id, attempt);
-            numEventsRecovered += 2;
-          }
-        } else {
-          createTaskAttempt(jip, id, attempt);
-        }
-        
-        JobStatus newStatus = (JobStatus)jip.getStatus().clone();
-        if (prevStatus.getRunState() != newStatus.getRunState()) {
-          if(LOG.isDebugEnabled())
-            LOG.debug("Status changed hence informing prevStatus" +  prevStatus + " currentStatus "+ newStatus);
-          JobStatusChangeEvent event =
-            new JobStatusChangeEvent(jip, EventType.RUN_STATE_CHANGED,
-                                     prevStatus, newStatus);
-          updateJobInProgressListeners(event);
-        }
-      }
-
-      public void handle(JobHistory.RecordTypes recType, Map<Keys, 
-                         String> values) throws IOException {
-        if (recType == JobHistory.RecordTypes.Job) {
-          // Update the meta-level job information
-          job.handle(values);
-          
-          // Forcefully init the job as we have some updates for it
-          checkAndInit();
-        } else if (recType.equals(JobHistory.RecordTypes.Task)) {
-          String taskId = values.get(Keys.TASKID);
-          
-          // Create a task
-          JobHistory.Task task = new JobHistory.Task();
-          task.handle(values);
-          
-          // Ignore if its a cleanup task
-          if (isCleanup(task)) {
-            return;
-          }
-            
-          // Process the task i.e update the tip state
-          processTask(taskId, task);
-        } else if (recType.equals(JobHistory.RecordTypes.MapAttempt)) {
-          String attemptId = values.get(Keys.TASK_ATTEMPT_ID);
-          
-          // Create a task attempt
-          JobHistory.MapAttempt attempt = new JobHistory.MapAttempt();
-          attempt.handle(values);
-          
-          // Ignore if its a cleanup task
-          if (isCleanup(attempt)) {
-            return;
-          }
-          
-          // Process the attempt i.e update the attempt state via job
-          processTaskAttempt(attemptId, attempt);
-        } else if (recType.equals(JobHistory.RecordTypes.ReduceAttempt)) {
-          String attemptId = values.get(Keys.TASK_ATTEMPT_ID);
-          
-          // Create a task attempt
-          JobHistory.ReduceAttempt attempt = new JobHistory.ReduceAttempt();
-          attempt.handle(values);
-          
-          // Ignore if its a cleanup task
-          if (isCleanup(attempt)) {
-            return;
-          }
-          
-          // Process the attempt i.e update the job state via job
-          processTaskAttempt(attemptId, attempt);
-        }
-      }
-
-      // Check if the task is of type CLEANUP
-      private boolean isCleanup(JobHistory.Task task) {
-        String taskType = task.get(Keys.TASK_TYPE);
-        return Values.CLEANUP.name().equals(taskType);
-      }
-      
-      // Init the job if its ready for init. Also make sure that the scheduler
-      // is updated
-      private void checkAndInit() throws IOException {
-        String jobStatus = this.job.get(Keys.JOB_STATUS);
-        if (Values.PREP.name().equals(jobStatus)) {
-          hasUpdates = true;
-          LOG.info("Calling init from RM for job " + jip.getJobID().toString());
-          try {
-            initJob(jip);
-          } catch (Throwable t) {
-            LOG.error("Job initialization failed : \n"
-                + StringUtils.stringifyException(t));
-            jip.status.setFailureInfo("Job Initialization failed: \n"
-                + StringUtils.stringifyException(t));
-            failJob(jip);
-            throw new IOException(t);
-          }
-        }
-      }
-      
-      void close() {
-        if (hasUpdates) {
-          // Apply the final (job-level) updates
-          JobStatusChangeEvent event = updateJob(jip, job);
-          
-          synchronized (JobTracker.this) {
-            // Update the job listeners
-            updateJobInProgressListeners(event);
-          }
-        }
-      }
-      
-      public int getNumEventsRecovered() {
-        return numEventsRecovered;
-      }
-
-    }
     
     public RecoveryManager() {
       jobsToRecover = new TreeSet<JobID>();
@@ -1441,16 +1160,25 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     // checks if the job dir has the required files
     public void checkAndAddJob(FileStatus status) throws IOException {
       String fileName = status.getPath().getName();
-      if (isJobNameValid(fileName)) {
-        if (JobClient.isJobDirValid(status.getPath(), fs)) {
-          recoveryManager.addJobForRecovery(JobID.forName(fileName));
-          shouldRecover = true; // enable actual recovery if num-files > 1
-        } else {
-          LOG.info("Found an incomplete job directory " + fileName + "." 
-                   + " Deleting it!!");
-          fs.delete(status.getPath(), true);
-        }
+      if (isJobNameValid(fileName) && isJobDirValid(JobID.forName(fileName))) {
+        recoveryManager.addJobForRecovery(JobID.forName(fileName));
+        shouldRecover = true; // enable actual recovery if num-files > 1
       }
+    }
+    
+    private boolean isJobDirValid(JobID jobId) throws IOException {
+      boolean ret = false;
+      Path jobInfoFile = getSystemFileForJob(jobId);
+      final Path jobTokenFile = getTokenFileForJob(jobId);
+      JobConf job = new JobConf();
+      if (jobTokenFile.getFileSystem(job).exists(jobTokenFile)
+          && jobInfoFile.getFileSystem(job).exists(jobInfoFile)) {
+        ret = true;
+      } else {
+        LOG.warn("Job " + jobId
+            + " does not have valid info/token file so ignoring for recovery");
+      }
+      return ret;
     }
     
     private JobStatusChangeEvent updateJob(JobInProgress jip, 
@@ -1513,8 +1241,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     
     private void createTaskAttempt(JobInProgress job, 
                                    TaskAttemptID attemptId, 
-                                   JobHistory.TaskAttempt attempt) 
-      throws UnknownHostException {
+                                   JobHistory.TaskAttempt attempt) {
       TaskID id = attemptId.getTaskID();
       String type = attempt.get(Keys.TASK_TYPE);
       TaskInProgress tip = job.getTaskInProgress(id);
@@ -1555,7 +1282,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       // III. Create the dummy tasktracker status
       TaskTrackerStatus ttStatus = 
         new TaskTrackerStatus(trackerName, trackerHostName, port, ttStatusList, 
-                              0 , 0, 0);
+                              0 , 0, 0, 0);
       ttStatus.setLastSeen(clock.getTime());
 
       synchronized (JobTracker.this) {
@@ -1713,11 +1440,9 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
         fs.rename(tmpRestartFile, restartFile); // rename .rec to main file
       } else {
         // For the very first time the jobtracker will create a jobtracker.info
-        // file. If the jobtracker has restarted then disable recovery as files'
-        // needed for recovery are missing.
-
-        // disable recovery if this is a restart
-        shouldRecover = false;
+        // file.
+        // enable recovery if this is a restart
+        shouldRecover = true;
 
         // write the jobtracker.info file
         try {
@@ -1769,205 +1494,49 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       fs.rename(tmpRestartFile, restartFile);
     }
 
-                                   // mapred.JobID::forName returns
-    @SuppressWarnings("unchecked") // mapreduce.JobID
     public void recover() {
+      int recovered = 0;
+      long recoveryProcessStartTime = clock.getTime();
       if (!shouldRecover()) {
         // clean up jobs structure
         jobsToRecover.clear();
         return;
       }
 
-      LOG.info("Restart count of the jobtracker : " + restartCount);
-
-      // I. Init the jobs and cache the recovered job history filenames
-      Map<JobID, Path> jobHistoryFilenameMap = new HashMap<JobID, Path>();
-      Iterator<JobID> idIter = jobsToRecover.iterator();
-      JobInProgress job = null;
-      File jobIdFile = null;
-
-      // 0. Cleanup
-      try {
-        JobHistory.JobInfo.deleteConfFiles();
-      } catch (IOException ioe) {
-        LOG.info("Error in cleaning up job history folder", ioe);
-      }
-
-      while (idIter.hasNext()) {
-        JobID id = idIter.next();
-        LOG.info("Trying to recover details of job " + id);
+      LOG.info("Starting the recovery process for " + jobsToRecover.size()
+          + " jobs ...");
+      for (JobID jobId : jobsToRecover) {
+        LOG.info("Submitting job " + jobId);
         try {
-          // 1. Recover job owner and create JIP
-          jobIdFile = 
-            new File(lDirAlloc.getLocalPathToRead(SUBDIR + "/" + id, conf).toString());
-
-          String user = null;
-          if (jobIdFile != null && jobIdFile.exists()) {
-            LOG.info("File " + jobIdFile + " exists for job " + id);
-            FileInputStream in = new FileInputStream(jobIdFile);
-            BufferedReader reader = null;
-            try {
-              reader = new BufferedReader(new InputStreamReader(in));
-              user = reader.readLine();
-              LOG.info("Recovered user " + user + " for job " + id);
-            } finally {
-              if (reader != null) {
-                reader.close();
-              }
-              in.close();
+          Path jobInfoFile = getSystemFileForJob(jobId);
+          final Path jobTokenFile = getTokenFileForJob(jobId);
+          FSDataInputStream in = fs.open(jobInfoFile);
+          final JobInfo token = new JobInfo();
+          token.readFields(in);
+          in.close();
+          final UserGroupInformation ugi = UserGroupInformation
+              .createRemoteUser(token.getUser().toString());
+          JobConf job = new JobConf();
+          final Credentials ts =
+            jobTokenFile.getFileSystem(job).exists(jobTokenFile) ?
+            Credentials.readTokenStorageFile(jobTokenFile, job) : null;
+          ugi.doAs(new PrivilegedExceptionAction<JobStatus>() {
+            public JobStatus run() throws IOException, InterruptedException {
+              return submitJob(JobID.downgrade(token.getJobID()), token
+                  .getJobSubmitDir().toString(), ugi, ts, true);
             }
-          }
-          if (user == null) {
-            throw new RuntimeException("Incomplete job " + id);
-          }
-
-          // Create the job
-          /* THIS PART OF THE CODE IS USELESS. JOB RECOVERY SHOULD BE
-           * BACKPORTED (MAPREDUCE-873)
-           */
-          job = new JobInProgress(JobTracker.this, conf,
-              new JobInfo((org.apache.hadoop.mapreduce.JobID) id,
-                new Text(user), new Path(getStagingAreaDirInternal(user))),
-              restartCount, new Credentials() /*HACK*/);
-
-          // 2. Check if the user has appropriate access
-          // Get the user group info for the job's owner
-          UserGroupInformation ugi =
-            UserGroupInformation.createRemoteUser(job.getJobConf().getUser());
-          LOG.info("Submitting job " + id + " on behalf of user "
-                   + ugi.getShortUserName() + " in groups : "
-                   + StringUtils.arrayToString(ugi.getGroupNames()));
-
-          // check the access
-          try {
-            aclsManager.checkAccess(job, ugi, Operation.SUBMIT_JOB);
-          } catch (Throwable t) {
-            LOG.warn("Access denied for user " + ugi.getShortUserName() 
-                     + " in groups : [" 
-                     + StringUtils.arrayToString(ugi.getGroupNames()) + "]");
-            throw t;
-          }
-
-          // 3. Get the log file and the file path
-          String logFileName = 
-            JobHistory.JobInfo.getJobHistoryFileName(job.getJobConf(), id);
-          if (logFileName != null) {
-            Path jobHistoryFilePath = 
-              JobHistory.JobInfo.getJobHistoryLogLocation(logFileName);
-
-            // 4. Recover the history file. This involved
-            //     - deleting file.recover if file exists
-            //     - renaming file.recover to file if file doesnt exist
-            // This makes sure that the (master) file exists
-            JobHistory.JobInfo.recoverJobHistoryFile(job.getJobConf(), 
-                                                     jobHistoryFilePath);
-          
-            // 5. Cache the history file name as it costs one dfs access
-            jobHistoryFilenameMap.put(job.getJobID(), jobHistoryFilePath);
-          } else {
-            LOG.info("No history file found for job " + id);
-            idIter.remove(); // remove from recovery list
-          }
-
-          // 6. Sumbit the job to the jobtracker
-          addJob(id, job);
-        } catch (Throwable t) {
-          LOG.warn("Failed to recover job " + id + " Ignoring the job.", t);
-          idIter.remove();
-          if (jobIdFile != null) {
-            jobIdFile.delete();
-            jobIdFile = null;
-          }
-          if (job != null) {
-            job.fail();
-            job = null;
-          }
-          continue;
+          });
+          recovered++;
+        } catch (Exception e) {
+          LOG.warn("Could not recover job " + jobId, e);
         }
       }
-
-      long recoveryStartTime = clock.getTime();
-
-      // II. Recover each job
-      idIter = jobsToRecover.iterator();
-      while (idIter.hasNext()) {
-        JobID id = idIter.next();
-        JobInProgress pJob = getJob(id);
-
-        // 1. Get the required info
-        // Get the recovered history file
-        Path jobHistoryFilePath = jobHistoryFilenameMap.get(pJob.getJobID());
-        String logFileName = jobHistoryFilePath.getName();
-
-        FileSystem fs;
-        try {
-          fs = jobHistoryFilePath.getFileSystem(conf);
-        } catch (IOException ioe) {
-          LOG.warn("Failed to get the filesystem for job " + id + ". Ignoring.",
-                   ioe);
-          continue;
-        }
-
-        // 2. Parse the history file
-        // Note that this also involves job update
-        JobRecoveryListener listener = new JobRecoveryListener(pJob);
-        try {
-          JobHistory.parseHistoryFromFS(jobHistoryFilePath.toString(), 
-                                        listener, fs);
-        } catch (Throwable t) {
-          LOG.info("Error reading history file of job " + pJob.getJobID() 
-                   + ". Ignoring the error and continuing.", t);
-        }
-
-        // 3. Close the listener
-        listener.close();
-        
-        // 4. Update the recovery metric
-        totalEventsRecovered += listener.getNumEventsRecovered();
-
-        // 5. Cleanup history
-        // Delete the master log file as an indication that the new file
-        // should be used in future
-        try {
-          synchronized (pJob) {
-            JobHistory.JobInfo.checkpointRecovery(logFileName, 
-                                                  pJob.getJobConf());
-          }
-        } catch (Throwable t) {
-          LOG.warn("Failed to delete log file (" + logFileName + ") for job " 
-                   + id + ". Continuing.", t);
-        }
-
-        if (pJob.isComplete()) {
-          idIter.remove(); // no need to keep this job info as its successful
-        }
-      }
-
-      recoveryDuration = clock.getTime() - recoveryStartTime;
+      recoveryDuration = clock.getTime() - recoveryProcessStartTime;
       hasRecovered = true;
 
-      // III. Finalize the recovery
-      synchronized (trackerExpiryQueue) {
-        // Make sure that the tracker statuses in the expiry-tracker queue
-        // are updated
-        long now = clock.getTime();
-        int size = trackerExpiryQueue.size();
-        for (int i = 0; i < size ; ++i) {
-          // Get the first tasktracker
-          TaskTrackerStatus taskTracker = trackerExpiryQueue.first();
-
-          // Remove it
-          trackerExpiryQueue.remove(taskTracker);
-
-          // Set the new time
-          taskTracker.setLastSeen(now);
-
-          // Add back to get the sorted list
-          trackerExpiryQueue.add(taskTracker);
-        }
-      }
-
-      LOG.info("Restoration complete");
+      LOG.info("Recovery done! Recoverd " + recovered + " of "
+          + jobsToRecover.size() + " jobs.");
+      LOG.info("Recovery Duration (ms):" + recoveryDuration);
     }
     
     int totalEventsRecovered() {
@@ -1975,31 +1544,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
   }
 
-  private JobTrackerInstrumentation myInstrumentation;
-
-  private void createInstrumentation() {
-    // Initialize instrumentation
-    JobTrackerInstrumentation tmp;
-    Class<? extends JobTrackerInstrumentation> metricsInst =
-        getInstrumentationClass(conf);
-    LOG.debug("instrumentation class="+ metricsInst);
-    if (metricsInst == null) {
-      myInstrumentation = JobTrackerInstrumentation.create(this, conf);
-      return;
-    }
-    try {
-      java.lang.reflect.Constructor<? extends JobTrackerInstrumentation> c =
-          metricsInst.getConstructor(new Class<?>[]{JobTracker.class,
-          JobConf.class});
-      tmp = c.newInstance(this, conf);
-    } catch (Exception e) {
-      //Reflection can throw lots of exceptions -- handle them all by
-      //falling back on the default.
-      LOG.error("failed to initialize job tracker metrics", e);
-      tmp = JobTrackerInstrumentation.create(this, conf);
-    }
-    myInstrumentation = tmp;
-  }
+  private final JobTrackerInstrumentation myInstrumentation;
     
   /////////////////////////////////////////////////////////////////
   // The real JobTracker
@@ -2080,8 +1625,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   
   // Number of resolved entries
   int numResolved;
-
-  // statistics about TaskTrackers with faults; may lead to graylisting
+    
   private FaultyTrackersInfo faultyTrackers = new FaultyTrackersInfo();
   
   private JobTrackerStatistics statistics = 
@@ -2111,7 +1655,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   CompletedJobStatusStore completedJobStatusStore = null;
   Thread completedJobsStoreThread = null;
   RecoveryManager recoveryManager;
-  JobHistoryServer jobHistoryServer;
 
   /**
    * It might seem like a bug to maintain a TreeSet of tasktracker objects,
@@ -2167,11 +1710,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     this(conf, generateNewIdentifier());
   }
 
-  JobTracker(JobConf conf, QueueManager qm) 
-  throws IOException, InterruptedException {
-    this(conf, generateNewIdentifier(), new Clock(), qm);
-  }
-
   JobTracker(JobConf conf, Clock clock) 
   throws IOException, InterruptedException {
     this(conf, generateNewIdentifier(), clock);
@@ -2185,16 +1723,9 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   throws IOException, InterruptedException {   
     this(conf, identifier, new Clock());
   }
-
+  
   JobTracker(final JobConf conf, String identifier, Clock clock) 
   throws IOException, InterruptedException { 
-
-    this(conf, identifier, clock, new QueueManager(new Configuration(conf)));
-  } 
-  
-  JobTracker(final JobConf conf, String identifier, Clock clock, QueueManager qm) 
-  throws IOException, InterruptedException { 
-    this.queueManager = qm;
     this.clock = clock;
     // Set ports, start RPC servers, setup security policy etc.
     InetSocketAddress addr = getAddress(conf);
@@ -2232,35 +1763,17 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     retiredJobsCacheSize =
              conf.getInt("mapred.job.tracker.retiredjobs.cache.size", 1000);
     MAX_COMPLETE_USER_JOBS_IN_MEMORY = conf.getInt("mapred.jobtracker.completeuserjobs.maximum", 100);
-
-    // values related to heuristic graylisting (a "fault" is a per-job
-    // blacklisting; too many faults => node is graylisted across all jobs):
-    TRACKER_FAULT_TIMEOUT_WINDOW =  // 3 hours
-      conf.getInt("mapred.jobtracker.blacklist.fault-timeout-window", 3 * 60);
-    TRACKER_FAULT_BUCKET_WIDTH =    // 15 minutes
-      conf.getInt("mapred.jobtracker.blacklist.fault-bucket-width", 15);
-    TRACKER_FAULT_THRESHOLD =
-      conf.getInt("mapred.max.tracker.blacklists", 4);
-      // future:  rename to "mapred.jobtracker.blacklist.fault-threshold" for
-      // namespace consistency
-
-    if (TRACKER_FAULT_BUCKET_WIDTH > TRACKER_FAULT_TIMEOUT_WINDOW) {
-      TRACKER_FAULT_BUCKET_WIDTH = TRACKER_FAULT_TIMEOUT_WINDOW;
-    }
-    TRACKER_FAULT_BUCKET_WIDTH_MSECS =
-      (long)TRACKER_FAULT_BUCKET_WIDTH * 60 * 1000;
-
-    // ideally, TRACKER_FAULT_TIMEOUT_WINDOW should be an integral multiple of
-    // TRACKER_FAULT_BUCKET_WIDTH, but round up just in case:
-    NUM_FAULT_BUCKETS =
-      (TRACKER_FAULT_TIMEOUT_WINDOW + TRACKER_FAULT_BUCKET_WIDTH - 1) /
-      TRACKER_FAULT_BUCKET_WIDTH;
-
+    MAX_BLACKLISTS_PER_TRACKER = 
+        conf.getInt("mapred.max.tracker.blacklists", 4);
+    
     NUM_HEARTBEATS_IN_SECOND = 
       conf.getInt(JT_HEARTBEATS_IN_SECOND, DEFAULT_NUM_HEARTBEATS_IN_SECOND);
     if (NUM_HEARTBEATS_IN_SECOND < MIN_NUM_HEARTBEATS_IN_SECOND) {
       NUM_HEARTBEATS_IN_SECOND = DEFAULT_NUM_HEARTBEATS_IN_SECOND;
     }
+
+    HEARTBEAT_INTERVAL_MIN =
+      conf.getInt(JT_HEARTBEAT_INTERVAL_MIN, HEARTBEAT_INTERVAL_MIN_DEFAULT);
     
     HEARTBEATS_SCALING_FACTOR = 
       conf.getFloat(JT_HEARTBEATS_SCALING_FACTOR, 
@@ -2269,11 +1782,11 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       HEARTBEATS_SCALING_FACTOR = DEFAULT_HEARTBEATS_SCALING_FACTOR;
     }
 
-    // This configuration is there solely for tuning purposes and
-    // once this feature has been tested in real clusters and an appropriate
-    // value for the threshold has been found, this config might be taken out.
-    AVERAGE_BLACKLIST_THRESHOLD =
-      conf.getFloat("mapred.cluster.average.blacklist.threshold", 0.5f);
+    //This configuration is there solely for tuning purposes and 
+    //once this feature has been tested in real clusters and an appropriate
+    //value for the threshold has been found, this config might be taken out.
+    AVERAGE_BLACKLIST_THRESHOLD = 
+      conf.getFloat("mapred.cluster.average.blacklist.threshold", 0.5f); 
 
     // This is a directory of temporary submission files.  We delete it
     // on startup, and can delete any files that we're done with
@@ -2285,6 +1798,10 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     // Read the hosts/exclude files to restrict access to the jobtracker.
     this.hostsReader = new HostsFileReader(conf.get("mapred.hosts", ""),
                                            conf.get("mapred.hosts.exclude", ""));
+
+    Configuration queuesConf = new Configuration(this.conf);
+    queueManager = new QueueManager(queuesConf);
+
     aclsManager = new ACLsManager(conf, new JobACLsManager(conf), queueManager);
 
     LOG.info("Starting jobtracker with owner as " +
@@ -2296,16 +1813,17 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
           JobQueueTaskScheduler.class, TaskScheduler.class);
     taskScheduler = (TaskScheduler) ReflectionUtils.newInstance(schedulerClass, conf);
     
-    // Set service-level authorization security policy
-    if (conf.getBoolean(
-          ServiceAuthorizationManager.SERVICE_AUTHORIZATION_CONFIG, false)) {
-      ServiceAuthorizationManager.refresh(conf, new MapReducePolicyProvider());
-    }
-    
     int handlerCount = conf.getInt("mapred.job.tracker.handler.count", 10);
     this.interTrackerServer = 
       RPC.getServer(this, addr.getHostName(), addr.getPort(), handlerCount, 
           false, conf, secretManager);
+
+    // Set service-level authorization security policy
+    if (conf.getBoolean(
+        CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, false)) {
+      this.interTrackerServer.refreshServiceAcl(conf, new MapReducePolicyProvider());
+    }
+
     if (LOG.isDebugEnabled()) {
       Properties p = System.getProperties();
       for (Iterator it = p.keySet().iterator(); it.hasNext();) {
@@ -2342,7 +1860,21 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     
     this.trackerIdentifier = identifier;
 
-    createInstrumentation();
+    // Initialize instrumentation
+    JobTrackerInstrumentation tmp;
+    Class<? extends JobTrackerInstrumentation> metricsInst =
+      getInstrumentationClass(jobConf);
+    try {
+      java.lang.reflect.Constructor<? extends JobTrackerInstrumentation> c =
+        metricsInst.getConstructor(new Class[] {JobTracker.class, JobConf.class} );
+      tmp = c.newInstance(this, jobConf);
+    } catch(Exception e) {
+      //Reflection can throw lots of exceptions -- handle them all by 
+      //falling back on the default.
+      LOG.error("failed to initialize job tracker metrics", e);
+      tmp = new JobTrackerMetricsInst(this, jobConf);
+    }
+    myInstrumentation = tmp;
     
     // The rpc/web-server ports can be ephemeral ports... 
     // ... ensure we have the correct info
@@ -2357,6 +1889,10 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     
     // start the recovery manager
     recoveryManager = new RecoveryManager();
+    
+    // start async disk service for asynchronous deletion service
+    asyncDiskService = new MRAsyncDiskService(FileSystem.getLocal(jobConf),
+        jobConf.getLocalDirs());
     
     while (!Thread.currentThread().isInterrupted()) {
       try {
@@ -2406,22 +1942,34 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
             break; // if there is something to recover else clean the sys dir
           }
         }
-        LOG.info("Cleaning up the system directory");
-        fs.delete(systemDir, true);
-        if (FileSystem.mkdirs(fs, systemDir, 
-            new FsPermission(SYSTEM_DIR_PERMISSION))) {
+
+        if (!fs.exists(systemDir)) {
+          LOG.info("Creating the system directory");
+          if (FileSystem.mkdirs(fs, systemDir, 
+                                new FsPermission(SYSTEM_DIR_PERMISSION))) {
+            // success
+            break;
+          } else {
+            LOG.error("Mkdirs failed to create " + systemDir);
+          }
+        } else {
+          LOG.info("Cleaning up the system directory");
+          fs.setPermission(systemDir, new FsPermission(SYSTEM_DIR_PERMISSION));
+          // It exists, just set permissions and clean the contents up
+          deleteContents(fs, systemDir);
           break;
         }
-        LOG.error("Mkdirs failed to create " + systemDir);
       } catch (AccessControlException ace) {
-        LOG.warn("Failed to operate on mapred.system.dir (" + systemDir 
-                 + ") because of permissions.");
-        LOG.warn("Manually delete the mapred.system.dir (" + systemDir 
-                 + ") and then start the JobTracker.");
+        LOG.warn("Failed to operate on mapred.system.dir (" +
+                 systemDir.makeQualified(fs) +
+                 ") because of permissions.");
+        LOG.warn("This directory should be owned by the user '" +
+                 UserGroupInformation.getCurrentUser() + "'");
         LOG.warn("Bailing out ... ", ace);
         throw ace;
       } catch (IOException ie) {
-        LOG.info("problem cleaning system directory: " + systemDir, ie);
+        LOG.info("problem cleaning system directory: " +
+                 systemDir.makeQualified(fs), ie);
       }
       Thread.sleep(FS_ACCESS_RETRY_PERIOD);
     }
@@ -2431,6 +1979,8 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
     
     // Same with 'localDir' except it's always on the local disk.
+    asyncDiskService.moveAndDeleteFromEachVolume(SUBDIR);
+
     if (!hasRestarted) {
       jobConf.deleteLocalFiles(SUBDIR);
     }
@@ -2446,25 +1996,16 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
 
         infoServer.setAttribute
           ("serialNumberDirectoryDigits",
-           Integer.valueOf(JobHistory.serialNumberDirectoryDigits()));
+           new Integer(JobHistory.serialNumberDirectoryDigits()));
 
         infoServer.setAttribute
           ("serialNumberTotalDigits",
-           Integer.valueOf(JobHistory.serialNumberTotalDigits()));
-        
+           new Integer(JobHistory.serialNumberTotalDigits()));
+
         return new Path(historyLogDir).getFileSystem(conf);
       }
     });
     infoServer.setAttribute("fileSys", historyFS);
-    infoServer.setAttribute("jobConf", conf);
-    infoServer.setAttribute("aclManager", aclsManager);
-
-    if (JobHistoryServer.isEmbedded(conf)) {
-      LOG.info("History server being initialized in embedded mode");
-      jobHistoryServer = new JobHistoryServer(conf, aclsManager, infoServer);
-      jobHistoryServer.start();
-      LOG.info("Job History Server web address: " + JobHistoryServer.getAddress(conf));
-    }
 
     this.dnsToSwitchMapping = ReflectionUtils.newInstance(
         conf.getClass("topology.node.switch.mapping.impl", ScriptBasedMapping.class,
@@ -2474,6 +2015,21 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
 
     //initializes the job status store
     completedJobStatusStore = new CompletedJobStatusStore(conf, aclsManager);
+    pluginDispatcher = PluginDispatcher.createFromConfiguration(
+            conf, "mapred.jobtracker.plugins", JobTrackerPlugin.class);
+    pluginDispatcher.dispatchStart(this);
+  }
+
+  /**
+   * Recursively delete the contents of a directory without deleting the
+   * directory itself.
+   */
+  private void deleteContents(FileSystem fs, Path dir) throws IOException {
+    for (FileStatus stat : fs.listStatus(dir)) {
+      if (!fs.delete(stat.getPath(), true)) {
+        throw new IOException("Unable to delete " + stat.getPath());
+      }
+    }
   }
 
   private static SimpleDateFormat getDateFormat() {
@@ -2540,12 +2096,12 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     return localFs;
   }
 
-  static Class<? extends JobTrackerInstrumentation> getInstrumentationClass(Configuration conf) {
-    return conf.getClass("mapred.jobtracker.instrumentation", null,
-                         JobTrackerInstrumentation.class);
+  public static Class<? extends JobTrackerInstrumentation> getInstrumentationClass(Configuration conf) {
+    return conf.getClass("mapred.jobtracker.instrumentation",
+        JobTrackerMetricsInst.class, JobTrackerInstrumentation.class);
   }
   
-  static void setInstrumentationClass(Configuration conf, Class<? extends JobTrackerInstrumentation> t) {
+  public static void setInstrumentationClass(Configuration conf, Class<? extends JobTrackerInstrumentation> t) {
     conf.setClass("mapred.jobtracker.instrumentation",
         t, JobTrackerInstrumentation.class);
   }
@@ -2555,7 +2111,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   }
 
   public static InetSocketAddress getAddress(Configuration conf) {
-    String jobTrackerStr =
+    String jobTrackerStr = 
       conf.get("mapred.job.tracker", "localhost:8012");
     return NetUtils.createSocketAddr(jobTrackerStr);
   }
@@ -2616,6 +2172,10 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   }
 
   void close() throws IOException {
+    if (this.pluginDispatcher != null) {
+        LOG.info("Stopping pluginDispatcher");
+        pluginDispatcher.dispatchStop();
+      }
     if (this.infoServer != null) {
       LOG.info("Stopping infoServer");
       try {
@@ -2668,14 +2228,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
         ex.printStackTrace();
       }
     }
-    if (jobHistoryServer != null) {
-      LOG.info("Stopping job history server");
-      try {
-        jobHistoryServer.shutdown();
-      } catch (Exception ex) {
-        LOG.warn("Exception shutting down Job History server", ex);
-      }
-  }
     DelegationTokenRenewal.close();
     LOG.info("stopped all jobtracker services");
     return;
@@ -2739,7 +2291,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       trackerToMarkedTasksMap.put(taskTracker, taskset);
     }
     taskset.add(taskid);
-
+      
     if (LOG.isDebugEnabled()) {
       LOG.debug("Marked '" + taskid + "' from '" + taskTracker + "'");
     }
@@ -2877,8 +2429,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     // mark the job for cleanup at all the trackers
     addJobForCleanup(id);
 
-    // add the (single-job) blacklisted trackers to potentially faulty list
-    // for possible heuristic graylisting across all jobs
+    // add the blacklisted trackers to potentially faulty list
     if (job.getStatus().getRunState() == JobStatus.SUCCEEDED) {
       if (job.getNoOfBlackListedTrackers() > 0) {
         for (String hostName : job.getBlackListedTrackers()) {
@@ -2888,7 +2439,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
 
     String jobUser = job.getProfile().getUser();
-    // add to the user to jobs mapping
+    //add to the user to jobs mapping
     synchronized (userToJobsMap) {
       ArrayList<JobInProgress> userJobs = userToJobsMap.get(jobUser);
       if (userJobs == null) {
@@ -2959,6 +2510,13 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
     return v;
   }
+
+  public synchronized List<JobInProgress> getFailedJobs() {
+    synchronized (jobs) {
+      return failedJobs();
+    }
+  }
+
   public Vector<JobInProgress> completedJobs() {
     Vector<JobInProgress> v = new Vector<JobInProgress>();
     for (Iterator it = jobs.values().iterator(); it.hasNext();) {
@@ -2969,6 +2527,12 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       }
     }
     return v;
+  }
+
+  public synchronized List<JobInProgress> getCompletedJobs() {
+    synchronized (jobs) {
+      return completedJobs();
+    }
   }
 
   /**
@@ -3012,95 +2576,64 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   }
   
   /**
-   * Get the active, blacklisted, and graylisted task tracker names in the
-   * cluster. The first element in the returned list contains the list of
-   * active tracker names; the second element in the returned list contains
-   * the list of blacklisted tracker names; and the third contains the list
-   * of graylisted tracker names.  Note that the blacklist is disjoint
-   * from the active list, but the graylist is not:  initially, graylisted
-   * trackers are still active and therefore will appear in both lists.
-   * (Graylisted trackers can later be blacklisted, in which case they'll
-   * be removed from the active list and added to the blacklist, but they
-   * remain on the graylist in this case.  Blacklisting comes about via the
-   * health-check script, while graylisting is heuristically based on the
-   * number of per-job blacklistings in a specified time interval.)
+   * Get the active and blacklisted task tracker names in the cluster. The first
+   * element in the returned list contains the list of active tracker names.
+   * The second element in the returned list contains the list of blacklisted
+   * tracker names. 
    */
-  // This method is synchronized to make sure that the locking order
-  // "taskTrackers lock followed by faultyTrackers.potentiallyFaultyTrackers
+  // This method is synchronized to make sure that the locking order 
+  // "taskTrackers lock followed by faultyTrackers.potentiallyFaultyTrackers 
   // lock" is under JobTracker lock to avoid deadlocks.
   synchronized public List<List<String>> taskTrackerNames() {
-    List<String> activeTrackers = new ArrayList<String>();
-    List<String> blacklistedTrackers = new ArrayList<String>();
-    List<String> graylistedTrackers = new ArrayList<String>();
+    List<String> activeTrackers = 
+      new ArrayList<String>();
+    List<String> blacklistedTrackers = 
+      new ArrayList<String>();
     synchronized (taskTrackers) {
       for (TaskTracker tt : taskTrackers.values()) {
         TaskTrackerStatus status = tt.getStatus();
-        String hostName = status.getHost();
-        String trackerName = status.getTrackerName();
-        if (!faultyTrackers.isBlacklisted(hostName)) {
-          activeTrackers.add(trackerName);
+        if (!faultyTrackers.isBlacklisted(status.getHost())) {
+          activeTrackers.add(status.getTrackerName());
         } else {
-          blacklistedTrackers.add(trackerName);
-        }
-        if (faultyTrackers.isGraylisted(hostName)) {
-          graylistedTrackers.add(trackerName);
+          blacklistedTrackers.add(status.getTrackerName());
         }
       }
     }
-    List<List<String>> result = new ArrayList<List<String>>(3);
+    List<List<String>> result = new ArrayList<List<String>>(2);
     result.add(activeTrackers);
     result.add(blacklistedTrackers);
-    result.add(graylistedTrackers);
     return result;
   }
-
+  
   /**
-   * Get the statuses of the blacklisted task trackers in the cluster.
-   *
-   * @return {@link Collection} of blacklisted {@link TaskTrackerStatus}
+   * Get the blacklisted task tracker statuses in the cluster
+   *  
+   * @return {@link Collection} of blacklisted {@link TaskTrackerStatus} 
    */
-  // used by the web UI (machines.jsp)
-  public Collection<TaskTrackerStatus> blacklistedTaskTrackers() {
-    return blackOrGraylistedTaskTrackers(false);
-  }
-
-  /**
-   * Get the statuses of the graylisted task trackers in the cluster.
-   *
-   * @return {@link Collection} of graylisted {@link TaskTrackerStatus}
-   */
-  public Collection<TaskTrackerStatus> graylistedTaskTrackers() {
-    return blackOrGraylistedTaskTrackers(true);
-  }
-
-  // This method is synchronized to make sure that the locking order
-  // "taskTrackers lock followed by faultyTrackers.potentiallyFaultyTrackers
+  // This method is synchronized to make sure that the locking order 
+  // "taskTrackers lock followed by faultyTrackers.potentiallyFaultyTrackers 
   // lock" is under JobTracker lock to avoid deadlocks.
-  synchronized private Collection<TaskTrackerStatus>
-        blackOrGraylistedTaskTrackers(boolean gray) {
-    Collection<TaskTrackerStatus> listedTrackers =
+  synchronized public Collection<TaskTrackerStatus> blacklistedTaskTrackers() {
+    Collection<TaskTrackerStatus> blacklistedTrackers = 
       new ArrayList<TaskTrackerStatus>();
     synchronized (taskTrackers) {
       for (TaskTracker tt : taskTrackers.values()) {
-        TaskTrackerStatus status = tt.getStatus();
-        boolean listed = gray? faultyTrackers.isGraylisted(status.getHost()) :
-                               faultyTrackers.isBlacklisted(status.getHost());
-        if (listed) {
-          listedTrackers.add(status);
+        TaskTrackerStatus status = tt.getStatus(); 
+        if (faultyTrackers.isBlacklisted(status.getHost())) {
+          blacklistedTrackers.add(status);
         }
       }
-    }
-    return listedTrackers;
+    }    
+    return blacklistedTrackers;
   }
 
   synchronized int getFaultCount(String hostName) {
     return faultyTrackers.getFaultCount(hostName);
   }
-
+  
   /**
-   * Get the number of task trackers that are blacklisted (via health-check
-   * script) across all jobs.
-   *
+   * Get the number of blacklisted trackers across all the jobs
+   * 
    * @return
    */
   int getBlacklistedTrackerCount() {
@@ -3108,20 +2641,10 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   }
 
   /**
-   * Get the number of task trackers that are graylisted (via heuristics on
-   * single-job blacklistings) across all jobs.
-   *
-   * @return
-   */
-  int getGraylistedTrackerCount() {
-    return faultyTrackers.numGraylistedTrackers;
-  }
-
-  /**
    * Whether the tracker is blacklisted or not
-   *
+   * 
    * @param trackerID
-   *
+   * 
    * @return true if blacklisted, false otherwise
    */
   synchronized public boolean isBlacklisted(String trackerID) {
@@ -3131,22 +2654,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
     return false;
   }
-
-  /**
-   * Whether the tracker is graylisted or not
-   *
-   * @param trackerID
-   *
-   * @return true if graylisted, false otherwise
-   */
-  synchronized public boolean isGraylisted(String trackerID) {
-    TaskTrackerStatus status = getTaskTrackerStatus(trackerID);
-    if (status != null) {
-      return faultyTrackers.isGraylisted(status.getHost());
-    }
-    return false;
-  }
-
+  
   // lock to taskTrackers should hold JT lock first.
   synchronized public TaskTrackerStatus getTaskTrackerStatus(String trackerID) {
     TaskTracker taskTracker;
@@ -3174,7 +2682,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
    * 
    * @param status Task Tracker's status
    */
-  private void addNewTracker(TaskTracker taskTracker) throws UnknownHostException {
+  private void addNewTracker(TaskTracker taskTracker) {
     TaskTrackerStatus status = taskTracker.getStatus();
     trackerExpiryQueue.add(status);
 
@@ -3198,7 +2706,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     trackers.add(taskTracker);
   }
 
-  public Node resolveAndAddToTopology(String name) throws UnknownHostException {
+  public Node resolveAndAddToTopology(String name) {
     List <String> tmpList = new ArrayList<String>(1);
     tmpList.add(name);
     List <String> rNameList = dnsToSwitchMapping.resolve(tmpList);
@@ -3290,8 +2798,13 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   ////////////////////////////////////////////////////
   // InterTrackerProtocol
   ////////////////////////////////////////////////////
-  
-  public String getBuildVersion() throws IOException{
+
+  // Just returns the VersionInfo version (unlike MXBean#getVersion)
+  public String getVIVersion() throws IOException {
+    return VersionInfo.getVersion();
+  }
+
+  public String getBuildVersion() throws IOException {
     return VersionInfo.getBuildVersion();
   }
 
@@ -3325,10 +2838,12 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     // First check if the last heartbeat response got through
     String trackerName = status.getTrackerName();
     long now = clock.getTime();
+    boolean isBlacklisted = false;
     if (restarted) {
       faultyTrackers.markTrackerHealthy(status.getHost());
     } else {
-      faultyTrackers.checkTrackerFaultTimeout(status.getHost(), now);
+      isBlacklisted = 
+        faultyTrackers.shouldAssignTasksToTracker(status.getHost(), now);
     }
     
     HeartbeatResponse prevHeartbeatResponse =
@@ -3375,7 +2890,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     // Process this heartbeat 
     short newResponseId = (short)(responseId + 1);
     status.setLastSeen(now);
-    if (!processHeartbeat(status, initialContact, now)) {
+    if (!processHeartbeat(status, initialContact)) {
       if (prevHeartbeatResponse != null) {
         trackerToHeartbeatResponseMap.remove(trackerName);
       }
@@ -3386,10 +2901,10 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     // Initialize the response to be sent for the heartbeat
     HeartbeatResponse response = new HeartbeatResponse(newResponseId, null);
     List<TaskTrackerAction> actions = new ArrayList<TaskTrackerAction>();
-    boolean isBlacklisted = faultyTrackers.isBlacklisted(status.getHost());
+    isBlacklisted = faultyTrackers.isBlacklisted(status.getHost());
     // Check for new tasks to be executed on the tasktracker
     if (recoveryManager.shouldSchedule() && acceptNewTasks && !isBlacklisted) {
-      TaskTrackerStatus taskTrackerStatus = getTaskTrackerStatus(trackerName);
+      TaskTrackerStatus taskTrackerStatus = getTaskTrackerStatus(trackerName) ;
       if (taskTrackerStatus == null) {
         LOG.warn("Unknown task tracker polling; ignoring: " + trackerName);
       } else {
@@ -3457,7 +2972,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     int clusterSize = getClusterStatus().getTaskTrackers();
     int heartbeatInterval =  Math.max(
                                 (int)(1000 * HEARTBEATS_SCALING_FACTOR *
-                                      Math.ceil((double)clusterSize / 
+                                      ((double)clusterSize / 
                                                 NUM_HEARTBEATS_IN_SECOND)),
                                 HEARTBEAT_INTERVAL_MIN) ;
     return heartbeatInterval;
@@ -3626,12 +3141,11 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
   }
 
-  private void updateNodeHealthStatus(TaskTrackerStatus trackerStatus,
-                                      long timeStamp) {
+  private void updateNodeHealthStatus(TaskTrackerStatus trackerStatus) {
     TaskTrackerHealthStatus status = trackerStatus.getHealthStatus();
     synchronized (faultyTrackers) {
       faultyTrackers.setNodeHealthStatus(trackerStatus.getHost(), 
-          status.isNodeHealthy(), status.getHealthReport(), timeStamp);
+          status.isNodeHealthy(), status.getHealthReport());
     }
   }
     
@@ -3640,9 +3154,8 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
    */
   private synchronized boolean processHeartbeat(
                                  TaskTrackerStatus trackerStatus, 
-                                 boolean initialContact,
-                                 long timeStamp) throws UnknownHostException {
-
+                                 boolean initialContact) {
+    
     getInstrumentation().heartbeat();
 
     String trackerName = trackerStatus.getTrackerName();
@@ -3668,20 +3181,18 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
         }
 
         if (initialContact) {
-          // if this is lost tracker that came back now, and if it's blacklisted
+          // if this is lost tracker that came back now, and if it blacklisted
           // increment the count of blacklisted trackers in the cluster
           if (isBlacklisted(trackerName)) {
-            faultyTrackers.incrBlacklistedTrackers(1);
+            faultyTrackers.incrBlackListedTrackers(1);
           }
-          // This could now throw an UnknownHostException but only if the
-          // TaskTracker status itself has an invalid name
           addNewTracker(taskTracker);
         }
       }
     }
 
     updateTaskStatuses(trackerStatus);
-    updateNodeHealthStatus(trackerStatus, timeStamp);
+    updateNodeHealthStatus(trackerStatus);
     
     return true;
   }
@@ -3912,7 +3423,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   public synchronized JobID getNewJobId() throws IOException {
     return new JobID(getTrackerIdentifier(), nextJobId++);
   }
-
+  
   /**
    * JobTracker.submitJob() kicks off a new job.  
    *
@@ -3923,8 +3434,24 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
    */
   public JobStatus submitJob(JobID jobId, String jobSubmitDir, Credentials ts)
       throws IOException {
+    return submitJob(jobId, jobSubmitDir, null, ts, false);
+  }
+
+  /**
+   * JobTracker.submitJob() kicks off a new job.
+   * 
+   * Create a 'JobInProgress' object, which contains both JobProfile and
+   * JobStatus. Those two sub-objects are sometimes shipped outside of the
+   * JobTracker. But JobInProgress adds info that's useful for the JobTracker
+   * alone.
+   */
+  public JobStatus submitJob(JobID jobId, String jobSubmitDir,
+      UserGroupInformation ugi, Credentials ts, boolean recovered)
+      throws IOException {
     JobInfo jobInfo = null;
-    UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+    if (ugi == null) {
+      ugi = UserGroupInformation.getCurrentUser();
+    }
     synchronized (this) {
       if (jobs.containsKey(jobId)) {
         // job already running, don't start twice
@@ -3933,7 +3460,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       jobInfo = new JobInfo(jobId, new Text(ugi.getShortUserName()),
           new Path(jobSubmitDir));
     }
-    
     // Create the JobInProgress, do not lock the JobTracker since
     // we are about to copy job.xml from HDFS
     JobInProgress job = null;
@@ -3944,8 +3470,13 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
     
     synchronized (this) {
-      // check if queue is RUNNING
       String queue = job.getProfile().getQueueName();
+      if (!(queueManager.getQueues().contains(queue))) {
+        job.fail();
+        throw new IOException("Queue \"" + queue + "\" does not exist");
+      }
+
+      // check if queue is RUNNING
       if (!queueManager.isRunning(queue)) {
         throw new IOException("Queue \"" + queue + "\" is not running");
       }
@@ -3958,6 +3489,14 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
         throw ioe;
       }
 
+      try {
+        this.taskScheduler.checkJobSubmission(job);
+      } catch (IOException ioe){
+        LOG.error("Problem in submitting job " + jobId, ioe);
+        job.fail();
+        throw ioe;
+      }
+
       // Check the job if it cannot run in the cluster because of invalid memory
       // requirements.
       try {
@@ -3965,10 +3504,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       } catch (IOException ioe) {
         throw ioe;
       }
-      boolean recovered = true; // TODO: Once the Job recovery code is there,
-      // (MAPREDUCE-873) we
-      // must pass the "recovered" flag accurately.
-      // This is handled in the trunk/0.22
+
       if (!recovered) {
         // Store the information in a file so that the job can be recovered
         // later (if at all)
@@ -3978,20 +3514,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
         jobInfo.write(out);
         out.close();
       }
-      
-      // Submit the job
-      JobStatus status;
-      try {
-        status = addJob(jobId, job);
-      } catch (IOException ioe) {
-        LOG.info("Job " + jobId + " submission failed!", ioe);
-        status = job.getStatus();
-        status.setFailureInfo(StringUtils.stringifyException(ioe));
-        failJob(job);
-        throw ioe;
-      }
-      
-      return status;
+      return addJob(jobId, job);
     }
   }
 
@@ -4027,21 +3550,23 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
    * adding a job. This is the core job submission logic
    * @param jobId The id for the job submitted which needs to be added
    */
-  private synchronized JobStatus addJob(JobID jobId, JobInProgress job) 
-  throws IOException {
+  private synchronized JobStatus addJob(JobID jobId, JobInProgress job) {
     totalSubmissions++;
 
     synchronized (jobs) {
       synchronized (taskScheduler) {
         jobs.put(job.getProfile().getJobID(), job);
         for (JobInProgressListener listener : jobInProgressListeners) {
-          listener.jobAdded(job);
+          try {
+            listener.jobAdded(job);
+          } catch (IOException ioe) {
+            LOG.warn("Failed to add and so skipping the job : "
+                + job.getJobID() + ". Exception : " + ioe);
+          }
         }
       }
     }
     myInstrumentation.submitJob(job.getJobConf(), jobId);
-    job.getQueueMetrics().submitJob(job.getJobConf(), jobId);
-
     LOG.info("Job " + jobId + " added successfully for user '" 
              + job.getJobConf().getUser() + "' to queue '" 
              + job.getJobConf().getQueueName() + "'");
@@ -4071,7 +3596,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
         List<List<String>> trackerNames = taskTrackerNames();
         return new ClusterStatus(trackerNames.get(0),
             trackerNames.get(1),
-            trackerNames.get(2),
             TASKTRACKER_EXPIRY_INTERVAL,
             totalMaps,
             totalReduces,
@@ -4080,11 +3604,9 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
             state, getExcludedNodes().size()
             );
       } else {
-        return new ClusterStatus(
-            // active trackers include graylisted but not blacklisted ones:
-            taskTrackers.size() - getBlacklistedTrackerCount(),
+        return new ClusterStatus(taskTrackers.size() - 
             getBlacklistedTrackerCount(),
-            getGraylistedTrackerCount(),
+            getBlacklistedTrackerCount(),
             TASKTRACKER_EXPIRY_INTERVAL,
             totalMaps,
             totalReduces,
@@ -4102,8 +3624,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       totalMapTaskCapacity, totalReduceTaskCapacity,
       totalSubmissions,
       taskTrackers.size() - getBlacklistedTrackerCount(), 
-      getBlacklistedTrackerCount(), getGraylistedTrackerCount(),
-      getExcludedNodes().size()) ;
+      getBlacklistedTrackerCount(), getExcludedNodes().size()) ;
   }
 
   /**
@@ -4314,6 +3835,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
         // on the JobTracker since it isn't a synchronized method
         return job.getStatus();
       } else {
+        
         RetireJobInfo info = retireJobs.get(jobid);
         if (info != null) {
           return info.status;
@@ -4644,6 +4166,11 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     return new Path(getSystemDirectoryForJob(id)+"/" + JOB_INFO_FILE);
   }
 
+  //Get the job token file in system directory
+  Path getTokenFileForJob(JobID id) {
+    return new Path(getSystemDirectoryForJob(id)+"/" + JOB_TOKEN_FILE);
+  }
+  
   /**
    * Change the run-time priority of the given job.
    * 
@@ -4902,24 +4429,18 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   // Remove a tracker from the system
   private void removeTracker(TaskTracker tracker) {
     String trackerName = tracker.getTrackerName();
-    String hostName = JobInProgress.convertTrackerNameToHostName(trackerName);
     // Remove completely after marking the tasks as 'KILLED'
     lostTaskTracker(tracker);
-    // tracker is lost; if it is blacklisted and/or graylisted, remove
-    // it from the relevant count(s) of trackers in the cluster
+    // tracker is lost, and if it is blacklisted, remove 
+    // it from the count of blacklisted trackers in the cluster
     if (isBlacklisted(trackerName)) {
-      LOG.info("Removing " + hostName + " from blacklist");
-      faultyTrackers.decrBlacklistedTrackers(1);
-    }
-    if (isGraylisted(trackerName)) {
-      LOG.info("Removing " + hostName + " from graylist");
-      faultyTrackers.decrGraylistedTrackers(1);
+     faultyTrackers.decrBlackListedTrackers(1);
     }
     updateTaskTrackerStatus(trackerName, null);
     statistics.taskTrackerRemoved(trackerName);
     getInstrumentation().decTrackers(1);
   }
-
+  
   // main decommission
   synchronized void decommissionNodes(Set<String> hosts) 
   throws IOException {  
@@ -5060,10 +4581,10 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   @Override
   public void refreshServiceAcl() throws IOException {
     if (!conf.getBoolean(
-            ServiceAuthorizationManager.SERVICE_AUTHORIZATION_CONFIG, false)) {
+        CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, false)) {
       throw new AuthorizationException("Service Level Authorization not enabled!");
     }
-    ServiceAuthorizationManager.refresh(conf, new MapReducePolicyProvider());
+    this.interTrackerServer.refreshServiceAcl(conf, new MapReducePolicyProvider());
   }
 
   private void initializeTaskMemoryRelatedConfig() {
@@ -5121,6 +4642,14 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     LOG.info("Refreshing superuser proxy groups mapping ");
     
     ProxyUsers.refreshSuperUserGroupsConfiguration();
+  }
+  
+  @Override
+  public String[] getGroupsForUser(String user) throws IOException {
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Getting groups for user " + user);
+    }
+    return UserGroupInformation.createRemoteUser(user).getGroupNames();
   }
     
   @Override
@@ -5194,23 +4723,13 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     }
 
   }
-
-  // used by the web UI (machines.jsp)
-  public String getReasonsForBlacklisting(String host) {
-    return getReasonsForBlackOrGraylisting(host, false);
-  }
-
-  public String getReasonsForGraylisting(String host) {
-    return getReasonsForBlackOrGraylisting(host, true);
-  }
-
-  synchronized private String getReasonsForBlackOrGraylisting(String host,
-                                                              boolean gray) {
-    FaultInfo fi = faultyTrackers.getFaultInfo(host, gray);
+  
+  synchronized String getReasonsForBlacklisting(String host) {
+    FaultInfo fi = faultyTrackers.getFaultInfo(host, false);
     if (fi == null) {
       return "";
     }
-    return fi.getTrackerBlackOrGraylistReport(gray);
+    return fi.getTrackerFaultReport();
   }
 
   /** Test Methods */
@@ -5219,9 +4738,18 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     if (fi == null) {
       return new HashSet<ReasonForBlackListing>();
     }
-    return fi.getReasonForBlacklisting(false);
+    return fi.getReasonforblacklisting();
   }
 
+  /* 
+   * This method is synchronized to make sure that the locking order 
+   * "faultyTrackers.potentiallyFaultyTrackers lock followed by taskTrackers 
+   * lock" is under JobTracker lock to avoid deadlocks.
+   */
+  synchronized void incrementFaults(String hostName) {
+    faultyTrackers.incrementFaults(hostName);
+  }
+  
   /**
    * 
    * @return true if delegation token operation is allowed
@@ -5293,7 +4821,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
             + getBlacklistedTrackerCount());
     map.put("alive", metrics.getTaskTrackerCount());
     map.put("blacklisted", getBlacklistedTrackerCount());
-    map.put("graylisted", getGraylistedTrackerCount());
     map.put("slots", new InfoMap() {{
       put("map_slots", metrics.getMapSlotCapacity());
       put("map_slots_used", metrics.getOccupiedMapSlots());
@@ -5325,6 +4852,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
           put("reduce_slots_used", redSlots - tts.getAvailableReduceSlots());
         }});
         put("failures", tts.getFailures());
+        put("dir_failures", tts.getDirFailures());
       }});
     }
     return info;
@@ -5333,11 +4861,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   @Override
   public String getBlacklistedNodesInfoJson() {
     return JSON.toString(getUnhealthyNodesInfo(blacklistedTaskTrackers()));
-  }
-
-  @Override
-  public String getGraylistedNodesInfoJson() {
-    return JSON.toString(getUnhealthyNodesInfo(graylistedTaskTrackers()));
   }
 
   List<InfoMap> getUnhealthyNodesInfo(Collection<TaskTrackerStatus> list) {
@@ -5362,7 +4885,6 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     try {
       for (final JobQueueInfo q : getQueues()) {
         map.put(q.getQueueName(), new InfoMap() {{
-          put("state", q.getQueueState());
           put("info", q.getSchedulingInfo());
         }});
       }

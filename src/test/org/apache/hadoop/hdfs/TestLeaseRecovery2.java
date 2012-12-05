@@ -47,7 +47,7 @@ public class TestLeaseRecovery2 extends junit.framework.TestCase {
   private static byte[] buffer = new byte[FILE_SIZE];
   private final Configuration conf = new Configuration();
   private final int bufferSize = conf.getInt("io.file.buffer.size", 4096);
-  
+
   static private String fakeUsername = "fakeUser1";
   static private String fakeGroup = "supergroup";
 
@@ -98,12 +98,12 @@ public class TestLeaseRecovery2 extends junit.framework.TestCase {
       // test recoverlease from the same client
       size = AppendTestUtil.nextInt(FILE_SIZE);
       filepath = createFile(dfs, size, false);
-      
+
       // create another file using the same client
       Path filepath1 = new Path("/foo" + AppendTestUtil.nextInt());
       FSDataOutputStream stm = dfs.create(filepath1, true,
           bufferSize, REPLICATION_NUM, BLOCK_SIZE);
-      
+
       // recover the first file
       recoverLease(filepath, dfs);
       verifyFile(dfs, filepath, actual, size);
@@ -121,21 +121,21 @@ public class TestLeaseRecovery2 extends junit.framework.TestCase {
       }
     }
   }
-  
-  private void recoverLease(Path filepath, DistributedFileSystem dfs2) throws Exception {
+
+  private void recoverLease(Path filepath, DistributedFileSystem dfs2)
+  throws Exception {
     if (dfs2==null) {
       UserGroupInformation ugi = 
         UserGroupInformation.createUserForTesting(fakeUsername, 
-                                                  new String [] { fakeGroup});
-      dfs2 = (DistributedFileSystem) DFSTestUtil.getFileSystemAs(ugi, conf);
+            new String [] { fakeGroup });
+      dfs2 = (DistributedFileSystem)DFSTestUtil.getFileSystemAs(ugi, conf);
     }
-    
     while (!dfs2.recoverLease(filepath)) {
       AppendTestUtil.LOG.info("sleep " + 5000 + "ms");
       Thread.sleep(5000);
     }
   }
-  
+
   // try to re-open the file before closing the previous handle. This
   // should fail but will trigger lease recovery.
   private Path createFile(DistributedFileSystem dfs, int size,
@@ -161,12 +161,12 @@ public class TestLeaseRecovery2 extends junit.framework.TestCase {
     }
     return filepath;
   }
-  
-  private void recoverLeaseUsingCreate(Path filepath)
-  throws IOException, InterruptedException {
+
+  private void recoverLeaseUsingCreate(Path filepath) 
+      throws IOException, InterruptedException {
     UserGroupInformation ugi = 
       UserGroupInformation.createUserForTesting(fakeUsername, 
-                                                new String [] { fakeGroup});
+          new String [] { fakeGroup});
     FileSystem dfs2 = DFSTestUtil.getFileSystemAs(ugi, conf);
 
     boolean done = false;
@@ -195,9 +195,8 @@ public class TestLeaseRecovery2 extends junit.framework.TestCase {
       }
     }
     assertTrue(done);
-
   }
-  
+
   private void verifyFile(FileSystem dfs, Path filepath, byte[] actual,
       int size) throws IOException {
     AppendTestUtil.LOG.info("Lease for file " +  filepath + " is recovered. "
@@ -205,9 +204,9 @@ public class TestLeaseRecovery2 extends junit.framework.TestCase {
 
     // verify that file-size matches
     assertTrue("File should be " + size + " bytes, but is actually " +
-               " found to be " + dfs.getFileStatus(filepath).getLen() +
-               " bytes",
-               dfs.getFileStatus(filepath).getLen() == size);
+        " found to be " + dfs.getFileStatus(filepath).getLen() +
+        " bytes",
+        dfs.getFileStatus(filepath).getLen() == size);
 
     // verify that there is enough data to read.
     System.out.println("File size is good. Now validating sizes from datanodes...");

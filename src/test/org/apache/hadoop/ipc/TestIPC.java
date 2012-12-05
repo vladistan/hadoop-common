@@ -27,27 +27,43 @@ import org.apache.hadoop.net.NetUtils;
 
 import java.util.Random;
 import java.io.DataInput;
+import java.io.DataOutput;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
+import java.net.Socket;
 
-import junit.framework.TestCase;
+import javax.net.SocketFactory;
+
+import org.junit.Test;
+import org.mockito.Mockito;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
+import static org.junit.Assert.*;
+import static org.mockito.Mockito.*;
 
 import org.apache.hadoop.conf.Configuration;
 
 /** Unit tests for IPC. */
-public class TestIPC extends TestCase {
+public class TestIPC {
   public static final Log LOG =
     LogFactory.getLog(TestIPC.class);
   
   final private static Configuration conf = new Configuration();
   final static private int PING_INTERVAL = 1000;
   final static private int MIN_SLEEP_TIME = 1000;
- 
+  
+
+  /**
+   * Flag used to turn off the fault injection behavior
+   * of the various writables.
+   **/
+  static boolean WRITABLE_FAULTS_ENABLED = true;
+  static int WRITABLE_FAULTS_SLEEP = 0;
+
   static {
     Client.setPingInterval(conf, PING_INTERVAL);
   }
-  public TestIPC(String name) { super(name); }
 
   private static final Random RANDOM = new Random();
 
@@ -55,23 +71,38 @@ public class TestIPC extends TestCase {
 
   private static class TestServer extends Server {
     private boolean sleep;
+    private Class<? extends Writable> responseClass;
 
-    public TestServer(int handlerCount, boolean sleep) 
+    public TestServer(int handlerCount, boolean sleep) throws IOException {
+      this(handlerCount, sleep, LongWritable.class, null);
+    }
+    
+    public TestServer(int handlerCount, boolean sleep,
+        Class<? extends Writable> paramClass,
+        Class<? extends Writable> responseClass) 
       throws IOException {
-      super(ADDRESS, 0, LongWritable.class, handlerCount, conf);
+      super(ADDRESS, 0, paramClass, handlerCount, conf);
       this.sleep = sleep;
+      this.responseClass = responseClass;
     }
 
     @Override
     public Writable call(Class<?> protocol, Writable param, long receiveTime)
         throws IOException {
       if (sleep) {
-        // sleep a bit
         try {
-          Thread.sleep(RANDOM.nextInt(PING_INTERVAL) + MIN_SLEEP_TIME);
+          Thread.sleep(RANDOM.nextInt(PING_INTERVAL) + MIN_SLEEP_TIME);      // sleep a bit
         } catch (InterruptedException e) {}
       }
-      return param;                               // echo param as result
+      if (responseClass != null) {
+        try {
+          return responseClass.newInstance();
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }  
+      } else {
+        return param;                               // echo param as result
+      }
     }
   }
 
@@ -92,7 +123,7 @@ public class TestIPC extends TestCase {
         try {
           LongWritable param = new LongWritable(RANDOM.nextLong());
           LongWritable value =
-            (LongWritable)client.call(param, server, null, null, 0, conf);
+            (LongWritable)client.call(param, server, null, null, 0);
           if (!param.equals(value)) {
             LOG.fatal("Call failed!");
             failed = true;
@@ -141,8 +172,10 @@ public class TestIPC extends TestCase {
     }
   }
 
+  @Test
   public void testSerial() throws Exception {
-    testSerial(3, false, 2, 5, 10);
+    testSerial(3, false, 2, 5, 100);
+    testSerial(3, true, 2, 5, 10);
   }
 
   public void testSerial(int handlerCount, boolean handlerSleep, 
@@ -172,6 +205,7 @@ public class TestIPC extends TestCase {
     server.stop();
   }
 	
+  @Test
   public void testParallel() throws Exception {
     testParallel(10, false, 2, 4, 2, 4, 100);
   }
@@ -214,6 +248,7 @@ public class TestIPC extends TestCase {
     }
   }
 	
+  @Test
   public void testStandAloneClient() throws Exception {
     testParallel(10, false, 2, 4, 2, 4, 100);
     Client client = new Client(LongWritable.class, conf);
@@ -235,6 +270,279 @@ public class TestIPC extends TestCase {
     }
   }
 
+  static void maybeThrowIOE() throws IOException {
+    if (WRITABLE_FAULTS_ENABLED) {
+      maybeSleep();
+      throw new IOException("Injected fault");
+    }
+  }
+
+  static void maybeThrowRTE() {
+    if (WRITABLE_FAULTS_ENABLED) {
+      maybeSleep();
+      throw new RuntimeException("Injected fault");
+    }
+  }
+
+  private static void maybeSleep() {
+    if (WRITABLE_FAULTS_SLEEP > 0) {
+      try {
+        Thread.sleep(WRITABLE_FAULTS_SLEEP);
+      } catch (InterruptedException ie) {
+      }
+    }
+  }
+
+  @SuppressWarnings("unused")
+  private static class IOEOnReadWritable extends LongWritable {
+    public IOEOnReadWritable() {}
+    public void readFields(DataInput in) throws IOException {
+      super.readFields(in);
+      maybeThrowIOE();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  private static class RTEOnReadWritable extends LongWritable {
+    public RTEOnReadWritable() {}
+    
+    public void readFields(DataInput in) throws IOException {
+      super.readFields(in);
+      maybeThrowRTE();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  private static class IOEOnWriteWritable extends LongWritable {
+    public IOEOnWriteWritable() {}
+
+    @Override
+    public void write(DataOutput out) throws IOException {
+      super.write(out);
+      maybeThrowIOE();
+    }
+  }
+
+  @SuppressWarnings("unused")
+  private static class RTEOnWriteWritable extends LongWritable {
+    public RTEOnWriteWritable() {}
+
+    @Override
+    public void write(DataOutput out) throws IOException {
+      super.write(out);
+      maybeThrowRTE();
+    }
+  }
+  
+  /**
+   * Generic test case for exceptions thrown at some point in the IPC
+   * process.
+   * 
+   * @param clientParamClass - client writes this writable for parameter
+   * @param serverParamClass - server reads this writable for parameter
+   * @param serverResponseClass - server writes this writable for response
+   * @param clientResponseClass - client reads this writable for response
+   */
+  private void doErrorTest(
+      Class<? extends LongWritable> clientParamClass,
+      Class<? extends LongWritable> serverParamClass,
+      Class<? extends LongWritable> serverResponseClass,
+      Class<? extends LongWritable> clientResponseClass) throws Exception {
+    // start server
+    Server server = new TestServer(1, false,
+        serverParamClass, serverResponseClass);
+    InetSocketAddress addr = NetUtils.getConnectAddress(server);
+    server.start();
+
+    // start client
+    WRITABLE_FAULTS_ENABLED = true;
+    Client client = new Client(clientResponseClass, conf);
+    try {
+      LongWritable param = clientParamClass.newInstance();
+
+      try {
+        client.call(param, addr, null, null, 0, conf);
+        fail("Expected an exception to have been thrown");
+      } catch (Throwable t) {
+        assertExceptionContains(t, "Injected fault");
+      }
+      
+      // Doing a second call with faults disabled should return fine --
+      // ie the internal state of the client or server should not be broken
+      // by the failed call
+      WRITABLE_FAULTS_ENABLED = false;
+      client.call(param, addr, null, null, 0, conf);
+      
+    } finally {
+      server.stop();
+    }
+  }
+
+  @Test
+  public void testIOEOnClientWriteParam() throws Exception {
+    doErrorTest(IOEOnWriteWritable.class,
+        LongWritable.class,
+        LongWritable.class,
+        LongWritable.class);
+  }
+  
+  @Test
+  public void testRTEOnClientWriteParam() throws Exception {
+    doErrorTest(RTEOnWriteWritable.class,
+        LongWritable.class,
+        LongWritable.class,
+        LongWritable.class);
+  }
+
+  @Test
+  public void testIOEOnServerReadParam() throws Exception {
+    doErrorTest(LongWritable.class,
+        IOEOnReadWritable.class,
+        LongWritable.class,
+        LongWritable.class);
+  }
+  
+  @Test
+  public void testRTEOnServerReadParam() throws Exception {
+    doErrorTest(LongWritable.class,
+        RTEOnReadWritable.class,
+        LongWritable.class,
+        LongWritable.class);
+  }
+
+  
+  @Test
+  public void testIOEOnServerWriteResponse() throws Exception {
+    doErrorTest(LongWritable.class,
+        LongWritable.class,
+        IOEOnWriteWritable.class,
+        LongWritable.class);
+  }
+  
+  @Test
+  public void testRTEOnServerWriteResponse() throws Exception {
+    doErrorTest(LongWritable.class,
+        LongWritable.class,
+        RTEOnWriteWritable.class,
+        LongWritable.class);
+  }
+  
+  @Test
+  public void testIOEOnClientReadResponse() throws Exception {
+    doErrorTest(LongWritable.class,
+        LongWritable.class,
+        LongWritable.class,
+        IOEOnReadWritable.class);
+  }
+  
+  @Test
+  public void testRTEOnClientReadResponse() throws Exception {
+    doErrorTest(LongWritable.class,
+        LongWritable.class,
+        LongWritable.class,
+        RTEOnReadWritable.class);
+  }
+
+  /**
+   * Test case that fails a write, but only after taking enough time
+   * that a ping should have been sent. This is a reproducer for a
+   * deadlock seen in one iteration of HADOOP-6762.
+   */
+  @Test
+  public void testIOEOnWriteAfterPingClient() throws Exception {
+    // start server
+    Client.setPingInterval(conf, 100);
+
+    try {
+      WRITABLE_FAULTS_SLEEP = 1000;
+      doErrorTest(IOEOnWriteWritable.class,
+          LongWritable.class,
+          LongWritable.class,
+          LongWritable.class);
+    } finally {
+      WRITABLE_FAULTS_SLEEP = 0;
+    }
+  }
+
+  
+  private static void assertExceptionContains(
+      Throwable t, String substring) {
+    String msg = StringUtils.stringifyException(t);
+    assertTrue("Exception should contain substring '" + substring + "':\n" +
+        msg, msg.contains(substring));
+    LOG.info("Got expected exception", t);
+  }
+
+
+  /**
+   * Test that, if the socket factory throws an IOE, it properly propagates
+   * to the client.
+   */
+  @Test
+  public void testSocketFactoryException() throws Exception {
+    SocketFactory mockFactory = mock(SocketFactory.class);
+    doThrow(new IOException("Injected fault")).when(mockFactory).createSocket();
+    Client client = new Client(LongWritable.class, conf, mockFactory);
+    
+    InetSocketAddress address = new InetSocketAddress("127.0.0.1", 10);
+    try {
+      client.call(new LongWritable(RANDOM.nextLong()),
+              address, null, null, 0);
+      fail("Expected an exception to have been thrown");
+    } catch (IOException e) {
+      assertTrue(e.getMessage().contains("Injected fault"));
+    }
+  }
+
+  /**
+   * Test that, if a RuntimeException is thrown after creating a socket
+   * but before successfully connecting to the IPC server, that the
+   * failure is handled properly. This is a regression test for
+   * HADOOP-7428.
+   */
+  @Test
+  public void testRTEDuringConnectionSetup() throws Exception {
+    // Set up a socket factory which returns sockets which
+    // throw an RTE when setSoTimeout is called.
+    SocketFactory spyFactory = spy(NetUtils.getDefaultSocketFactory(conf));
+    Mockito.doAnswer(new Answer<Socket>() {
+      @Override
+      public Socket answer(InvocationOnMock invocation) throws Throwable {
+        Socket s = spy((Socket)invocation.callRealMethod());
+        doThrow(new RuntimeException("Injected fault")).when(s)
+          .setSoTimeout(anyInt());
+        return s;
+      }
+    }).when(spyFactory).createSocket();
+      
+    Server server = new TestServer(1, true);
+    server.start();
+    try {
+      // Call should fail due to injected exception.
+      InetSocketAddress address = NetUtils.getConnectAddress(server);
+      Client client = new Client(LongWritable.class, conf, spyFactory);
+      try {
+        client.call(new LongWritable(RANDOM.nextLong()),
+                address, null, null, 0, conf);
+        fail("Expected an exception to have been thrown");
+      } catch (Exception e) {
+        LOG.info("caught expected exception", e);
+        assertTrue(StringUtils.stringifyException(e).contains(
+            "Injected fault"));
+      }
+      // Resetting to the normal socket behavior should succeed
+      // (i.e. it should not have cached a half-constructed connection)
+  
+      Mockito.reset(spyFactory);
+      client.call(new LongWritable(RANDOM.nextLong()),
+          address, null, null, 0, conf);
+    } finally {
+      server.stop();
+    }
+  }
+  
+
+  @Test
   public void testIpcTimeout() throws Exception {
     // start server
     Server server = new TestServer(1, true);
@@ -249,54 +557,20 @@ public class TestIPC extends TestCase {
               addr, null, null, MIN_SLEEP_TIME/2);
       fail("Expected an exception to have been thrown");
     } catch (SocketTimeoutException e) {
-     LOG.info("Get a SocketTimeoutException ", e);
+      LOG.info("Get a SocketTimeoutException ", e);
     }
     // set timeout to be bigger than 3*ping interval
     client.call(new LongWritable(RANDOM.nextLong()),
         addr, null, null, 3*PING_INTERVAL+MIN_SLEEP_TIME);
   }
+  
 
-  private static class LongErrorWritable extends LongWritable {
-    private final static String ERR_MSG =
-      "Come across an exception while reading";
-
-    LongErrorWritable() {}
-
-    LongErrorWritable(long longValue) {
-      super(longValue);
-    }
-
-    public void readFields(DataInput in) throws IOException {
-      super.readFields(in);
-      throw new IOException(ERR_MSG);
-    }
-  }
-
-  public void testErrorClient() throws Exception {
-    // start server
-    Server server = new TestServer(1, false);
-    InetSocketAddress addr = NetUtils.getConnectAddress(server);
-    server.start();
-
-    // start client
-    Client client = new Client(LongErrorWritable.class, conf);
-    try {
-      client.call(new LongErrorWritable(RANDOM.nextLong()),
-          addr, null, null, 0, conf);
-      fail("Expected an exception to have been thrown");
-    } catch (IOException e) {
-      // check error
-      Throwable cause = e.getCause();
-      assertTrue(cause instanceof IOException);
-      assertEquals(LongErrorWritable.ERR_MSG, cause.getMessage());
-    }
-  }
 
   public static void main(String[] args) throws Exception {
 
-    //new TestIPC("test").testSerial(5, false, 2, 10, 1000);
+    //new TestIPC().testSerial(5, false, 2, 10, 1000);
 
-    new TestIPC("test").testParallel(10, false, 2, 4, 2, 4, 1000);
+    new TestIPC().testParallel(10, false, 2, 4, 2, 4, 1000);
 
   }
 

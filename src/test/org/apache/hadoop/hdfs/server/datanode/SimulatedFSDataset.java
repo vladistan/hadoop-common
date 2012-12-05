@@ -36,7 +36,7 @@ import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
 import org.apache.hadoop.hdfs.protocol.FSConstants;
 import org.apache.hadoop.hdfs.server.datanode.metrics.FSDatasetMBean;
 import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryInfo;
-import org.apache.hadoop.metrics2.util.MBeans;
+import org.apache.hadoop.metrics.util.MBeanUtil;
 import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 
@@ -200,6 +200,10 @@ public class SimulatedFSDataset  implements FSConstants, FSDatasetInterface, Con
       return used;
     }
     
+    int getNumFailedVolumes() {
+      return 0;
+    }
+
     synchronized boolean alloc(long amount) {
       if (getFree() >= amount) {
         used += amount;
@@ -308,6 +312,21 @@ public class SimulatedFSDataset  implements FSConstants, FSDatasetInterface, Con
     }
     return blockTable;
   }
+  
+  @Override
+  public void requestAsyncBlockReport() {
+  }
+
+  @Override
+  public boolean isAsyncBlockReportReady() {
+    return true;
+  }
+
+  @Override
+  public Block[] retrieveAsyncBlockReport() {
+    return getBlockReport();
+  }
+
 
   public long getCapacity() throws IOException {
     return storage.getCapacity();
@@ -319,6 +338,11 @@ public class SimulatedFSDataset  implements FSConstants, FSDatasetInterface, Con
 
   public long getRemaining() throws IOException {
     return storage.getFree();
+  }
+
+  @Override // FSDatasetMBean
+  public int getNumFailedVolumes() {
+    return storage.getNumFailedVolumes();
   }
 
   public synchronized long getLength(Block b) throws IOException {
@@ -664,7 +688,7 @@ public class SimulatedFSDataset  implements FSConstants, FSDatasetInterface, Con
 
     try {
       bean = new StandardMBean(this,FSDatasetMBean.class);
-      mbeanName = MBeans.register("DataNode",
+      mbeanName = MBeanUtil.registerMBean("DataNode",
           "FSDatasetState-" + storageId, bean);
     } catch (NotCompliantMBeanException e) {
       e.printStackTrace();
@@ -675,20 +699,15 @@ public class SimulatedFSDataset  implements FSConstants, FSDatasetInterface, Con
 
   public void shutdown() {
     if (mbeanName != null)
-      MBeans.unregister(mbeanName);
+      MBeanUtil.unregisterMBean(mbeanName);
   }
 
   public String getStorageInfo() {
     return "Simulated FSDataset-" + storageId;
   }
   
-  public boolean hasEnoughResource() {
+  public boolean hasEnoughResources() {
     return true;
-  }
-
-  @Override
-  public Block[] getBlocksBeingWrittenReport() {
-    return null;
   }
 
   @Override
@@ -696,6 +715,11 @@ public class SimulatedFSDataset  implements FSConstants, FSDatasetInterface, Con
       throws IOException {
     Block stored = getStoredBlock(blockId);
     return new BlockRecoveryInfo(stored, false);
+  }
+
+  @Override
+  public Block[] getBlocksBeingWrittenReport() {
+    return new Block[0];
   }
 
   @Override

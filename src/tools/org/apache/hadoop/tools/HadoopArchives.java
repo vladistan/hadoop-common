@@ -62,10 +62,10 @@ import org.apache.hadoop.mapred.Reducer;
 import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.mapred.SequenceFileRecordReader;
 import org.apache.hadoop.mapred.lib.NullOutputFormat;
-import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.JobSubmissionFiles;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+
 
 
 /**
@@ -87,6 +87,7 @@ public class HadoopArchives implements Tool {
   static final String TOTAL_SIZE_LABEL = NAME + ".total.size";
   static final String DST_HAR_LABEL = NAME + ".archive.name";
   static final String SRC_PARENT_LABEL = NAME + ".parent.path";
+
   /** the size of the blocks that will be created when archiving **/
   static final String HAR_BLOCKSIZE_LABEL = NAME + ".block.size";
   /**the size of the part files that will be created when archiving **/
@@ -366,18 +367,16 @@ public class HadoopArchives implements Tool {
         }
         else {
           Path parent = p.getParent();
-          if (null != parent) {
-            if (allpaths.containsKey(parent.toString())) {
-              HashSet<String> children = allpaths.get(parent.toString());
-              children.add(p.getName());
-            } 
-            else {
-              HashSet<String> children = new HashSet<String>();
-              children.add(p.getName());
-              allpaths.put(parent.toString(), children);
-            }
-            parents.add(parent);
+          if (allpaths.containsKey(parent.toString())) {
+            HashSet<String> children = allpaths.get(parent.toString());
+            children.add(p.getName());
           }
+          else {
+            HashSet<String> children = new HashSet<String>();
+            children.add(p.getName());
+            allpaths.put(parent.toString(), children);
+          }
+          parents.add(parent);
         }
       }
       justDirs = parents;

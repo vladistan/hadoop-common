@@ -83,8 +83,8 @@ public interface FSConstants {
   // Version is reflected in the data storage file.
   // Versions are negative.
   // Decrement LAYOUT_VERSION to define a new version.
-  public static final int LAYOUT_VERSION = -32;
+  public static final int LAYOUT_VERSION = -19;
   // Current version: 
-  // -32: to handle editlog opcode conflicts with 0.20.203 during upgrades and
-  // to disallow upgrade to release 0.21.
+  // -19: added new OP_[GET|RENEW|CANCEL]_DELEGATION_TOKEN and
+  // OP_UPDATE_MASTER_KEY.
 }

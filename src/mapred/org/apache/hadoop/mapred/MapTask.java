@@ -23,7 +23,6 @@ import static org.apache.hadoop.mapred.Task.Counter.COMBINE_OUTPUT_RECORDS;
 import static org.apache.hadoop.mapred.Task.Counter.MAP_INPUT_BYTES;
 import static org.apache.hadoop.mapred.Task.Counter.MAP_INPUT_RECORDS;
 import static org.apache.hadoop.mapred.Task.Counter.MAP_OUTPUT_BYTES;
-import static org.apache.hadoop.mapred.Task.Counter.MAP_OUTPUT_MATERIALIZED_BYTES;
 import static org.apache.hadoop.mapred.Task.Counter.MAP_OUTPUT_RECORDS;
 
 import java.io.DataInput;
@@ -44,7 +43,6 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.FileSystem.Statistics;
 import org.apache.hadoop.fs.LocalDirAllocator;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
@@ -62,7 +60,6 @@ import org.apache.hadoop.io.serializer.Serializer;
 import org.apache.hadoop.mapred.IFile.Writer;
 import org.apache.hadoop.mapred.Merger.Segment;
 import org.apache.hadoop.mapred.SortedRanges.SkipRangeIterator;
-import org.apache.hadoop.mapred.FileInputFormat;
 import org.apache.hadoop.mapreduce.split.JobSplit;
 import org.apache.hadoop.mapreduce.split.JobSplit.SplitMetaInfo;
 import org.apache.hadoop.mapreduce.split.JobSplit.TaskSplitIndex;
@@ -161,8 +158,8 @@ class MapTask extends Task {
   }
 
   /**
-   * This class wraps the user's record reader to update the counters and
-   * progress as records are read.
+   * This class wraps the user's record reader to update the counters and progress
+   * as records are read.
    * @param <K>
    * @param <V>
    */
@@ -171,36 +168,16 @@ class MapTask extends Task {
     private RecordReader<K,V> rawIn;
     private Counters.Counter inputByteCounter;
     private Counters.Counter inputRecordCounter;
-    private Counters.Counter fileInputByteCounter;
-    private InputSplit split;
     private TaskReporter reporter;
     private long beforePos = -1;
     private long afterPos = -1;
-    private long bytesInPrev = -1;
-    private long bytesInCurr = -1;
-    private final Statistics fsStats;
 
-    TrackedRecordReader(InputSplit split, JobConf job, TaskReporter reporter)
-        throws IOException {
+    TrackedRecordReader(RecordReader<K,V> raw, TaskReporter reporter) 
+      throws IOException{
+      rawIn = raw;
       inputRecordCounter = reporter.getCounter(MAP_INPUT_RECORDS);
       inputByteCounter = reporter.getCounter(MAP_INPUT_BYTES);
-      fileInputByteCounter = reporter
-          .getCounter(FileInputFormat.Counter.BYTES_READ);
-
-      Statistics matchedStats = null;
-      if (split instanceof FileSplit) {
-        matchedStats = getFsStatistics(((FileSplit) split).getPath(), job);
-      } 
-      fsStats = matchedStats;
-      
-      bytesInPrev = getInputBytes(fsStats);
-      rawIn = job.getInputFormat().getRecordReader(split, job, reporter);
-      bytesInCurr = getInputBytes(fsStats);
-      fileInputByteCounter.increment(bytesInCurr - bytesInPrev);
-      
       this.reporter = reporter;
-      this.split = split;
-      conf = job;
     }
 
     public K createKey() {
@@ -213,7 +190,7 @@ class MapTask extends Task {
      
     public synchronized boolean next(K key, V value)
     throws IOException {
-      boolean ret = moveToNext(key, value);      
+      boolean ret = moveToNext(key, value);
       if (ret) {
         incrCounters();
       }
@@ -223,48 +200,24 @@ class MapTask extends Task {
     protected void incrCounters() {
       inputRecordCounter.increment(1);
       inputByteCounter.increment(afterPos - beforePos);
-      fileInputByteCounter.increment(bytesInCurr - bytesInPrev);
     }
      
     protected synchronized boolean moveToNext(K key, V value)
       throws IOException {
-      boolean ret = false;
-      try {
-        reporter.setProgress(getProgress());
-        beforePos = getPos();
-        bytesInPrev = getInputBytes(fsStats);
-        ret = rawIn.next(key, value);
-        afterPos = getPos();
-        bytesInCurr = getInputBytes(fsStats);
-      } catch (IOException ioe) {
-        if (split instanceof FileSplit) {
-          LOG.error("IO error in map input file " + conf.get("map.input.file"));
-          throw new IOException("IO error in map input file "
-              + conf.get("map.input.file"), ioe);
-        }
-        throw ioe;
-      }
+      beforePos = getPos();
+      boolean ret = rawIn.next(key, value);
+      afterPos = getPos();
+      reporter.setProgress(getProgress());
       return ret;
     }
-
+    
     public long getPos() throws IOException { return rawIn.getPos(); }
-    
-    public void close() throws IOException {
-      bytesInPrev = getInputBytes(fsStats);
-      rawIn.close(); 
-      bytesInCurr = getInputBytes(fsStats);
-      fileInputByteCounter.increment(bytesInCurr - bytesInPrev);
-    }
-    
+    public void close() throws IOException { rawIn.close(); }
     public float getProgress() throws IOException {
       return rawIn.getProgress();
     }
     TaskReporter getTaskReporter() {
       return reporter;
-    }
-    
-    private long getInputBytes(Statistics stats) {
-      return stats == null ? 0 : stats.getBytesRead();
     }
   }
 
@@ -280,13 +233,13 @@ class MapTask extends Task {
     private Counters.Counter skipRecCounter;
     private long recIndex = -1;
     
-    SkippingRecordReader(InputSplit split, TaskUmbilicalProtocol umbilical,
-                         TaskReporter reporter) throws IOException {
-      super(split, conf, reporter);
+    SkippingRecordReader(RecordReader<K,V> raw, TaskUmbilicalProtocol umbilical,
+                         TaskReporter reporter) throws IOException{
+      super(raw, reporter);
       this.umbilical = umbilical;
       this.skipRecCounter = reporter.getCounter(Counter.MAP_SKIPPED_RECORDS);
       this.toWriteSkipRecs = toWriteSkipRecs() &&  
-          SkipBadRecords.getSkipOutputPath(conf)!=null;
+        SkipBadRecords.getSkipOutputPath(conf)!=null;
       skipIt = getSkipRanges().skipRangeIterator();
     }
     
@@ -415,9 +368,11 @@ class MapTask extends Task {
     updateJobWithSplit(job, inputSplit);
     reporter.setInputSplit(inputSplit);
 
+    RecordReader<INKEY,INVALUE> rawIn =                  // open input
+      job.getInputFormat().getRecordReader(inputSplit, job, reporter);
     RecordReader<INKEY,INVALUE> in = isSkipping() ? 
-        new SkippingRecordReader<INKEY,INVALUE>(inputSplit, umbilical, reporter) :
-        new TrackedRecordReader<INKEY,INVALUE>(inputSplit, job, reporter);
+        new SkippingRecordReader<INKEY,INVALUE>(rawIn, umbilical, reporter) :
+        new TrackedRecordReader<INKEY,INVALUE>(rawIn, reporter);
     job.setBoolean("mapred.skip.on", isSkipping());
 
 
@@ -460,43 +415,18 @@ class MapTask extends Task {
     extends org.apache.hadoop.mapreduce.RecordReader<K,V> {
     private final org.apache.hadoop.mapreduce.RecordReader<K,V> real;
     private final org.apache.hadoop.mapreduce.Counter inputRecordCounter;
-    private final org.apache.hadoop.mapreduce.Counter fileInputByteCounter;
     private final TaskReporter reporter;
-    private org.apache.hadoop.mapreduce.InputSplit inputSplit;
-    private final JobConf job;
-    private final Statistics fsStats;
     
-    NewTrackingRecordReader(org.apache.hadoop.mapreduce.InputSplit split,
-        org.apache.hadoop.mapreduce.InputFormat inputFormat,
-        TaskReporter reporter, JobConf job,
-        org.apache.hadoop.mapreduce.TaskAttemptContext taskContext)
-        throws IOException, InterruptedException {
+    NewTrackingRecordReader(org.apache.hadoop.mapreduce.RecordReader<K,V> real,
+                            TaskReporter reporter) {
+      this.real = real;
       this.reporter = reporter;
-      this.inputSplit = split;
-      this.job = job;
       this.inputRecordCounter = reporter.getCounter(MAP_INPUT_RECORDS);
-      this.fileInputByteCounter = reporter
-          .getCounter(org.apache.hadoop.mapreduce.lib.input.FileInputFormat.Counter.BYTES_READ);
-
-      Statistics matchedStats = null;
-      if (split instanceof org.apache.hadoop.mapreduce.lib.input.FileSplit) {
-        matchedStats = getFsStatistics(((org.apache.hadoop.mapreduce.lib.input.FileSplit) split)
-            .getPath(), job);
-      } 
-      fsStats = matchedStats;
-	  
-      long bytesInPrev = getInputBytes(fsStats);
-      this.real = inputFormat.createRecordReader(split, taskContext);
-      long bytesInCurr = getInputBytes(fsStats);
-      fileInputByteCounter.increment(bytesInCurr - bytesInPrev);
     }
 
     @Override
     public void close() throws IOException {
-      long bytesInPrev = getInputBytes(fsStats);
       real.close();
-      long bytesInCurr = getInputBytes(fsStats);
-      fileInputByteCounter.increment(bytesInCurr - bytesInPrev);
     }
 
     @Override
@@ -518,40 +448,17 @@ class MapTask extends Task {
     public void initialize(org.apache.hadoop.mapreduce.InputSplit split,
                            org.apache.hadoop.mapreduce.TaskAttemptContext context
                            ) throws IOException, InterruptedException {
-      long bytesInPrev = getInputBytes(fsStats);
       real.initialize(split, context);
-      long bytesInCurr = getInputBytes(fsStats);
-      fileInputByteCounter.increment(bytesInCurr - bytesInPrev);
     }
 
     @Override
     public boolean nextKeyValue() throws IOException, InterruptedException {
-      boolean result = false;
-      try {
-        long bytesInPrev = getInputBytes(fsStats);
-        result = real.nextKeyValue();
-        long bytesInCurr = getInputBytes(fsStats);
-
-        if (result) {
-          inputRecordCounter.increment(1);
-          fileInputByteCounter.increment(bytesInCurr - bytesInPrev);
-        }
-        reporter.setProgress(getProgress());
-      } catch (IOException ioe) {
-        if (inputSplit instanceof FileSplit) {
-          FileSplit fileSplit = (FileSplit) inputSplit;
-          LOG.error("IO error in map input file "
-              + fileSplit.getPath().toString());
-          throw new IOException("IO error in map input file "
-              + fileSplit.getPath().toString(), ioe);
-        }
-        throw ioe;
+      boolean result = real.nextKeyValue();
+      if (result) {
+        inputRecordCounter.increment(1);
       }
+      reporter.setProgress(getProgress());
       return result;
-    }
-    
-    private long getInputBytes(Statistics stats) {
-      return stats == null ? 0 : stats.getBytesRead();
     }
   }
 
@@ -605,29 +512,15 @@ class MapTask extends Task {
     private final TaskReporter reporter;
 
     private final Counters.Counter mapOutputRecordCounter;
-    private final Counters.Counter fileOutputByteCounter; 
-    private final Statistics fsStats;
     
     @SuppressWarnings("unchecked")
     NewDirectOutputCollector(org.apache.hadoop.mapreduce.JobContext jobContext,
         JobConf job, TaskUmbilicalProtocol umbilical, TaskReporter reporter) 
     throws IOException, ClassNotFoundException, InterruptedException {
       this.reporter = reporter;
-      Statistics matchedStats = null;
-      if (outputFormat instanceof org.apache.hadoop.mapreduce.lib.output.FileOutputFormat) {
-        matchedStats = getFsStatistics(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
-            .getOutputPath(jobContext), job);
-      }
-      fsStats = matchedStats;
+      out = outputFormat.getRecordWriter(taskContext);
       mapOutputRecordCounter = 
         reporter.getCounter(MAP_OUTPUT_RECORDS);
-      fileOutputByteCounter = reporter
-          .getCounter(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat.Counter.BYTES_WRITTEN);
-
-      long bytesOutPrev = getOutputBytes(fsStats);
-      out = outputFormat.getRecordWriter(taskContext);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
     }
 
     @Override
@@ -635,10 +528,7 @@ class MapTask extends Task {
     public void write(K key, V value) 
     throws IOException, InterruptedException {
       reporter.progress();
-      long bytesOutPrev = getOutputBytes(fsStats);
       out.write(key, value);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
       mapOutputRecordCounter.increment(1);
     }
 
@@ -647,15 +537,8 @@ class MapTask extends Task {
     throws IOException,InterruptedException {
       reporter.progress();
       if (out != null) {
-        long bytesOutPrev = getOutputBytes(fsStats);
         out.close(context);
-        long bytesOutCurr = getOutputBytes(fsStats);
-        fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
       }
-    }
-
-    private long getOutputBytes(Statistics stats) {
-      return stats == null ? 0 : stats.getBytesWritten();
     }
   }
   
@@ -730,8 +613,8 @@ class MapTask extends Task {
 
     org.apache.hadoop.mapreduce.RecordReader<INKEY,INVALUE> input =
       new NewTrackingRecordReader<INKEY,INVALUE>
-          (split, inputFormat, reporter, job, taskContext);
-
+          (inputFormat.createRecordReader(split, taskContext), reporter);
+    
     job.setBoolean("mapred.skip.on", isSkipping());
     org.apache.hadoop.mapreduce.RecordWriter output = null;
     org.apache.hadoop.mapreduce.Mapper<INKEY,INVALUE,OUTKEY,OUTVALUE>.Context 
@@ -794,8 +677,6 @@ class MapTask extends Task {
     private TaskReporter reporter = null;
 
     private final Counters.Counter mapOutputRecordCounter;
-    private final Counters.Counter fileOutputByteCounter;
-    private final Statistics fsStats;
 
     @SuppressWarnings("unchecked")
     public DirectMapOutputCollector(TaskUmbilicalProtocol umbilical,
@@ -804,30 +685,14 @@ class MapTask extends Task {
       String finalName = getOutputName(getPartition());
       FileSystem fs = FileSystem.get(job);
 
-      
-      OutputFormat<K, V> outputFormat = job.getOutputFormat();
-      
-      Statistics matchedStats = null;
-      if (outputFormat instanceof FileOutputFormat) {
-        matchedStats = getFsStatistics(FileOutputFormat.getOutputPath(job), job);
-      } 
-      fsStats = matchedStats;
-      mapOutputRecordCounter = reporter.getCounter(MAP_OUTPUT_RECORDS);
-      fileOutputByteCounter = reporter
-          .getCounter(FileOutputFormat.Counter.BYTES_WRITTEN);
-      
-      long bytesOutPrev = getOutputBytes(fsStats);
       out = job.getOutputFormat().getRecordWriter(fs, job, finalName, reporter);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
+
+      mapOutputRecordCounter = reporter.getCounter(MAP_OUTPUT_RECORDS);
     }
 
     public void close() throws IOException {
       if (this.out != null) {
-        long bytesOutPrev = getOutputBytes(fsStats);
         out.close(this.reporter);
-        long bytesOutCurr = getOutputBytes(fsStats);
-        fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
       }
 
     }
@@ -838,16 +703,10 @@ class MapTask extends Task {
 
     public void collect(K key, V value, int partition) throws IOException {
       reporter.progress();
-      long bytesOutPrev = getOutputBytes(fsStats);
       out.write(key, value);
-      long bytesOutCurr = getOutputBytes(fsStats);
-      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
       mapOutputRecordCounter.increment(1);
     }
     
-    private long getOutputBytes(Statistics stats) {
-      return stats == null ? 0 : stats.getBytesWritten();
-    }
   }
 
   class MapOutputBuffer<K extends Object, V extends Object> 
@@ -907,7 +766,6 @@ class MapTask extends Task {
     private final Counters.Counter mapOutputByteCounter;
     private final Counters.Counter mapOutputRecordCounter;
     private final Counters.Counter combineOutputCounter;
-    private final Counters.Counter fileOutputByteCounter;
     
     private ArrayList<SpillRecord> indexCacheList;
     private int totalIndexCacheMemory;
@@ -970,7 +828,6 @@ class MapTask extends Task {
       Counters.Counter combineInputCounter = 
         reporter.getCounter(COMBINE_INPUT_RECORDS);
       combineOutputCounter = reporter.getCounter(COMBINE_OUTPUT_RECORDS);
-      fileOutputByteCounter = reporter.getCounter(MAP_OUTPUT_MATERIALIZED_BYTES);
       // compression
       if (job.getCompressMapOutput()) {
         Class<? extends CompressionCodec> codecClass =
@@ -982,7 +839,7 @@ class MapTask extends Task {
                                              combineInputCounter,
                                              reporter, null);
       if (combinerRunner != null) {
-        combineCollector= new CombineOutputCollector<K,V>(combineOutputCounter, reporter, conf);
+        combineCollector= new CombineOutputCollector<K,V>(combineOutputCounter);
       } else {
         combineCollector = null;
       }
@@ -1321,8 +1178,6 @@ class MapTask extends Task {
       // release sort buffer before the merge
       kvbuffer = null;
       mergeParts();
-      Path outputPath = mapOutputFile.getOutputFile();
-      fileOutputByteCounter.increment(rfs.getFileStatus(outputPath).getLen());
     }
 
     public void close() { }

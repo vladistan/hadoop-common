@@ -53,7 +53,6 @@
   JobHistory.Task task = job.getAllTasks().get(tipid); 
   String type = task.get(Keys.TASK_TYPE);
 %>
-<!DOCTYPE html>
 <html>
 <head>
 <title><%=tipid %> attempts for <%=jobid %></title>

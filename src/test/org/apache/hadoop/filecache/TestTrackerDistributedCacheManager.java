@@ -25,8 +25,6 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.Random;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 import javax.security.auth.login.LoginException;
 
@@ -44,6 +42,7 @@ import org.apache.hadoop.mapred.TaskController;
 import org.apache.hadoop.mapred.TaskTracker;
 import org.apache.hadoop.mapred.UtilsForTests;
 import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.filecache.DistributedCache;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -92,6 +91,19 @@ public class TestTrackerDistributedCacheManager extends TestCase {
       TEST_ROOT.mkdirs();
     }
 
+    conf = new Configuration();
+    conf.set(FileSystem.FS_DEFAULT_NAME_KEY, "file:///");
+    fs = FileSystem.get(conf);
+
+    // This test suite will fail if any ancestor directory of the
+    // test directory is not world-searchable (ie +x).
+    // We prefer to fail the test in an obvious manner up front
+    // during setUp() rather than in a subtle way later.
+    assertTrue("Test root directory " + TEST_ROOT + " and all of its " +
+               "parent directories must have a+x permissions",
+               TrackerDistributedCacheManager.ancestorsHaveExecutePermissions(
+                 fs, new Path(TEST_ROOT.toString())));
+
     // Prepare the tests' mapred-local-dir
     ROOT_MAPRED_LOCAL_DIR = new File(TEST_ROOT_DIR, "mapred/local");
     ROOT_MAPRED_LOCAL_DIR.mkdirs();
@@ -103,10 +115,7 @@ public class TestTrackerDistributedCacheManager extends TestCase {
       localDir.mkdir();
     }
 
-    conf = new Configuration();
     conf.setStrings("mapred.local.dir", localDirs);
-    conf.set(FileSystem.FS_DEFAULT_NAME_KEY, "file:///");
-    fs = FileSystem.get(conf);
     Class<? extends TaskController> taskControllerClass = conf.getClass(
         "mapred.task.tracker.task-controller", DefaultTaskController.class,
         TaskController.class);
@@ -324,51 +333,7 @@ public class TestTrackerDistributedCacheManager extends TestCase {
     checkLocalizedPath(true);
     checkLocalizedPath(false);
   }
-
-  public void testSameNameFileArchiveCache() throws IOException,
-      InterruptedException {
-    if (!canRun()) {
-      return;
-    }
-    TrackerDistributedCacheManager manager = new TrackerDistributedCacheManager(
-        conf, taskController);
-    String userName = getJobOwnerName();
-    File workDir = new File(TEST_ROOT_DIR, "workdir");
-    Path cacheFile = new Path(TEST_ROOT_DIR, "fileArchiveCacheFile");
-
-    createPublicTempFile(cacheFile);
-    Configuration conf1 = new Configuration(conf);
-    conf1.set("user.name", userName);
-
-    DistributedCache.addCacheFile(cacheFile.toUri(), conf1);
-    DistributedCache.addCacheArchive(cacheFile.toUri(), conf1);
-    TrackerDistributedCacheManager.determineTimestamps(conf1);
-    TrackerDistributedCacheManager.determineCacheVisibilities(conf1);
-    dumpState(conf1);
-
-    TaskDistributedCacheManager handle = manager
-        .newTaskDistributedCacheManager(new JobID("jt", 1), conf1);
-    handle.setupCache(conf1, TaskTracker.getPublicDistributedCacheDir(),
-        TaskTracker.getPrivateDistributedCacheDir(userName));
-
-    TaskDistributedCacheManager.CacheFile cFile = handle.getCacheFiles().get(0);
-    TaskDistributedCacheManager.CacheFile cArchive = handle.getCacheFiles()
-        .get(1);
-
-    String distCacheDir = TaskTracker.getPublicDistributedCacheDir();
-
-    Path localizedPathForFile = manager.getLocalCache(cacheFile.toUri(), conf1,
-        distCacheDir, fs.getFileStatus(cacheFile), false, cFile.timestamp,
-        true, cFile);
-
-    Path localizedPathForArchive = manager.getLocalCache(cacheFile.toUri(),
-        conf1, distCacheDir, fs.getFileStatus(cacheFile), true,
-        cArchive.timestamp, true, cArchive);
-    assertNotSame("File and Archive resolve to the same path: "
-        + localizedPathForFile + ". Should differ.", localizedPathForFile,
-        localizedPathForArchive);
-  }
-
+  
   private void appendStringArray(StringBuilder buffer, String[] data) {
     if (data != null && data.length != 0) {
       buffer.append(data[0]);
@@ -547,190 +512,10 @@ public class TestTrackerDistributedCacheManager extends TestCase {
     }
   }
   
-  public static class MyTrackerDistributedCacheManager 
-      extends TrackerDistributedCacheManager {
-
-    public Throwable caught = null;
-    public CountDownLatch done = new CountDownLatch(1);
-
-    
-    public MyTrackerDistributedCacheManager(Configuration conf,
-        TaskController controller) throws IOException {
-      super(conf, controller);
-      this.baseDirManager = new TrackerDistributedCacheManager.BaseDirManager() {
-        
-        @Override
-        void checkAndCleanup() throws IOException {
-          throw new RuntimeException("This is a test!!!!");
-        }
-      };
-      
-      this.cleanupThread = new TestCleanupThread(conf);
-    }
-      
-    class TestCleanupThread extends TrackerDistributedCacheManager.CleanupThread {
-      
-      public TestCleanupThread(Configuration conf) {
-        super(conf);
-      }
-
-      @Override
-      protected void exitTaskTracker(Throwable t) {
-        caught = t;
-        this.stopRunning();
-        done.countDown();
-      }        
-    }
-  }
-  
-  public void testRuntimeExceptionInCleanup() throws Exception {
-    if(!canRun()) {
-      return;
-    }
-    
-    Configuration conf2 = new Configuration(conf);
-    conf2.set("mapred.local.dir", ROOT_MAPRED_LOCAL_DIR.toString());
-    conf2.setLong("local.cache.size", LOCAL_CACHE_LIMIT);
-    conf2.setLong("mapreduce.tasktracker.distributedcache.checkperiod", 0); // 0 ms (Don't sleep)
-    
-    refreshConf(conf2);
-    MyTrackerDistributedCacheManager manager = 
-        new MyTrackerDistributedCacheManager(conf2, taskController);
-    manager.startCleanupThread();
-    
-    assertTrue(manager.done.await(200l, TimeUnit.MILLISECONDS));
-    assertNotNull(manager.caught);
-    assertTrue(manager.caught instanceof RuntimeException);
-  }
-  
   protected String getJobOwnerName() throws IOException {
     return UserGroupInformation.getLoginUser().getUserName();
   }
 
-  public static final long CACHE_DELETE_PERIOD_MS = 100l;
-  
-  /** test delete cache */
-  public void testLRUDeleteCache() throws Exception {
-    if (!canRun()) {
-      return;
-    }
-    // This test needs MRConfig.LOCAL_DIR to be single directory
-    // instead of four, because it assumes that both 
-    // firstcachefile and secondcachefile will be localized on same directory 
-    // so that second localization triggers deleteCache.
-    // If MRConfig.LOCAL_DIR is four directories, second localization might not 
-    // trigger deleteCache, if it is localized in different directory.
-    Configuration conf2 = new Configuration(conf);
-    conf2.set("mapred.local.dir", ROOT_MAPRED_LOCAL_DIR.toString());
-    //Make it larger then expected
-    conf2.setLong("local.cache.size", 21 * 1024l);
-    conf2.setLong("mapreduce.tasktracker.local.cache.numberdirectories", 3);
-    //The goal is to get down to 15.75K and 2 dirs
-    conf2.setFloat("mapreduce.tasktracker.cache.local.keep.pct", 0.75f); 
-    conf2.setLong("mapreduce.tasktracker.distributedcache.checkperiod", CACHE_DELETE_PERIOD_MS);
-    refreshConf(conf2);
-    TrackerDistributedCacheManager manager = 
-      new TrackerDistributedCacheManager(conf2, taskController);
-    try {
-      manager.startCleanupThread();
-      FileSystem localfs = FileSystem.getLocal(conf2);
-      String userName = getJobOwnerName();
-      conf2.set("user.name", userName);
-
-      //Here we are testing the LRU.  In this case we will add in 4 cache entries
-      // 2 of them are 8k each and 2 of them are very small.  We want to verify
-      // That they are deleted in LRU order.
-      // So what we will do is add in the two large files first, 1 then 2, and
-      // then one of the small ones 3.  We will then release them in opposite
-      // order 3, 2, 1.
-      //
-      // Finally we will add in the last small file.  This last file should push
-      // us over the 3 entry limit to trigger a cleanup.  So LRU order is 3, 2, 1
-      // And we will only delete 2 entries so that should leave 1 un touched
-      // but 3 and 2 deleted
-
-      Path thirdCacheFile = new Path(TEST_ROOT_DIR, "thirdcachefile");
-      Path fourthCacheFile = new Path(TEST_ROOT_DIR, "fourthcachefile");
-      // Adding two more small files, so it triggers the number of sub directory
-      // limit but does not trigger the file size limit.
-      createTempFile(thirdCacheFile, 1);
-      createTempFile(fourthCacheFile, 1);
-
-      FileStatus stat = fs.getFileStatus(firstCacheFilePublic);
-      CacheFile cfile1 = new CacheFile(firstCacheFilePublic.toUri(), 
-          CacheFile.FileType.REGULAR, true, 
-          stat.getModificationTime(),
-          true); 
-
-      Path firstLocalCache = manager.getLocalCache(firstCacheFilePublic.toUri(), conf2, 
-          TaskTracker.getPrivateDistributedCacheDir(userName),
-          fs.getFileStatus(firstCacheFilePublic), false,
-          fs.getFileStatus(firstCacheFilePublic).getModificationTime(), true,
-          cfile1);
-
-      stat = fs.getFileStatus(secondCacheFilePublic);
-      CacheFile cfile2 = new CacheFile(secondCacheFilePublic.toUri(), 
-          CacheFile.FileType.REGULAR, true, 
-          stat.getModificationTime(),
-          true); 
-
-      Path secondLocalCache = manager.getLocalCache(secondCacheFilePublic.toUri(), conf2, 
-          TaskTracker.getPrivateDistributedCacheDir(userName),
-          fs.getFileStatus(secondCacheFilePublic), false,
-          fs.getFileStatus(secondCacheFilePublic).getModificationTime(), true,
-          cfile2);
-
-      stat = fs.getFileStatus(thirdCacheFile);
-      CacheFile cfile3 = new CacheFile(thirdCacheFile.toUri(), 
-          CacheFile.FileType.REGULAR, true, 
-          stat.getModificationTime(),
-          true); 
-
-      Path thirdLocalCache = manager.getLocalCache(thirdCacheFile.toUri(), conf2, 
-          TaskTracker.getPrivateDistributedCacheDir(userName),
-          fs.getFileStatus(thirdCacheFile), false,
-          fs.getFileStatus(thirdCacheFile).getModificationTime(), true,
-          cfile3);
-
-      manager.releaseCache(cfile3.getStatus());
-      manager.releaseCache(cfile2.getStatus());
-      manager.releaseCache(cfile1.getStatus());
-
-      // Getting the fourth cache will make the number of sub directories becomes
-      // 4 which is greater than 3. So the released cache will be deleted.
-      stat = fs.getFileStatus(fourthCacheFile);
-      CacheFile cfile4 = new CacheFile(fourthCacheFile.toUri(), 
-          CacheFile.FileType.REGULAR, true, 
-          stat.getModificationTime(),
-          true); 
-
-      Path fourthLocalCache = manager.getLocalCache(fourthCacheFile.toUri(), conf2, 
-          TaskTracker.getPrivateDistributedCacheDir(userName),
-          fs.getFileStatus(fourthCacheFile), false,
-          fs.getFileStatus(fourthCacheFile).getModificationTime(), true,
-          cfile4);
-
-      checkCacheDeletion(localfs, secondLocalCache, "DistributedCache failed " +
-          "deleting second cache LRU order");
-
-      checkCacheDeletion(localfs, thirdLocalCache,
-          "DistributedCache failed deleting third" +
-      " cache LRU order.");
-
-      checkCacheNOTDeletion(localfs, firstLocalCache, "DistributedCache failed " +
-      "Deleted first cache LRU order.");
-
-      checkCacheNOTDeletion(localfs, fourthCacheFile, "DistributedCache failed " +
-      "Deleted fourth cache LRU order.");
-      // Clean up the files created in this test
-      new File(thirdCacheFile.toString()).delete();
-      new File(fourthCacheFile.toString()).delete();
-    } finally {
-      manager.stopCleanupThread();
-    }
-  }
-
-  
   /** test delete cache */
   public void testDeleteCache() throws Exception {
     if (!canRun()) {
@@ -745,13 +530,10 @@ public class TestTrackerDistributedCacheManager extends TestCase {
     Configuration conf2 = new Configuration(conf);
     conf2.set("mapred.local.dir", ROOT_MAPRED_LOCAL_DIR.toString());
     conf2.setLong("local.cache.size", LOCAL_CACHE_LIMIT);
-    conf2.setLong("mapreduce.tasktracker.distributedcache.checkperiod", CACHE_DELETE_PERIOD_MS);
     
     refreshConf(conf2);
     TrackerDistributedCacheManager manager = 
         new TrackerDistributedCacheManager(conf2, taskController);
-    manager.startCleanupThread();
-    try {
     FileSystem localfs = FileSystem.getLocal(conf2);
     long now = System.currentTimeMillis();
     String userName = getJobOwnerName();
@@ -785,9 +567,9 @@ public class TestTrackerDistributedCacheManager extends TestCase {
         fs.getFileStatus(secondCacheFilePublic), false, 
         fs.getFileStatus(secondCacheFilePublic).getModificationTime(), true,
         cfile2);
-    checkCacheDeletion(localfs, firstLocalCache,
-        "DistributedCache failed deleting old" +
-        " cache when the cache store is full");
+    assertFalse("DistributedCache failed deleting old" + 
+        " cache when the cache store is full.",
+       localfs.exists(firstLocalCache));
 
     // find the root directory of distributed caches
     Path firstCursor = firstLocalCache;
@@ -814,15 +596,12 @@ public class TestTrackerDistributedCacheManager extends TestCase {
            + "directory names when it deleted the files they contained "
            + "because they collectively exceeded the size limit.",
        localfs.listStatus(cachesBase).length > 1);
-    conf2.setLong("local.cache.size", LOCAL_CACHE_LIMIT * 10);
-    conf2.setLong("mapreduce.tasktracker.local.cache.numberdirectories",
-        LOCAL_CACHE_SUBDIR_LIMIT);
-    manager.stopCleanupThread();
     
+    conf2.setLong("local.cache.size", LOCAL_CACHE_LIMIT * 10);
+    conf2.setLong("mapreduce.tasktracker.cache.local.numberdirectories",
+        LOCAL_CACHE_SUBDIR_LIMIT);
     manager = 
       new TrackerDistributedCacheManager(conf2, taskController);
-    manager.startCleanupThread();
-    
     // Now we test the number of sub directories limit
     // Create the temporary cache files to be used in the tests.
     Path thirdCacheFile = new Path(TEST_ROOT_DIR, "thirdcachefile");
@@ -866,9 +645,9 @@ public class TestTrackerDistributedCacheManager extends TestCase {
         TaskTracker.getPrivateDistributedCacheDir(userName),
         fs.getFileStatus(fourthCacheFile), false, 
         fs.getFileStatus(fourthCacheFile).getModificationTime(), false, cfile4);
-    checkCacheDeletion(localfs, thirdLocalCache,
-        "DistributedCache failed deleting old" +
-        " cache when the cache exceeds the number of sub directories limit.");
+    assertFalse("DistributedCache failed deleting old" + 
+        " cache when the cache exceeds the number of sub directories limit.",
+        localfs.exists(thirdLocalCache));
 
     assertFalse
       ("DistributedCache did not delete the gensym'ed distcache "
@@ -879,39 +658,8 @@ public class TestTrackerDistributedCacheManager extends TestCase {
     // Clean up the files created in this test
     new File(thirdCacheFile.toString()).delete();
     new File(fourthCacheFile.toString()).delete();
-    } finally {
-      manager.stopCleanupThread();
-    }
   }
   
-  /**
-   * Do a simple check to see if the file has NOT been deleted.
-   */
-  private void checkCacheNOTDeletion(FileSystem fs, Path cache, String msg)
-  throws Exception {
-    TimeUnit.MILLISECONDS.sleep(3 * CACHE_DELETE_PERIOD_MS);
-    assertTrue(msg, fs.exists(cache));
-  }
-  
-  /**
-   * Periodically checks if a file is there, return if the file is no longer
-   * there. Fails the test if a files is there for 30 seconds.
-   */
-  private void checkCacheDeletion(FileSystem fs, Path cache, String msg)
-  throws Exception {
-    // Check every 100ms to see if the cache is deleted
-    boolean cacheExists = true;
-    for (int i = 0; i < 300; i++) {
-      if (!fs.exists(cache)) {
-        cacheExists = false;
-        break;
-      }
-      TimeUnit.MILLISECONDS.sleep(CACHE_DELETE_PERIOD_MS);
-    }
-    // If the cache is still there after 5 minutes, test fails.
-    assertFalse(msg, cacheExists);
-  }
-
   public void testFileSystemOtherThanDefault() throws Exception {
     if (!canRun()) {
       return;
@@ -1135,6 +883,25 @@ public class TestTrackerDistributedCacheManager extends TestCase {
     } finally {
       localfs.delete(myFile, false);
     }
+  }
+
+  public void testRemoveTaskDistributedCacheManager() throws Exception {
+    if (!canRun()) {
+      return;
+    }
+    TrackerDistributedCacheManager manager = new TrackerDistributedCacheManager(
+        conf, taskController);
+    JobID jobId = new JobID("jobtracker", 1);
+    manager.newTaskDistributedCacheManager(jobId, conf);
+
+    TaskDistributedCacheManager taskDistributedCacheManager = manager
+        .getTaskDistributedCacheManager(jobId);
+    assertNotNull(taskDistributedCacheManager);
+
+    manager.removeTaskDistributedCacheManager(jobId);
+
+    taskDistributedCacheManager = manager.getTaskDistributedCacheManager(jobId);
+    assertNull(taskDistributedCacheManager);
   }
 
 }

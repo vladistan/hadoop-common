@@ -20,8 +20,8 @@ package org.apache.hadoop.hdfs;
 import java.io.IOException;
 import java.io.OutputStream;
 
-import junit.*;
-import static junit.framework.Assert.fail;
+import org.junit.*;
+import static org.junit.Assert.fail;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -32,8 +32,9 @@ import org.apache.hadoop.fs.Path;
  * These tests make sure that DFSClient retries fetching data from DFS
  * properly in case of errors.
  */
-public class TestDFSClientExcludedNodes extends junit.framework.TestCase {
+public class TestDFSClientExcludedNodes {
 
+  @Test
   public void testExcludedNodes() throws IOException {
     Configuration conf = new Configuration();
     MiniDFSCluster cluster = new MiniDFSCluster(conf, 3, true, null);

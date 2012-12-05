@@ -18,11 +18,7 @@
 bin=`dirname "$0"`
 bin=`cd "$bin"; pwd`
 
-if [ -e "$bin/../libexec/hadoop-config.sh" ]; then
-  . "$bin"/../libexec/hadoop-config.sh
-else
-  . "$bin/hadoop-config.sh"
-fi
+. "$bin"/hadoop-config.sh
 
 # Stop balancer daemon.
 # Run this on the machine where the balancer is running

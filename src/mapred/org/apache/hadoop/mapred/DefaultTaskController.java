@@ -34,6 +34,7 @@ import org.apache.hadoop.mapreduce.server.tasktracker.Localizer;
 import org.apache.hadoop.mapred.TaskTracker.LocalStorage;
 import org.apache.hadoop.util.ProcessTree.Signal;
 import org.apache.hadoop.util.ProcessTree;
+import org.apache.hadoop.util.Shell.ExitCodeException;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 
 import org.apache.commons.logging.Log;
@@ -67,9 +68,8 @@ public class DefaultTaskController extends TaskController {
 
   @Override
   public void createLogDir(TaskAttemptID taskID, 
-		  			boolean isCleanup) throws IOException {
-    TaskLog.createTaskAttemptLogDir(taskID, isCleanup, 
-                                    localStorage.getDirs());
+                           boolean isCleanup) throws IOException {
+    TaskLog.createTaskAttemptLogDir(taskID, isCleanup, localStorage.getDirs());
   }
   
   /**
@@ -93,7 +93,7 @@ public class DefaultTaskController extends TaskController {
       
       //create the attempt dirs
       new Localizer(localFs, 
-          getConf().getStrings(JobConf.MAPRED_LOCAL_DIR_PROPERTY)).
+          getConf().getTrimmedStrings(JobConf.MAPRED_LOCAL_DIR_PROPERTY)).
           initializeAttemptDirs(user, jobId, attemptId);
       
       // create the working-directory of the task 
@@ -110,7 +110,7 @@ public class DefaultTaskController extends TaskController {
       }
       //read the configuration for the job
       FileSystem rawFs = FileSystem.getLocal(getConf()).getRaw();
-      long logSize = 0; //TODO MAPREDUCE-1100
+      long logSize = 0; //TODO: Ref BUG:2854624
       // get the JVM command line.
       String cmdLine = 
         TaskLog.buildCommandLine(setup, jvmArguments,
@@ -124,22 +124,42 @@ public class DefaultTaskController extends TaskController {
           getConf()), COMMAND_FILE);
 
       String commandFile = writeCommand(cmdLine, rawFs, p);
-      rawFs.setPermission(p, TaskController.TASK_LAUNCH_SCRIPT_PERMISSION);
+      try {
+        rawFs.setPermission(p, TaskController.TASK_LAUNCH_SCRIPT_PERMISSION);
+      } catch (ExitCodeException ece) {
+        // we don't want to confuse this exception with an ExitCodeException
+        // from the shExec below.
+        throw new IOException("Could not set permissions on " + p, ece);
+      }
       shExec = new ShellCommandExecutor(new String[]{
           "bash", "-c", commandFile},
           currentWorkDirectory);
       shExec.execute();
-    } catch (Exception e) {
-      if (shExec == null) {
-        return -1;
+    } catch (ExitCodeException ece) {
+      if (shExec != null) {
+        logShExecStatus(shExec);
       }
-      int exitCode = shExec.getExitCode();
-      LOG.warn("Exit code from task is : " + exitCode);
-      LOG.info("Output from DefaultTaskController's launchTask follows:");
-      logOutput(shExec.getOutput());
-      return exitCode;
+      if (ece.getMessage() != null && !ece.getMessage().isEmpty()) {
+        LOG.warn("Task wrapper stderr: " + ece.getMessage());
+      }
+      return (shExec != null) ? shExec.getExitCode() : -1;
+    } catch (Exception e) {
+      LOG.warn("Unexpected error launching task JVM", e);
+      if (shExec != null) {
+        logShExecStatus(shExec);
+      }
+      return -1;
     }
     return 0;
+  }
+
+  private void logShExecStatus(ShellCommandExecutor shExec) {
+    LOG.warn("Exit code from task is : " + shExec.getExitCode());
+    String stdout = shExec.getOutput().trim();
+    if (!stdout.isEmpty()) {
+      LOG.info("Output from DefaultTaskController's launchTask follows:");
+      logOutput(shExec.getOutput());
+    }
   }
     
   /**
@@ -238,23 +258,22 @@ public class DefaultTaskController extends TaskController {
   public void deleteLogAsUser(String user, 
                               String subDir) throws IOException {
     Path dir = new Path(TaskLog.getUserLogDir().getAbsolutePath(), subDir);
-    //Delete the subDir in <hadoop.log.dir>/userlogs
+    // Delete the subDir in <hadoop.log.dir>/userlogs
     File subDirPath = new File(dir.toString());
-    FileUtil.fullyDelete( subDirPath );
-    
-    //Delete the subDir in all good <mapred.local.dirs>/userlogs 
-    String [] localDirs = localStorage.getDirs();
-    for(String localdir : localDirs) {
-    	String dirPath = localdir + File.separatorChar + 
-    					TaskLog.USERLOGS_DIR_NAME + File.separatorChar +
-    					subDir;
-    	try {
-    		FileUtil.fullyDelete( new File(dirPath) );
-        } catch(Exception e){
-        	//Skip bad dir for later deletion
-            LOG.warn("Could not delete dir: " + dirPath + 
-                " , Reason : " + e.getMessage());
-        }
+    FileUtil.fullyDelete(subDirPath);
+
+    // Delete the subDir in all good <mapred.local.dirs>/userlogs
+    for (String localdir : localStorage.getDirs()) {
+      String dirPath = localdir + File.separatorChar +
+        TaskLog.USERLOGS_DIR_NAME + File.separatorChar + subDir;
+
+      try {
+        FileUtil.fullyDelete(new File(dirPath));
+      } catch(Exception e){
+        // Skip bad dir for later deletion
+        LOG.warn("Could not delete dir: " + dirPath +
+                 " , Reason : " + e.getMessage());
+      }
     }
   }
   

@@ -80,9 +80,6 @@ public class KerberosName {
       kerbConf = Config.getInstance();
       defaultRealm = kerbConf.getDefaultRealm();
     } catch (KrbException ke) {
-      if(UserGroupInformation.isSecurityEnabled())
-        throw new IllegalArgumentException("Can't get Kerberos configuration",ke);
-      else 
         defaultRealm="";
     }
   }
@@ -335,12 +332,17 @@ public class KerberosName {
 
   /**
    * Set the static configuration to get the rules.
+   * <p/>
+   * IMPORTANT: This method does a NOP if the rules have been set already.
+   * If there is a need to reset the rules, the {@link KerberosName#setRules(String)}
+   * method should be invoked directly.
+   *
    * @param conf the new configuration
    * @throws IOException
    */
   public static void setConfiguration(Configuration conf) throws IOException {
     String ruleString = conf.get("hadoop.security.auth_to_local", "DEFAULT");
-    rules = parseRules(ruleString);
+    setRules(ruleString);
   }
   
   /**
@@ -394,6 +396,15 @@ public class KerberosName {
     throw new NoMatchingRule("No rules applied to " + toString());
   }
 
+  /**
+   * Indicates if the name rules have been set.
+   * 
+   * @return if the name rules have been set.
+   */
+  public static boolean hasRulesBeenSet() {
+    return rules != null;
+  }
+
   public static void printRules() throws IOException {
     int i = 0;
     for(Rule r: rules) {
@@ -402,6 +413,7 @@ public class KerberosName {
   }
 
   public static void main(String[] args) throws Exception {
+    setConfiguration(new Configuration());
     for(String arg: args) {
       KerberosName name = new KerberosName(arg);
       System.out.println("Name: " + name + " to " + name.getShortName());

@@ -21,6 +21,7 @@ package org.apache.hadoop.fs;
 import java.io.*;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileLock;
 import java.util.*;
 
 import org.apache.hadoop.conf.Configuration;
@@ -283,7 +284,6 @@ public class RawLocalFileSystem extends FileSystem {
     if (pathToFile(src).renameTo(pathToFile(dst))) {
       return true;
     }
-    LOG.debug("Falling through to a copy of " + src + " to " + dst);
     return FileUtil.copy(this, src, this, dst, true, getConf());
   }
   
@@ -364,6 +364,17 @@ public class RawLocalFileSystem extends FileSystem {
   public Path getWorkingDirectory() {
     return workingDir;
   }
+
+  /** {@inheritDoc} */
+  @Override
+  public FsStatus getStatus(Path p) throws IOException {
+    File partition = pathToFile(p == null ? new Path("/") : p);
+    //File provides getUsableSpace() and getFreeSpace()
+    //File provides no API to obtain used space, assume used = total - free
+    return new FsStatus(partition.getTotalSpace(), 
+      partition.getTotalSpace() - partition.getFreeSpace(),
+      partition.getFreeSpace());
+  }
   
   // In the case of the local filesystem, we can just rename the file.
   public void moveFromLocalFile(Path src, Path dst) throws IOException {
@@ -441,8 +452,8 @@ public class RawLocalFileSystem extends FileSystem {
       IOException e = null;
       try {
         StringTokenizer t = new StringTokenizer(
-            FileUtil.execCommand(new File(getPath().toUri()), 
-                                 Shell.getGET_PERMISSION_COMMAND()));
+            execCommand(new File(getPath().toUri()), 
+                        Shell.getGET_PERMISSION_COMMAND()));
         //expected format
         //-rw-------    1 username groupname ...
         String permission = t.nextToken();
@@ -492,11 +503,11 @@ public class RawLocalFileSystem extends FileSystem {
     }
 
     if (username == null) {
-      FileUtil.execCommand(pathToFile(p), Shell.SET_GROUP_COMMAND, groupname); 
+      execCommand(pathToFile(p), Shell.SET_GROUP_COMMAND, groupname); 
     } else {
       //OWNER[:[GROUP]]
       String s = username + (groupname == null? "": ":" + groupname);
-      FileUtil.execCommand(pathToFile(p), Shell.SET_OWNER_COMMAND, s);
+      execCommand(pathToFile(p), Shell.SET_OWNER_COMMAND, s);
     }
   }
 
@@ -505,7 +516,21 @@ public class RawLocalFileSystem extends FileSystem {
    */
   @Override
   public void setPermission(Path p, FsPermission permission
-                            ) throws IOException {
-    FileUtil.setPermission(pathToFile(p), permission);
+      ) throws IOException {
+    if (NativeIO.isAvailable()) {
+      NativeIO.chmod(pathToFile(p).getCanonicalPath(),
+                     permission.toShort());
+    } else {
+      execCommand(pathToFile(p), Shell.SET_PERMISSION_COMMAND,
+          String.format("%05o", permission.toShort()));
+    }
+  }
+
+  private static String execCommand(File f, String... cmd) throws IOException {
+    String[] args = new String[cmd.length + 1];
+    System.arraycopy(cmd, 0, args, 0, cmd.length);
+    args[cmd.length] = f.getCanonicalPath();
+    String output = Shell.execCommand(args);
+    return output;
   }
 }

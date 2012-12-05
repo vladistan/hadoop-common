@@ -26,8 +26,8 @@ import java.io.IOException;
 
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.DataChecksum;
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
+//import org.apache.hadoop.classification.InterfaceAudience;
+//import org.apache.hadoop.classification.InterfaceStability;
 
 
 /**
@@ -35,8 +35,8 @@ import org.apache.hadoop.classification.InterfaceStability;
  * This is not related to the Block related functionality in Namenode.
  * The biggest part of data block metadata is CRC for the block.
  */
-@InterfaceAudience.Private
-@InterfaceStability.Evolving
+//@InterfaceAudience.Private
+//@InterfaceStability.Evolving
 public class BlockMetadataHeader {
 
   static final short METADATA_VERSION = FSDataset.METADATA_VERSION;

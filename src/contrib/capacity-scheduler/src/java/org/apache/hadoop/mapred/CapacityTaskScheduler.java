@@ -512,9 +512,8 @@ class CapacityTaskScheduler extends TaskScheduler {
       job.schedulingOpportunity();
       
       // First, try to get a 'local' task
-      Task t = job.obtainNewNodeOrRackLocalMapTask(taskTracker,
-                                                   numTaskTrackers,
-                                                   numUniqueHosts);
+      Task t = 
+        job.obtainNewLocalMapTask(taskTracker, numTaskTrackers, numUniqueHosts);
       
       if (t != null) {
         return TaskLookupResult.getTaskFoundResult(t, job); 

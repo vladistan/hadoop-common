@@ -17,28 +17,20 @@
  */
 package org.apache.hadoop.mapred;
 
-import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.mapreduce.TestSleepJob;
-import org.apache.hadoop.util.ToolRunner;
-import org.apache.hadoop.conf.Configuration;
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.net.URL;
-import java.net.HttpURLConnection;
-import java.util.concurrent.Callable;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.TimeUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
-import org.junit.Test;
-import org.junit.BeforeClass;
+import junit.framework.AssertionFailedError;
+
 import org.junit.AfterClass;
-import static org.junit.Assert.*;
+import org.junit.BeforeClass;
+import org.junit.Test;
 
 /**
  * System tests for the fair scheduler. These run slower than the
@@ -50,12 +42,13 @@ import static org.junit.Assert.*;
  * it is a bit of a "grab-bag" of system tests, since it's important
  * that they all run as part of the same JVM instantiation.
  */
-public class TestFairSchedulerSystem {
+public class TestFairSchedulerSystem extends FairSchedulerSystemTestBase {
   static final int NUM_THREADS=2;
+  static final int SLEEP_TIME=1;
 
   static MiniMRCluster mr;
   static JobConf conf;
-
+  
   @BeforeClass
   public static void setUp() throws Exception {
     conf = new JobConf();
@@ -64,13 +57,16 @@ public class TestFairSchedulerSystem {
     // Bump up the frequency of preemption updates to test against
     // deadlocks, etc.
     conf.set("mapred.jobtracker.taskScheduler", FairScheduler.class.getCanonicalName());
-    conf.set("mapred.fairscheduler.update.interval", "1");
-    conf.set("mapred.fairscheduler.preemption.interval", "1");
+    conf.set("mapred.fairscheduler.update.interval", "0");
+    conf.set("mapred.fairscheduler.preemption.interval", "0");
     conf.set("mapred.fairscheduler.preemption", "true");
     conf.set("mapred.fairscheduler.eventlog.enabled", "true");
     conf.set("mapred.fairscheduler.poolnameproperty", "group.name");
-    conf.set("mapred.job.tracker.persist.jobstatus.active", "false");
     mr = new MiniMRCluster(taskTrackers, "file:///", 1, null, null, conf);
+  }
+  
+  protected int getJobTrackerInfoPort() {
+    return mr.getJobTrackerRunner().getJobTrackerInfoPort();
   }
 
   @AfterClass
@@ -79,12 +75,7 @@ public class TestFairSchedulerSystem {
       mr.shutdown();
     }
   }
-
-  private void runSleepJob(JobConf conf) throws Exception {
-    String[] args = { "-m", "1", "-r", "1", "-mt", "1", "-rt", "1" };
-    ToolRunner.run(conf, new TestSleepJob(), args);
-  }
-
+  
   /**
    * Submit some concurrent sleep jobs, and visit the scheduler servlet
    * while they're running.
@@ -97,7 +88,7 @@ public class TestFairSchedulerSystem {
       futures.add(exec.submit(new Callable<Void>() {
             public Void call() throws Exception {
               JobConf jobConf = mr.createJobConf();
-              runSleepJob(jobConf);
+              runSleepJob(jobConf, SLEEP_TIME);
               return null;
             }
           }));
@@ -115,8 +106,8 @@ public class TestFairSchedulerSystem {
         } catch (TimeoutException te) {
           // It's OK
         }
-        checkServlet(true);
-        checkServlet(false);
+        checkServlet(true, true, getJobTrackerInfoPort());
+        checkServlet(false, true, getJobTrackerInfoPort());
 
         JobStatus jobs[] = jc.getAllJobs();
         if (jobs == null) {
@@ -125,75 +116,11 @@ public class TestFairSchedulerSystem {
         }
         for (JobStatus j : jobs) {
           System.err.println("Checking task graph for " + j.getJobID());
-          try {
-            checkTaskGraphServlet(j.getJobID());
-          } catch (AssertionError err) {
-            // The task graph servlet will be empty if the job has retired.
-            // This is OK.
-            RunningJob rj = jc.getJob(j.getJobID());
-            if (!rj.isComplete()) {
-              throw err;
-            }
-          }
+          checkTaskGraphServlet(j.getJobID(), getJobTrackerInfoPort());
         }
       }
     }
   }
-
-  /**
-   * Check the fair scheduler servlet for good status code and smoke test
-   * for contents.
-   */
-  private void checkServlet(boolean advanced) throws Exception {
-    String jtURL = "http://localhost:" +
-      mr.getJobTrackerRunner().getJobTrackerInfoPort();
-    URL url = new URL(jtURL + "/scheduler" +
-                      (advanced ? "?advanced" : ""));
-    HttpURLConnection connection = (HttpURLConnection)url.openConnection();
-    connection.setRequestMethod("GET");
-    connection.connect();
-    assertEquals(200, connection.getResponseCode());
-
-    // Just to be sure, slurp the content and make sure it looks like the scheduler
-    BufferedReader reader = new BufferedReader(
-      new InputStreamReader(connection.getInputStream()));
-    StringBuilder sb = new StringBuilder();
-
-    String line = null;
-    while ((line = reader.readLine()) != null) {
-      sb.append(line).append('\n');
-    }
-
-    String contents = sb.toString();
-    assertTrue("Bad contents for fair scheduler servlet: " + contents,
-      contents.contains("Fair Scheduler Administration"));
-  }
-
-  private void checkTaskGraphServlet(JobID job) throws Exception {
-    String jtURL = "http://localhost:" +
-      mr.getJobTrackerRunner().getJobTrackerInfoPort();
-    URL url = new URL(jtURL + "/taskgraph?jobid=" + job.toString() + "&type=map");
-    HttpURLConnection connection = (HttpURLConnection)url.openConnection();
-    connection.setRequestMethod("GET");
-    connection.connect();
-    assertEquals(200, connection.getResponseCode());
-
-    // Just to be sure, slurp the content and make sure it looks like the scheduler
-    String contents = slurpContents(connection);
-    assertTrue("Bad contents for job " + job + ":\n" + contents,
-      contents.contains("</svg>"));
-  }
-
-  private String slurpContents(HttpURLConnection connection) throws Exception {
-    BufferedReader reader = new BufferedReader(
-      new InputStreamReader(connection.getInputStream()));
-    StringBuilder sb = new StringBuilder();
-
-    String line = null;
-    while ((line = reader.readLine()) != null) {
-      sb.append(line).append('\n');
-    }
-
-    return sb.toString();
-  }
+  
+  
 }

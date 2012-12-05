@@ -25,16 +25,16 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableFactories;
 import org.apache.hadoop.io.WritableFactory;
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
+//import org.apache.hadoop.classification.InterfaceAudience;
+//import org.apache.hadoop.classification.InterfaceStability;
 
 
 /**
  * A block and the full path information to the block data file and
  * the metadata file stored on the local file system.
  */
-@InterfaceAudience.Private
-@InterfaceStability.Evolving
+//@InterfaceAudience.Private
+//@InterfaceStability.Evolving
 public class BlockLocalPathInfo implements Writable {
   static final WritableFactory FACTORY = new WritableFactory() {
     public Writable newInstance() { return new BlockLocalPathInfo(); }

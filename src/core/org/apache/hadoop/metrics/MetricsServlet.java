@@ -30,8 +30,6 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.http.HttpServer;
 import org.apache.hadoop.metrics.spi.OutputRecord;
 import org.apache.hadoop.metrics.spi.AbstractMetricsContext.MetricMap;
@@ -43,11 +41,7 @@ import org.mortbay.util.ajax.JSON.Output;
  * A servlet to print out metrics data.  By default, the servlet returns a 
  * textual representation (no promises are made for parseability), and
  * users can use "?format=json" for parseable output.
- * @deprecated in favor of <code>org.apache.hadoop.metrics2</code> usage.
  */
-@Deprecated
-@InterfaceAudience.Private
-@InterfaceStability.Evolving
 public class MetricsServlet extends HttpServlet {
   
   /**
@@ -107,24 +101,30 @@ public class MetricsServlet extends HttpServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response)
       throws ServletException, IOException {
-
-    // Do the authorization
-    if (!HttpServer.hasAdministratorAccess(getServletContext(), request,
-        response)) {
+    if (!HttpServer.isInstrumentationAccessAllowed(getServletContext(),
+                                                   request, response)) {
       return;
     }
-
-    PrintWriter out = new PrintWriter(response.getOutputStream());
     String format = request.getParameter("format");
     Collection<MetricsContext> allContexts = 
       ContextFactory.getFactory().getAllContexts();
     if ("json".equals(format)) {
-      // Uses Jetty's built-in JSON support to convert the map into JSON.
-      out.print(new JSON().toJSON(makeMap(allContexts)));
+      response.setContentType("application/json; charset=utf-8");
+      PrintWriter out = response.getWriter();
+      try {
+        // Uses Jetty's built-in JSON support to convert the map into JSON.
+        out.print(new JSON().toJSON(makeMap(allContexts)));
+      } finally {
+        out.close();
+      }
     } else {
-      printMap(out, makeMap(allContexts));
+      PrintWriter out = response.getWriter();
+      try {
+        printMap(out, makeMap(allContexts));
+      } finally {
+        out.close();
+      }
     }
-    out.close();
   }
   
   /**

@@ -27,8 +27,6 @@ import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.test.system.process.RemoteProcess;
 
-import javax.management.*;
-
 /**
  * Datanode client for system tests. Assumption of the class is that the
  * configuration key is set for the configuration key : {@code
@@ -50,7 +48,7 @@ public class DNClient extends HDFSDaemonClient<DNProtocol> {
     }
     String sockAddrStr = getConf().get(DFSConfigKeys.DFS_DATANODE_IPC_ADDRESS_KEY);
     if (sockAddrStr == null) {
-      throw new IllegalArgumentException("Datanode IPC address is not set."
+      throw new IllegalArgumentException("Datenode IPC address is not set."
           + "Check if " + DFSConfigKeys.DFS_DATANODE_IPC_ADDRESS_KEY
           + " is configured.");
     }
@@ -80,16 +78,5 @@ public class DNClient extends HDFSDaemonClient<DNProtocol> {
 
   public Configuration getDatanodeConfig() throws IOException {
     return getProxy().getDaemonConf();
-  }
-
-  /**
-   * Concrete implementation of abstract super class method
-   * @param attributeName name of the attribute to be retrieved
-   * @return Object value of the given attribute
-   * @throws IOException is thrown in case of communication errors
-   */
-  @Override
-  public Object getDaemonAttribute (String attributeName) throws IOException {
-    return getJmxAttribute("DataNode", "DataNodeInfo", attributeName);
   }
 }

@@ -67,7 +67,8 @@ public class HsftpFileSystem extends HftpFileSystem {
 
   @Override
   protected int getDefaultPort() {
-    return getDefaultSecurePort();
+    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_KEY,
+        DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT);
   }
 
   @Override
@@ -79,7 +80,7 @@ public class HsftpFileSystem extends HftpFileSystem {
   protected HttpURLConnection openConnection(String path, String query)
       throws IOException {
     try {
-      query = updateQuery(query);
+      query = addDelegationTokenParam(query);
       final URL url = new URI("https", null, nnAddr.getHostName(),
           nnAddr.getPort(), path, query, null).toURL();
       HttpsURLConnection conn = (HttpsURLConnection)url.openConnection();

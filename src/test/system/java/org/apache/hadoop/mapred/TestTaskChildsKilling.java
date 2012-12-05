@@ -35,6 +35,7 @@ import org.apache.hadoop.mapreduce.test.system.TTProtocol;
 import org.apache.hadoop.mapreduce.test.system.TTTaskInfo;
 import org.apache.hadoop.mapreduce.test.system.TaskInfo;
 import org.apache.hadoop.mapreduce.test.system.FinishTaskControlAction;
+import org.apache.hadoop.mapred.JobClient.NetworkedJob;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.hadoop.util.Tool;
 import org.junit.AfterClass;
@@ -270,7 +271,8 @@ public class TestTaskChildsKilling {
     Assert.assertTrue("Map process is not alive before task kills.", 
         ttIns.isProcessTreeAlive(pid));
 
-    runJob.killTask(taskAttID, false);
+    NetworkedJob networkJob = client.new NetworkedJob(jInfo.getStatus());
+    networkJob.killTask(taskAttID, false);
 
     LOG.info("Waiting till the task is killed...");
     taskInfo = wovenClient.getTaskInfo(taskInfo.getTaskID());

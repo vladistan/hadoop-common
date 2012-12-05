@@ -41,13 +41,10 @@ import org.apache.hadoop.security.KerberosInfo;
     clientPrincipal = DFSConfigKeys.DFS_DATANODE_USER_NAME_KEY)
 public interface DatanodeProtocol extends VersionedProtocol {
   /**
-   * 25: Serialized format of BlockTokenIdentifier changed to contain
-   *     multiple blocks within a single BlockTokenIdentifier
-   *     
-   *     (bumped to 25 to bring in line with trunk)
+   * 28: Added an additional member to NamespaceInfo
    */
-  public static final long versionID = 25L;
-  
+  public static final long versionID = 28L;
+
   // error code
   final static int NOTIFY = 0;
   final static int DISK_ERROR = 1; // there are still valid volumes on DN
@@ -92,7 +89,8 @@ public interface DatanodeProtocol extends VersionedProtocol {
                                        long capacity,
                                        long dfsUsed, long remaining,
                                        int xmitsInProgress,
-                                       int xceiverCount) throws IOException;
+                                       int xceiverCount,
+                                       int failedVolumes) throws IOException;
 
   /**
    * blockReport() tells the NameNode about all the locally-stored blocks.
@@ -161,11 +159,12 @@ public interface DatanodeProtocol extends VersionedProtocol {
    * }
    */
   public void reportBadBlocks(LocatedBlock[] blocks) throws IOException;
-  
+
   /**
+   * @return the next GenerationStamp to be associated with the specified
    * Get the next GenerationStamp to be associated with the specified
    * block.
-   * 
+   *
    * @param block block
    * @param fromNN if it is for lease recovery initiated by NameNode
    * @return a new generation stamp

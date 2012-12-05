@@ -19,11 +19,9 @@
 package org.apache.hadoop.mapred;
 
 import org.apache.commons.logging.Log;
-
+import com.jcraft.jsch.*;
 import java.util.List;
-
-import org.apache.hadoop.util.RemoteExecution;
-import org.apache.hadoop.util.SSHRemoteExecution;
+import org.apache.hadoop.common.RemoteExecution;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -111,8 +109,7 @@ public class TestCorruptedDiskJob {
       TTClient ttClient = (TTClient)ttClients.get(i);
       String ttClientHostName = ttClient.getHostName();
       try {
-        RemoteExecution rExec = new SSHRemoteExecution();
-        rExec.executeCommand(ttClientHostName, userName,
+        RemoteExecution.executeCommand(ttClientHostName, userName,
           replaceTaskControllerCommand);
       } catch (Exception e) { e.printStackTrace(); };
     }

@@ -45,6 +45,8 @@ import org.apache.hadoop.hdfs.tools.DFSAdmin;
 import org.apache.hadoop.net.DNSToSwitchMapping;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.StaticMapping;
+import org.apache.hadoop.security.authorize.ProxyUsers;
+import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ToolRunner;
@@ -237,7 +239,7 @@ public class MiniDFSCluster {
                         String[] racks, String hosts[],
                         long[] simulatedCapacities) throws IOException {
     this.conf = conf;
-    base_dir = new File(System.getProperty("test.build.data", "build/test/data"), "dfs/");
+    base_dir = getBaseDir();
     data_dir = new File(base_dir, "data");
     
     // Setup the NameNode configuration
@@ -276,10 +278,16 @@ public class MiniDFSCluster {
                    StaticMapping.class, DNSToSwitchMapping.class);
     nameNode = NameNode.createNameNode(args, conf);
     
+    if (operation == StartupOption.RECOVER) {
+      return;
+    }
     // Start the DataNodes
     startDataNodes(conf, numDataNodes, manageDataDfsDirs, 
                     operation, racks, hosts, simulatedCapacities);
     waitClusterUp();
+    
+    //make sure ProxyUsers uses the latest conf
+    ProxyUsers.refreshSuperUserGroupsConfiguration(conf);
   }
 
   /**
@@ -390,6 +398,7 @@ public class MiniDFSCluster {
                                 + i + ": " + dir1 + " or " + dir2);
         }
         dnConf.set(DataNode.DATA_DIR_KEY, dir1.getPath() + "," + dir2.getPath());
+        conf.set(DataNode.DATA_DIR_KEY, dnConf.get(DataNode.DATA_DIR_KEY));
       }
       if (simulatedCapacities != null) {
         dnConf.setBoolean("dfs.datanode.simulateddatastorage", true);
@@ -766,16 +775,12 @@ public class MiniDFSCluster {
     if (nameNode == null) {
       return false;
     }
-    try {
-      long[] sizes = nameNode.getStats();
-      boolean isUp = false;
-      synchronized (this) {
-        isUp = (!nameNode.isInSafeMode() && sizes[0] != 0);
-      }
-      return isUp;
-    } catch (IOException ie) {
-      return false;
+    long[] sizes = nameNode.getStats();
+    boolean isUp = false;
+    synchronized (this) {
+      isUp = (!nameNode.isInSafeMode() && sizes[0] != 0);
     }
+    return isUp;
   }
   
   /**
@@ -841,6 +846,14 @@ public class MiniDFSCluster {
    * Wait until the cluster is active and running.
    */
   public void waitActive() throws IOException {
+    waitActive(true);
+  }
+
+  /**
+   * Wait until the cluster is active.
+   * @param waitHeartbeats if true, will wait until all DNs have heartbeat
+   */
+  public void waitActive(boolean waitHeartbeats) throws IOException {
     if (nameNode == null) {
       return;
     }
@@ -848,8 +861,9 @@ public class MiniDFSCluster {
                                                    getNameNodePort());
     DFSClient client = new DFSClient(addr, conf);
 
-    // make sure all datanodes have registered and sent heartbeat
-    while (shouldWait(client.datanodeReport(DatanodeReportType.LIVE))) {
+    // make sure all datanodes are alive and sent heartbeat
+    while (shouldWait(client.datanodeReport(DatanodeReportType.LIVE),
+                      waitHeartbeats)) {
       try {
         Thread.sleep(100);
       } catch (InterruptedException e) {
@@ -859,10 +873,17 @@ public class MiniDFSCluster {
     client.close();
   }
 
-  private synchronized boolean shouldWait(DatanodeInfo[] dnInfo) {
+  private synchronized boolean shouldWait(DatanodeInfo[] dnInfo,
+                                          boolean waitHeartbeats) {
     if (dnInfo.length != numDataNodes) {
       return true;
     }
+
+    // If we don't need heartbeats, we're done.
+    if (!waitHeartbeats) {
+      return false;
+    }
+
     // make sure all datanodes have sent first heartbeat to namenode,
     // using (capacity == 0) as proxy.
     for (DatanodeInfo dn : dnInfo) {
@@ -911,8 +932,9 @@ public class MiniDFSCluster {
    * 
    * @param dataNodeIndex - data node whose block report is desired - the index is same as for getDataNodes()
    * @return the block report for the specified data node
+   * @throws InterruptedException
    */
-  public Block[] getBlockReport(int dataNodeIndex) {
+  public Block[] getBlockReport(int dataNodeIndex) throws InterruptedException {
     if (dataNodeIndex < 0 || dataNodeIndex > dataNodes.size()) {
       throw new IndexOutOfBoundsException();
     }
@@ -924,8 +946,9 @@ public class MiniDFSCluster {
    * 
    * @return block reports from all data nodes
    *    Block[] is indexed in the same order as the list of datanodes returned by getDataNodes()
+   * @throws InterruptedException
    */
-  public Block[][] getAllBlockReports() {
+  public Block[][] getAllBlockReports() throws InterruptedException {
     int numDataNodes = dataNodes.size();
     Block[][] result = new Block[numDataNodes][];
     for (int i = 0; i < numDataNodes; ++i) {
@@ -1000,5 +1023,10 @@ public class MiniDFSCluster {
    */
   public String getDataDirectory() {
     return data_dir.getAbsolutePath();
+  }
+
+  public static File getBaseDir() {
+    return new File(System.getProperty(
+      "test.build.data", "build/test/data"), "dfs/");
   }
 }

@@ -28,20 +28,18 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.http.HttpServer;
-import org.apache.hadoop.mapreduce.TaskType;
+import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.mapreduce.server.jobtracker.TaskTracker;
+import org.apache.hadoop.mapreduce.TaskType;
 import org.apache.hadoop.metrics.MetricsContext;
 import org.apache.hadoop.metrics.MetricsUtil;
 import org.apache.hadoop.metrics.Updater;
-import org.apache.hadoop.util.ReflectionUtils;
 
 /**
  * A {@link TaskScheduler} that implements fair sharing.
@@ -51,7 +49,7 @@ public class FairScheduler extends TaskScheduler {
       "org.apache.hadoop.mapred.FairScheduler");
 
   // How often fair shares are re-calculated
-  protected long updateInterval = 500;
+  protected long updateInterval = 2500;
 
   // How often to dump scheduler state to the event log
   protected long dumpInterval = 10000;
@@ -63,7 +61,7 @@ public class FairScheduler extends TaskScheduler {
   // Used to iterate through map and reduce task types
   private static final TaskType[] MAP_AND_REDUCE = 
     new TaskType[] {TaskType.MAP, TaskType.REDUCE};
-  
+
   // Maximum locality delay when auto-computing locality delays
   private static final long MAX_AUTOCOMPUTED_LOCALITY_DELAY = 15000;
   
@@ -80,24 +78,35 @@ public class FairScheduler extends TaskScheduler {
   protected boolean assignMultiple; // Simultaneously assign map and reduce?
   protected int mapAssignCap = -1;    // Max maps to launch per heartbeat
   protected int reduceAssignCap = -1; // Max reduces to launch per heartbeat
-  protected long nodeLocalityDelay;   // Time to wait for node locality
-  protected long rackLocalityDelay;   // Time to wait for rack locality
+  protected long localityDelay;       // Time to wait for node and rack locality
   protected boolean autoComputeLocalityDelay = false; // Compute locality delay
                                                       // from heartbeat interval
   protected boolean sizeBasedWeight; // Give larger weights to larger jobs
   protected boolean waitForMapsBeforeLaunchingReduces = true;
   protected boolean preemptionEnabled;
   protected boolean onlyLogPreemption; // Only log when tasks should be killed
+
   private Clock clock;
+
+  private EagerTaskInitializationListener eagerInitListener;
   private JobListener jobListener;
-  private JobInitializer jobInitializer;
   private boolean mockMode; // Used for unit tests; disables background updates
                             // and scheduler event log
   private FairSchedulerEventLog eventLog;
   protected long lastDumpTime;       // Time when we last dumped state to log
   protected long lastHeartbeatTime;  // Time we last ran assignTasks 
   private long lastPreemptCheckTime; // Time we last ran preemptTasksIfNecessary
-  
+
+  /**
+   * A configuration property that controls the ability of submitting jobs to
+   * pools not declared in the scheduler allocation file.
+   */
+  public final static String ALLOW_UNDECLARED_POOLS_KEY =
+    "mapred.fairscheduler.allow.undeclared.pools";
+  private boolean allowUndeclaredPools = false;
+
+  private MetricsUpdater metricsUpdater; // responsible for pushing hadoop metrics
+
   /**
    * A class for holding per-job scheduler variables. These always contain the
    * values of the variables at the last update(), and are used along with a
@@ -105,8 +114,6 @@ public class FairScheduler extends TaskScheduler {
    */
   static class JobInfo {
     boolean runnable = false;   // Can the job run given user/pool limits?
-    // Does this job need to be initialized?
-    volatile boolean needsInitializing = true;
     public JobSchedulable mapSchedulable;
     public JobSchedulable reduceSchedulable;
     // Variables used for delay scheduling
@@ -150,8 +157,14 @@ public class FairScheduler extends TaskScheduler {
         eventLog.init(conf, hostname);
       }
       // Initialize other pieces of the scheduler
-      jobInitializer = new JobInitializer(conf, taskTrackerManager);
       taskTrackerManager.addJobInProgressListener(jobListener);
+      if (!mockMode) {
+        eagerInitListener = new EagerTaskInitializationListener(conf);
+        eagerInitListener.setTaskTrackerManager(taskTrackerManager);
+        eagerInitListener.start();
+        taskTrackerManager.addJobInProgressListener(eagerInitListener);
+      }
+
       poolMgr = new PoolManager(this);
       poolMgr.initialize();
       loadMgr = (LoadManager) ReflectionUtils.newInstance(
@@ -171,8 +184,9 @@ public class FairScheduler extends TaskScheduler {
         weightAdjuster = (WeightAdjuster) ReflectionUtils.newInstance(
             weightAdjClass, conf);
       }
+
       updateInterval = conf.getLong(
-          "mapred.fairscheduler.update.interval", 500);
+          "mapred.fairscheduler.update.interval", 2500);
       dumpInterval = conf.getLong(
           "mapred.fairscheduler.dump.interval", 10000);
       preemptionInterval = conf.getLong(
@@ -189,16 +203,13 @@ public class FairScheduler extends TaskScheduler {
           "mapred.fairscheduler.preemption", false);
       onlyLogPreemption = conf.getBoolean(
           "mapred.fairscheduler.preemption.only.log", false);
-      long defaultDelay = conf.getLong(
+      localityDelay = conf.getLong(
           "mapred.fairscheduler.locality.delay", -1);
-      nodeLocalityDelay = conf.getLong(
-          "mapred.fairscheduler.locality.delay.node", defaultDelay);
-      rackLocalityDelay = conf.getLong(
-          "mapred.fairscheduler.locality.delay.rack", defaultDelay);
-      if (defaultDelay == -1 && 
-          (nodeLocalityDelay == -1 || rackLocalityDelay == -1)) {
+      allowUndeclaredPools = conf.getBoolean(ALLOW_UNDECLARED_POOLS_KEY, true);
+      if (localityDelay == -1)
         autoComputeLocalityDelay = true; // Compute from heartbeat interval
-      }
+
+
       initialized = true;
       running = true;
       lastUpdateTime = clock.getTime();
@@ -226,15 +237,6 @@ public class FairScheduler extends TaskScheduler {
     LOG.info("Successfully configured FairScheduler");
   }
 
-  private MetricsUpdater metricsUpdater; // responsible for pushing hadoop metrics
-
-  /**
-   * Returns the LoadManager object used by the Fair Share scheduler
-   */
-  LoadManager getLoadManager() {
-    return loadMgr;
-  }
-
   /**
    * Register metrics for the fair scheduler, and start a thread
    * to update them periodically.
@@ -250,9 +252,10 @@ public class FairScheduler extends TaskScheduler {
     if (eventLog != null)
       eventLog.log("SHUTDOWN");
     running = false;
-    jobInitializer.terminate();
     if (jobListener != null)
       taskTrackerManager.removeJobInProgressListener(jobListener);
+    if (eagerInitListener != null)
+      taskTrackerManager.removeJobInProgressListener(eagerInitListener);
     if (eventLog != null)
       eventLog.shutdown();
     if (metricsUpdater != null) {
@@ -261,48 +264,22 @@ public class FairScheduler extends TaskScheduler {
       metricsUpdater = null;
     }
   }
- 
 
-  private class JobInitializer {
-    private final int DEFAULT_NUM_THREADS = 1;
-    private ExecutorService threadPool;
-    private TaskTrackerManager ttm;
-    public JobInitializer(Configuration conf, TaskTrackerManager ttm) {
-      int numThreads = conf.getInt("mapred.jobinit.threads",
-          DEFAULT_NUM_THREADS);
-      threadPool = Executors.newFixedThreadPool(numThreads);
-      this.ttm = ttm;
-    }
-    public void initJob(JobInfo jobInfo, JobInProgress job) {
-      if (!mockMode) {
-        threadPool.execute(new InitJob(jobInfo, job));
-      } else {
-        new InitJob(jobInfo, job).run();
-      }
-    }
-    class InitJob implements Runnable {
-      private JobInfo jobInfo;
-      private JobInProgress job;
-      public InitJob(JobInfo jobInfo, JobInProgress job) {
-        this.jobInfo = jobInfo;
-        this.job = job;
-      }
-      public void run() {
-        ttm.initJob(job);
-      }
-    }
-    void terminate() {
-      LOG.info("Shutting down thread pool");
-      threadPool.shutdownNow();
-      try {
-        threadPool.awaitTermination(1, TimeUnit.MINUTES);
-      } catch (InterruptedException e) {
-        // Ignore, we are in shutdown anyway.
-      }
-    }
+  /**
+   * Responsible for updating metrics when the metrics context requests it.
+   */
+  private class MetricsUpdater implements Updater {
+    @Override
+    public void doUpdates(MetricsContext context) {
+      updateMetrics();
+    }    
   }
-
-/**
+  
+  synchronized void updateMetrics() {
+    poolMgr.updateMetrics();
+  }
+  
+  /**
    * Used to listen for jobs added/removed by our {@link TaskTrackerManager}.
    */
   private class JobListener extends JobInProgressListener {
@@ -354,20 +331,6 @@ public class FairScheduler extends TaskScheduler {
       }
     }
   }
-
-  /**
-   * Responsible for updating metrics when the metrics context requests it.
-   */
-  private class MetricsUpdater implements Updater {
-    @Override
-    public void doUpdates(MetricsContext context) {
-      updateMetrics();
-    }    
-  }
-  
-  synchronized void updateMetrics() {
-    poolMgr.updateMetrics();
-  }
   
   @Override
   public synchronized List<Task> assignTasks(TaskTracker tracker)
@@ -377,7 +340,7 @@ public class FairScheduler extends TaskScheduler {
     String trackerName = tracker.getTrackerName();
     eventLog.log("HEARTBEAT", trackerName);
     long currentTime = clock.getTime();
-    
+
     // Compute total runnable maps and reduces, and currently running ones
     int runnableMaps = 0;
     int runningMaps = 0;
@@ -429,7 +392,8 @@ public class FairScheduler extends TaskScheduler {
       if (!mapRejected) {
         if (mapsAssigned == mapCapacity ||
             runningMaps == runnableMaps ||
-            !loadMgr.canAssignMap(tts, runnableMaps, totalMapSlots)) {
+            !loadMgr.canAssignMap(tts, runnableMaps,
+                totalMapSlots, mapsAssigned)) {
           eventLog.log("INFO", "Can't assign another MAP to " + trackerName);
           mapRejected = true;
         }
@@ -437,7 +401,8 @@ public class FairScheduler extends TaskScheduler {
       if (!reduceRejected) {
         if (reducesAssigned == reduceCapacity ||
             runningReduces == runnableReduces ||
-            !loadMgr.canAssignReduce(tts, runnableReduces, totalReduceSlots)) {
+            !loadMgr.canAssignReduce(tts, runnableReduces,
+                totalReduceSlots, reducesAssigned)) {
           eventLog.log("INFO", "Can't assign another REDUCE to " + trackerName);
           reduceRejected = true;
         }
@@ -460,7 +425,8 @@ public class FairScheduler extends TaskScheduler {
       } else {
         // If both types are available, choose the task type with fewer running
         // tasks on the task tracker to prevent that task type from starving
-        if (tts.countMapTasks() <= tts.countReduceTasks()) {
+        if (tts.countMapTasks() + mapsAssigned <=
+            tts.countReduceTasks() + reducesAssigned) {
           taskType = TaskType.MAP;
         } else {
           taskType = TaskType.REDUCE;
@@ -525,15 +491,16 @@ public class FairScheduler extends TaskScheduler {
    * The scheduler may launch fewer than this many tasks if the LoadManager
    * says not to launch more, but it will never launch more than this number.
    */
-  private int maxTasksToAssign(TaskType type, TaskTrackerStatus tts) {
+  protected int maxTasksToAssign(TaskType type, TaskTrackerStatus tts) {
     if (!assignMultiple)
       return 1;
     int cap = (type == TaskType.MAP) ? mapAssignCap : reduceAssignCap;
+    int availableSlots = (type == TaskType.MAP) ?
+        tts.getAvailableMapSlots(): tts.getAvailableReduceSlots();
     if (cap == -1) // Infinite cap; use the TaskTracker's slot count
-      return (type == TaskType.MAP) ?
-          tts.getAvailableMapSlots(): tts.getAvailableReduceSlots();
+      return availableSlots;
     else
-      return cap;
+      return Math.min(cap, availableSlots);
   }
 
   /**
@@ -573,10 +540,9 @@ public class FairScheduler extends TaskScheduler {
    * If the job has no locality information (e.g. it does not use HDFS), this 
    * method returns LocalityLevel.ANY, allowing tasks at any level.
    * Otherwise, the job can only launch tasks at its current locality level
-   * or lower, unless it has waited at least nodeLocalityDelay or
-   * rackLocalityDelay milliseconds depends on the current level. If it
-   * has waited (nodeLocalityDelay + rackLocalityDelay) milliseconds,
-   * it can go to any level.
+   * or lower, unless it has waited at least localityDelay milliseconds
+   * (in which case it can go one level beyond) or 2 * localityDelay millis
+   * (in which case it can go to any level).
    */
   protected LocalityLevel getAllowedLocalityLevel(JobInProgress job,
       long currentTime) {
@@ -603,15 +569,14 @@ public class FairScheduler extends TaskScheduler {
     // In the common case, compute locality level based on time waited
     switch(info.lastMapLocalityLevel) {
     case NODE: // Last task launched was node-local
-      if (info.timeWaitedForLocalMap >=
-          nodeLocalityDelay + rackLocalityDelay)
+      if (info.timeWaitedForLocalMap >= 2 * localityDelay)
         return LocalityLevel.ANY;
-      else if (info.timeWaitedForLocalMap >= nodeLocalityDelay)
+      else if (info.timeWaitedForLocalMap >= localityDelay)
         return LocalityLevel.RACK;
       else
         return LocalityLevel.NODE;
     case RACK: // Last task launched was rack-local
-      if (info.timeWaitedForLocalMap >= rackLocalityDelay)
+      if (info.timeWaitedForLocalMap >= localityDelay)
         return LocalityLevel.ANY;
       else
         return LocalityLevel.RACK;
@@ -626,61 +591,59 @@ public class FairScheduler extends TaskScheduler {
    * and needed tasks of each type. 
    */
   protected void update() {
-    // Making more granular locking so that clusterStatus can be fetched 
-    // from Jobtracker without locking the scheduler.
-    ClusterStatus clusterStatus = taskTrackerManager.getClusterStatus();
-    
-    // Recompute locality delay from JobTracker heartbeat interval if enabled.
-    // This will also lock the JT, so do it outside of a fair scheduler lock.
-    if (autoComputeLocalityDelay) {
-      JobTracker jobTracker = (JobTracker) taskTrackerManager;
-      nodeLocalityDelay = Math.min(MAX_AUTOCOMPUTED_LOCALITY_DELAY,
-          (long) (1.5 * jobTracker.getNextHeartbeatInterval()));
-      rackLocalityDelay = nodeLocalityDelay;
-    }
-    
-    // Got clusterStatus hence acquiring scheduler lock now.
-    synchronized (this) {
-      // Reload allocations file if it hasn't been loaded in a while
-      poolMgr.reloadAllocsIfNecessary();
-      
-      // Remove any jobs that have stopped running
-      List<JobInProgress> toRemove = new ArrayList<JobInProgress>();
-      for (JobInProgress job: infos.keySet()) { 
-        int runState = job.getStatus().getRunState();
-        if (runState == JobStatus.SUCCEEDED || runState == JobStatus.FAILED
-          || runState == JobStatus.KILLED) {
-            toRemove.add(job);
+    synchronized (taskTrackerManager) {
+      synchronized (this) {
+        ClusterStatus clusterStatus = taskTrackerManager.getClusterStatus();
+
+        // Recompute locality delay from JobTracker heartbeat interval if enabled.
+        // This will also lock the JT, so do it outside of a fair scheduler lock.
+        if (autoComputeLocalityDelay) {
+          JobTracker jobTracker = (JobTracker) taskTrackerManager;
+          localityDelay = Math.min(MAX_AUTOCOMPUTED_LOCALITY_DELAY,
+              (long) (1.5 * jobTracker.getNextHeartbeatInterval()));
         }
+
+        // Reload allocations file if it hasn't been loaded in a while
+        poolMgr.reloadAllocsIfNecessary();
+
+        // Remove any jobs that have stopped running
+        List<JobInProgress> toRemove = new ArrayList<JobInProgress>();
+        for (JobInProgress job: infos.keySet()) { 
+          int runState = job.getStatus().getRunState();
+          if (runState == JobStatus.SUCCEEDED || runState == JobStatus.FAILED
+            || runState == JobStatus.KILLED) {
+              toRemove.add(job);
+          }
+        }
+        for (JobInProgress job: toRemove) {
+          jobNoLongerRunning(job);
+        }
+
+        updateRunnability(); // Set job runnability based on user/pool limits 
+
+        // Update demands of jobs and pools
+        for (Pool pool: poolMgr.getPools()) {
+          pool.getMapSchedulable().updateDemand();
+          pool.getReduceSchedulable().updateDemand();
+        }
+
+        // Compute fair shares based on updated demands
+        List<PoolSchedulable> mapScheds = getPoolSchedulables(TaskType.MAP);
+        List<PoolSchedulable> reduceScheds = getPoolSchedulables(TaskType.REDUCE);
+        SchedulingAlgorithms.computeFairShares(
+            mapScheds, clusterStatus.getMaxMapTasks());
+        SchedulingAlgorithms.computeFairShares(
+            reduceScheds, clusterStatus.getMaxReduceTasks());
+
+        // Use the computed shares to assign shares within each pool
+        for (Pool pool: poolMgr.getPools()) {
+          pool.getMapSchedulable().redistributeShare();
+          pool.getReduceSchedulable().redistributeShare();
+        }
+
+        if (preemptionEnabled)
+          updatePreemptionVariables();
       }
-      for (JobInProgress job: toRemove) {
-        jobNoLongerRunning(job);
-      }
-      
-      updateRunnability(); // Set job runnability based on user/pool limits 
-      
-      // Update demands of jobs and pools
-      for (Pool pool: poolMgr.getPools()) {
-        pool.getMapSchedulable().updateDemand();
-        pool.getReduceSchedulable().updateDemand();
-      }
-      
-      // Compute fair shares based on updated demands
-      List<PoolSchedulable> mapScheds = getPoolSchedulables(TaskType.MAP);
-      List<PoolSchedulable> reduceScheds = getPoolSchedulables(TaskType.REDUCE);
-      SchedulingAlgorithms.computeFairShares(
-          mapScheds, clusterStatus.getMaxMapTasks());
-      SchedulingAlgorithms.computeFairShares(
-          reduceScheds, clusterStatus.getMaxReduceTasks());
-      
-      // Use the computed shares to assign shares within each pool
-      for (Pool pool: poolMgr.getPools()) {
-        pool.getMapSchedulable().redistributeShare();
-        pool.getReduceSchedulable().redistributeShare();
-      }
-      
-      if (preemptionEnabled)
-        updatePreemptionVariables();
     }
   }
 
@@ -715,27 +678,16 @@ public class FairScheduler extends TaskScheduler {
     Map<String, Integer> userJobs = new HashMap<String, Integer>();
     Map<String, Integer> poolJobs = new HashMap<String, Integer>();
     for (JobInProgress job: jobs) {
-      String user = job.getJobConf().getUser();
-      String pool = poolMgr.getPoolName(job);
-      int userCount = userJobs.containsKey(user) ? userJobs.get(user) : 0;
-      int poolCount = poolJobs.containsKey(pool) ? poolJobs.get(pool) : 0;
-      if (userCount < poolMgr.getUserMaxJobs(user) &&
-          poolCount < poolMgr.getPoolMaxJobs(pool)) {
-        if (job.getStatus().getRunState() == JobStatus.RUNNING ||
-            job.getStatus().getRunState() == JobStatus.PREP) {
+      if (job.getStatus().getRunState() == JobStatus.RUNNING) {
+        String user = job.getJobConf().getUser();
+        String pool = poolMgr.getPoolName(job);
+        int userCount = userJobs.containsKey(user) ? userJobs.get(user) : 0;
+        int poolCount = poolJobs.containsKey(pool) ? poolJobs.get(pool) : 0;
+        if (userCount < poolMgr.getUserMaxJobs(user) && 
+            poolCount < poolMgr.getPoolMaxJobs(pool)) {
+          infos.get(job).runnable = true;
           userJobs.put(user, userCount + 1);
           poolJobs.put(pool, poolCount + 1);
-          JobInfo jobInfo = infos.get(job);
-          if (job.getStatus().getRunState() == JobStatus.RUNNING) {
-            jobInfo.runnable = true;
-          } else {
-            // The job is in the PREP state. Give it to the job initializer
-            // for initialization if we have not already done it.
-            if (jobInfo.needsInitializing) {
-              jobInfo.needsInitializing = false;
-              jobInitializer.initJob(jobInfo, job);
-            }
-          }
         }
       }
     }
@@ -787,6 +739,8 @@ public class FairScheduler extends TaskScheduler {
    * Update the preemption fields for all PoolScheduables, i.e. the times since
    * each pool last was at its guaranteed share and at > 1/2 of its fair share
    * for each type of task.
+   * 
+   * Requires locks on both the JobTracker and the FairScheduler to be held.
    */
   private void updatePreemptionVariables() {
     long now = clock.getTime();
@@ -923,7 +877,7 @@ public class FairScheduler extends TaskScheduler {
           tasksToPreempt--;
           if (tasksToPreempt == 0)
             break;
-          
+
           // reduce tasks left for pool
           tasksLeft.put(pool, --tasksLeftForPool);
         } catch (IOException e) {
@@ -971,7 +925,7 @@ public class FairScheduler extends TaskScheduler {
 
   private List<TaskStatus> getRunningTasks(JobInProgress job, TaskType type) {
     // Create a list of all running TaskInProgress'es in the job
-    Set<TaskInProgress> tips = new HashSet<TaskInProgress>();
+    List<TaskInProgress> tips = new ArrayList<TaskInProgress>();
     if (type == TaskType.MAP) {
       // Jobs may have both "non-local maps" which have a split with no locality
       // info (e.g. the input file is not in HDFS), and maps with locality info,
@@ -999,6 +953,8 @@ public class FairScheduler extends TaskScheduler {
     return statuses;
   }
 
+
+
   protected boolean isRunnable(JobInProgress job) {
     JobInfo info = infos.get(job);
     if (info == null) return false;
@@ -1007,6 +963,9 @@ public class FairScheduler extends TaskScheduler {
 
   @Override
   public synchronized Collection<JobInProgress> getJobs(String queueName) {
+    if (queueName == null) {
+      return null;
+    }
     Pool myJobPool = poolMgr.getPool(queueName);
     return myJobPool.getJobs();
   }
@@ -1098,4 +1057,22 @@ public class FairScheduler extends TaskScheduler {
   long getLastPreemptionUpdateTime() {
     return lastPreemptionUpdateTime;
   }
+
+  /**
+   * Examines the job's pool name to determine if it is a declared pool name (in
+   * the scheduler allocation file).
+   */
+  @Override
+  public void checkJobSubmission(JobInProgress job)
+      throws UndeclaredPoolException {
+    Set<String> declaredPools = poolMgr.getDeclaredPools();
+    if (!this.allowUndeclaredPools
+        && !declaredPools.contains(poolMgr.getPoolName(job)))
+      throw new UndeclaredPoolException("Pool name: '"
+          + poolMgr.getPoolName(job)
+          + "' is invalid. Add pool name to the fair scheduler allocation "
+          + "file. Valid pools are: "
+          + StringUtils.join(", ", declaredPools));
+  }
+
 }

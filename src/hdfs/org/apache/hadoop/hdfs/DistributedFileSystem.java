@@ -155,14 +155,16 @@ public class DistributedFileSystem extends FileSystem {
           dfs.open(getPathName(f), bufferSize, verifyChecksum, statistics));
   }
 
-  /** 
+  /**
    * Start the lease recovery of a file
    *
    * @param f a file
    * @return true if the file is already closed
    * @throws IOException if an error occurs
+   * @throws NoSuchMethodException if server does not support this function
    */
-  public boolean recoverLease(Path f) throws IOException {
+  public boolean recoverLease(Path f)
+      throws IOException, NoSuchMethodException {
     return dfs.recoverLease(getPathName(f));
   }
 
@@ -194,7 +196,7 @@ public class DistributedFileSystem extends FileSystem {
       boolean overwrite,
       int bufferSize, short replication, long blockSize, 
       Progressable progress) throws IOException {
-
+    statistics.incrementWriteOps(1);
     return new FSDataOutputStream
         (dfs.create(getPathName(f), permission, 
                     overwrite, false, replication, blockSize, progress, bufferSize), 
@@ -339,44 +341,52 @@ public class DistributedFileSystem extends FileSystem {
     return dfs;
   }        
   
-  public static class DiskStatus {
-    private long capacity;
-    private long dfsUsed;
-    private long remaining;
+  /** @deprecated Use {@link org.apache.hadoop.fs.FsStatus instead */
+  @Deprecated
+  public static class DiskStatus extends FsStatus {
+    public DiskStatus(FsStatus stats) {
+      super(stats.getCapacity(), stats.getUsed(), stats.getRemaining());
+    }
+
     public DiskStatus(long capacity, long dfsUsed, long remaining) {
-      this.capacity = capacity;
-      this.dfsUsed = dfsUsed;
-      this.remaining = remaining;
+      super(capacity, dfsUsed, remaining);
     }
-    
-    public long getCapacity() {
-      return capacity;
-    }
+
     public long getDfsUsed() {
-      return dfsUsed;
-    }
-    public long getRemaining() {
-      return remaining;
+      return super.getUsed();
     }
   }
   
+  /** {@inheritDoc} */
+  public FsStatus getStatus(Path p) throws IOException {
+    return dfs.getDiskStatus();
+  }
 
   /** Return the disk usage of the filesystem, including total capacity,
-   * used space, and remaining space */
+   * used space, and remaining space 
+   * @deprecated Use {@link org.apache.hadoop.fs.FileSystem#getStatus()} 
+   * instead */
+   @Deprecated
   public DiskStatus getDiskStatus() throws IOException {
-    return dfs.getDiskStatus();
+    return new DiskStatus(dfs.getDiskStatus());
   }
   
   /** Return the total raw capacity of the filesystem, disregarding
-   * replication .*/
+   * replication.
+   * @deprecated Use {@link org.apache.hadoop.fs.FileSystem#getStatus()} 
+   * instead */
+   @Deprecated
   public long getRawCapacity() throws IOException{
-    return dfs.totalRawCapacity();
+    return dfs.getDiskStatus().getCapacity();
   }
 
   /** Return the total raw used space in the filesystem, disregarding
-   * replication .*/
+   * replication.
+   * @deprecated Use {@link org.apache.hadoop.fs.FileSystem#getStatus()} 
+   * instead */
+   @Deprecated
   public long getRawUsed() throws IOException{
-    return dfs.totalRawUsed();
+    return dfs.getDiskStatus().getUsed();
   }
    
   /**

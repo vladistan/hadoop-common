@@ -141,10 +141,6 @@ public class CodecPool {
     if (compressor == null) {
       return;
     }
-    // if the compressor can't be reused, don't pool it.
-    if (compressor.getClass().isAnnotationPresent(DoNotPool.class)) {
-      return;
-    }
     compressor.reset();
     payback(compressorPool, compressor);
   }
@@ -157,10 +153,6 @@ public class CodecPool {
    */
   public static void returnDecompressor(Decompressor decompressor) {
     if (decompressor == null) {
-      return;
-    }
-    // if the decompressor can't be reused, don't pool it.
-    if (decompressor.getClass().isAnnotationPresent(DoNotPool.class)) {
       return;
     }
     decompressor.reset();

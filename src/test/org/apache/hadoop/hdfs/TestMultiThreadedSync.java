@@ -51,6 +51,15 @@ public class TestMultiThreadedSync {
   
   private byte[] toWrite = null;
 
+  {
+    ((Log4JLogger)NameNode.stateChangeLog).getLogger().setLevel(Level.ALL);
+    ((Log4JLogger)LeaseManager.LOG).getLogger().setLevel(Level.ALL);
+    ((Log4JLogger)FSNamesystem.LOG).getLogger().setLevel(Level.ALL);
+    ((Log4JLogger)DataNode.LOG).getLogger().setLevel(Level.ALL);
+    ((Log4JLogger)DFSClient.LOG).getLogger().setLevel(Level.ALL);
+    ((Log4JLogger)InterDatanodeProtocol.LOG).getLogger().setLevel(Level.ALL);
+  }
+
   /*
    * creates a file but does not close it
    */ 
@@ -75,75 +84,6 @@ public class TestMultiThreadedSync {
     Path p = new Path("/multiple-syncers.dat");
     try {
       doMultithreadedWrites(conf, p, NUM_THREADS, WRITE_SIZE, NUM_WRITES_PER_THREAD);
-    } finally {
-      fs.close();
-      cluster.shutdown();
-    }
-  }
-
-  /**
-   * Test case where a bunch of threads are continuously calling sync() while another
-   * thread appends some data and then closes the file.
-   *
-   * The syncing threads should eventually catch an IOException stating that the stream
-   * was closed -- and not an NPE or anything like that.
-   */
-  @Test
-  public void testSyncWhileClosing() throws Throwable {
-    Configuration conf = new Configuration();
-    MiniDFSCluster cluster = new MiniDFSCluster(conf, 1, true, null);
-    FileSystem fs = cluster.getFileSystem();
-    Path p = new Path("/sync-and-close.dat");
-
-    final FSDataOutputStream stm = createFile(fs, p, 1);
-
-
-    ArrayList<Thread> flushers = new ArrayList<Thread>();
-    final AtomicReference<Throwable> thrown = new AtomicReference<Throwable>();
-    try {
-      for (int i = 0; i < 10; i++) {
-        Thread flusher = new Thread() {
-            public void run() {
-              try {
-                while (true) {
-                  try {
-                    stm.sync();
-                  } catch (IOException ioe) {
-                    if (!ioe.toString().contains("DFSOutputStream is closed")) {
-                      throw ioe;
-                    } else {
-                      return;
-                    }
-                  }
-                }
-              } catch (Throwable t) {
-                thrown.set(t);
-              }
-            }
-          };
-        flusher.start();
-        flushers.add(flusher);
-      }
-
-      // Write some data
-      for (int i = 0; i < 10000; i++) {
-        stm.write(1);
-      }
-
-      // Close it while the flushing threads are still flushing
-      stm.close();
-
-      // Wait for the flushers to all die.
-      for (Thread t : flushers) {
-        t.join();
-      }
-
-      // They should have all gotten the expected exception, not anything
-      // else.
-      if (thrown.get() != null) {
-        throw thrown.get();
-      }
-
     } finally {
       fs.close();
       cluster.shutdown();

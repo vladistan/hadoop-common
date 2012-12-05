@@ -55,6 +55,8 @@ import java.util.Set;
  * It does not have a default value.</li>
  * <li>kerberos.keytab: the keytab file containing the credentials for the Kerberos principal.
  * It does not have a default value.</li>
+ * <li>kerberos.name.rules: kerberos names rules to resolve principal names, see 
+ * {@link KerberosName#setRules(String)}</li>
  * </ul>
  */
 public class KerberosAuthenticationHandler implements AuthenticationHandler {

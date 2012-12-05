@@ -26,8 +26,6 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.metrics.ContextFactory;
 import org.apache.hadoop.metrics.spi.AbstractMetricsContext;
 import org.apache.hadoop.metrics.spi.OutputRecord;
@@ -42,27 +40,19 @@ import org.apache.hadoop.metrics.spi.OutputRecord;
  * myContextName.fileName=/tmp/metrics.log
  * myContextName.period=5
  * </pre>
- * @deprecated use {@link org.apache.hadoop.metrics2.sink.FileSink} instead.
  */
-@InterfaceAudience.Public
-@InterfaceStability.Evolving
-@Deprecated
 public class FileContext extends AbstractMetricsContext {
     
   /* Configuration attribute names */
-  @InterfaceAudience.Private
   protected static final String FILE_NAME_PROPERTY = "fileName";
-  @InterfaceAudience.Private
   protected static final String PERIOD_PROPERTY = "period";
     
   private File file = null;              // file for metrics to be written to
   private PrintWriter writer = null;
     
   /** Creates a new instance of FileContext */
-  @InterfaceAudience.Private
   public FileContext() {}
     
-  @InterfaceAudience.Private
   public void init(String contextName, ContextFactory factory) {
     super.init(contextName, factory);
         
@@ -77,7 +67,6 @@ public class FileContext extends AbstractMetricsContext {
   /**
    * Returns the configured file name, or null.
    */
-  @InterfaceAudience.Private
   public String getFileName() {
     if (file == null) {
       return null;
@@ -92,7 +81,6 @@ public class FileContext extends AbstractMetricsContext {
    * if specified. Otherwise the data will be written to standard
    * output.
    */
-  @InterfaceAudience.Private
   public void startMonitoring()
     throws IOException 
   {
@@ -108,7 +96,6 @@ public class FileContext extends AbstractMetricsContext {
    * Stops monitoring, closing the file.
    * @see #close()
    */
-  @InterfaceAudience.Private
   public void stopMonitoring() {
     super.stopMonitoring();
         
@@ -121,7 +108,6 @@ public class FileContext extends AbstractMetricsContext {
   /**
    * Emits a metrics record to a file.
    */
-  @InterfaceAudience.Private
   public void emitRecord(String contextName, String recordName, OutputRecord outRec) {
     writer.print(contextName);
     writer.print(".");
@@ -147,7 +133,6 @@ public class FileContext extends AbstractMetricsContext {
   /**
    * Flushes the output writer, forcing updates to disk.
    */
-  @InterfaceAudience.Private
   public void flush() {
     writer.flush();
   }

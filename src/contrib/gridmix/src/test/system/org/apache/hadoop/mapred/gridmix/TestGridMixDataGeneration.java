@@ -109,7 +109,7 @@ public class TestGridMixDataGeneration {
        RoundRobinUserResolver.class.getName(),
        "REPLAY",
        inputSize +"m",
-       "file://" + UtilsForGridmix.getProxyUsersFile(cluster.getHadoopProxyUsers()),
+       "file://" + cluster.getProxyUsersFilePath(),
        "file:///dev/null"};
     
     int exitCode = UtilsForGridmix.runGridmixJob(gridmixDir, 

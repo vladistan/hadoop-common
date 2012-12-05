@@ -137,7 +137,6 @@
 
 
 
-<!DOCTYPE html>
 <html>
 <head>
 <%JspHelper.createTitle(out, request, request.getParameter("filename")); %>

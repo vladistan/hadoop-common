@@ -234,8 +234,32 @@ public interface FSDatasetInterface extends FSDatasetMBean {
    * Returns the block report - the full list of blocks stored
    * Returns only finalized blocks
    * @return - the block report - the full list of blocks stored
+   * @throws InterruptedException
    */
-  public Block[] getBlockReport();
+  public Block[] getBlockReport() throws InterruptedException;
+  
+  /**
+   * Request that a block report be prepared.
+   */
+  public void requestAsyncBlockReport();
+
+  /**
+   * @return true if an asynchronous block report is ready
+   */
+  public boolean isAsyncBlockReportReady();
+
+  /**
+   * Retrieve an asynchronously prepared block report. Callers should first
+   * call {@link #requestAsyncBlockReport()}, and then poll
+   * {@link #isAsyncBlockReportReady()} until it returns true.
+   *
+   * Retrieving the asynchronous block report also resets it; a new
+   * one must be prepared before this method may be called again.
+   *
+   * @throws IllegalStateException if an async report is not ready
+   */
+  public Block[] retrieveAsyncBlockReport();
+
   
   /**
    * Returns the blocks being written report 
@@ -308,9 +332,10 @@ public interface FSDatasetInterface extends FSDatasetMBean {
    * checks how many valid storage volumes are there in the DataNode
    * @return true if more then minimum valid volumes left in the FSDataSet
    */
-  public boolean hasEnoughResource();
+  public boolean hasEnoughResources();
 
   public BlockRecoveryInfo startBlockRecovery(long blockId) throws IOException;
+
   /**
    * Get {@link BlockLocalPathInfo} for the given block.
    **/

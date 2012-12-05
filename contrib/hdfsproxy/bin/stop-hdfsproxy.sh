@@ -16,16 +16,13 @@
 # limitations under the License.
 
 
-# Stop hadoop job history daemon.  Run this on the node where history server is running
+# Stop hdfsproxy daemons.  Run this on master node.
 
 bin=`dirname "$0"`
 bin=`cd "$bin"; pwd`
 
-if [ -e "$bin/../libexec/hadoop-config.sh" ]; then
-  . "$bin"/../libexec/hadoop-config.sh
-else
-  . "$bin/hadoop-config.sh"
-fi
+. "$bin"/hdfsproxy-config.sh
 
-"$bin"/hadoop-daemon.sh --config $HADOOP_CONF_DIR stop historyserver
+# "$bin"/hdfsproxy-daemon.sh --config $HDFSPROXY_CONF_DIR stop
+"$bin"/hdfsproxy-daemons.sh --config $HDFSPROXY_CONF_DIR --hosts hdfsproxy-hosts stop
 

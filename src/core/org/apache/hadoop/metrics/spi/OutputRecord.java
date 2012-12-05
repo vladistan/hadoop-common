@@ -26,18 +26,12 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.Map.Entry;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.metrics.spi.AbstractMetricsContext.MetricMap;
 import org.apache.hadoop.metrics.spi.AbstractMetricsContext.TagMap;
 
 /**
  * Represents a record of metric data to be sent to a metrics system.
- * @deprecated in favor of <code>org.apache.hadoop.metrics2</code> usage.
  */
-@Deprecated
-@InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class OutputRecord {
     
   private TagMap tagMap;

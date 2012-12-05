@@ -22,7 +22,6 @@
   import="org.apache.hadoop.util.*"
 %>
 
-<!DOCTYPE html>
 <html>
 <link rel="stylesheet" type="text/css" href="/static/hadoop.css">
 <title>Hadoop SecondaryNameNode</title>
