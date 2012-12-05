@@ -1,0 +1,44 @@
+From c3fdddb05afc4aeea10fa4c689e136e74a711843 Mon Sep 17 00:00:00 2001
+From: Colin Patrick Mccabe <cmccabe@cloudera.com>
+Date: Wed, 25 Jul 2012 14:27:13 -0700
+Subject: [PATCH 1324/1344] CDH-6974: fix call to fuseConnectInit
+
+This fixes a bug introduced by the backport of HDFS-3608.
+
+fuseConnectInit should always be called before any fuse connections are
+made.  fuseConnectTest is the right function to call when -oinitchecks
+is specified.
+
+Ref: CDH-6974
+Author: Colin Patrick McCabe
+Reason: bug fix
+---
+ src/contrib/fuse-dfs/src/fuse_dfs.c |   10 ++++++++--
+ 1 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/src/contrib/fuse-dfs/src/fuse_dfs.c b/src/contrib/fuse-dfs/src/fuse_dfs.c
+index 4cc134f..0cf78e7 100644
+--- a/src/contrib/fuse-dfs/src/fuse_dfs.c
++++ b/src/contrib/fuse-dfs/src/fuse_dfs.c
+@@ -117,10 +117,16 @@ int main(int argc, char *argv[])
+     exit(0);
+   }
+ 
++  ret = fuseConnectInit(options.nn_uri, options.nn_port);
++  if (ret) {
++    ERROR("FATAL: dfs_init: fuseConnectInit failed with error %d!", ret);
++    print_env_vars();
++    exit(EXIT_FAILURE);
++  }
+   if (options.initchecks == 1) {
+-    ret = fuseConnectInit(options.nn_uri, options.nn_port);
++    ret = fuseConnectTest();
+     if (ret) {
+-      ERROR("FATAL: dfs_init: fuseConnInit failed with error %d!", ret);
++      ERROR("FATAL: dfs_init: fuseConnectTest failed with error %d!", ret);
+       print_env_vars();
+       exit(EXIT_FAILURE);
+     }
+-- 
+1.7.0.4
+

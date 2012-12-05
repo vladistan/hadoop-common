@@ -21,15 +21,17 @@
 #include "fuse_impls.h"
 #include "fuse_connect.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
  int dfs_chown(const char *path, uid_t uid, gid_t gid)
 {
-  TRACE1("chown", path)
-
+  struct hdfsConn *conn = NULL;
   int ret = 0;
-
-#if PERMS
   char *user = NULL;
   char *group = NULL;
+
+  TRACE1("chown", path)
 
   // retrieve dfs specific data
   dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
@@ -41,41 +43,38 @@
 
   user = getUsername(uid);
   if (NULL == user) {
-    syslog(LOG_ERR,"Could not lookup the user id string %d\n",(int)uid); 
-    fprintf(stderr, "could not lookup userid %d\n", (int)uid); 
+    ERROR("Could not lookup the user id string %d",(int)uid); 
     ret = -EIO;
+    goto cleanup;
   }
 
-  if (0 == ret) {
-    group = getGroup(gid);
-    if (group == NULL) {
-      syslog(LOG_ERR,"Could not lookup the group id string %d\n",(int)gid); 
-      fprintf(stderr, "could not lookup group %d\n", (int)gid); 
-      ret = -EIO;
-    } 
+  group = getGroup(gid);
+  if (group == NULL) {
+    ERROR("Could not lookup the group id string %d",(int)gid);
+    ret = -EIO;
+    goto cleanup;
+  } 
+
+  ret = fuseConnect(user, fuse_get_context(), &conn);
+  if (ret) {
+    fprintf(stderr, "fuseConnect: failed to open a libhdfs connection!  "
+            "error %d.\n", ret);
+    ret = -EIO;
+    goto cleanup;
   }
 
-  hdfsFS userFS = NULL;
-  if (0 == ret) {
-    // if not connected, try to connect and fail out if we can't.
-    if ((userFS = doConnectAsUser(dfs->nn_hostname,dfs->nn_port))== NULL) {
-      syslog(LOG_ERR, "ERROR: could not connect to dfs %s:%d\n", __FILE__, __LINE__);
-      ret = -EIO;
-    }
+  if (hdfsChown(hdfsConnGetFs(conn), path, user, group)) {
+    ERROR("Could not chown %s to %d:%d", path, (int)uid, gid);
+    ret = (errno > 0) ? -errno : -EIO;
+    goto cleanup;
   }
 
-  if (0 == ret) {
-    //  fprintf(stderr, "DEBUG: chown %s %d->%s %d->%s\n", path, (int)uid, user, (int)gid, group);
-    if (hdfsChown(userFS, path, user, group)) {
-      syslog(LOG_ERR,"ERROR: hdfs trying to chown %s to %d/%d",path, (int)uid, gid);
-      ret = -EIO;
-    }
+cleanup:
+  if (conn) {
+    hdfsConnRelease(conn);
   }
-  if (user) 
-    free(user);
-  if (group)
-    free(group);
-#endif
+  free(user);
+  free(group);
+
   return ret;
-
 }

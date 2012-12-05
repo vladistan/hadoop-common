@@ -19,6 +19,10 @@
 #include "fuse_dfs.h"
 #include "fuse_impls.h"
 #include "fuse_file_handle.h"
+#include "fuse_connect.h"
+
+#include <stdio.h>
+#include <stdlib.h>
 
 /**
  * This mutex is to protect releasing a file handle in case the user calls close in different threads
@@ -54,9 +58,8 @@ int dfs_release (const char *path, struct fuse_file_info *fi) {
     hdfsFile file_handle = (hdfsFile)fh->hdfsFH;
 
     if (NULL != file_handle) {
-      if (hdfsCloseFile(fh->fs, file_handle) != 0) {
-        syslog(LOG_ERR, "ERROR: dfs problem - could not close file_handle(%ld) for %s %s:%d\n",(long)file_handle,path, __FILE__, __LINE__);
-        fprintf(stderr, "ERROR: dfs problem - could not close file_handle(%ld) for %s %s:%d\n",(long)file_handle,path, __FILE__, __LINE__);
+      if (hdfsCloseFile(hdfsConnGetFs(fh->conn), file_handle) != 0) {
+        ERROR("Could not close handle %ld for %s\n",(long)file_handle, path);
         ret = -EIO;
       }
     }
@@ -64,9 +67,10 @@ int dfs_release (const char *path, struct fuse_file_info *fi) {
     if (fh->buf != NULL) {
       free(fh->buf);
     }
+
     // this is always created and initialized, so always destroy it. (see dfs_open)
     pthread_mutex_destroy(&fh->mutex);
-
+    hdfsConnRelease(fh->conn);
     free(fh);
 
     fi->fh = (uint64_t)0;

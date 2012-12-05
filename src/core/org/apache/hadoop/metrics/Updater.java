@@ -20,16 +20,9 @@
 
 package org.apache.hadoop.metrics;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
-
 /**
  * Call-back interface.  See <code>MetricsContext.registerUpdater()</code>.
- * @deprecated in favor of <code>org.apache.hadoop.metrics2</code> usage.
  */
-@Deprecated
-@InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
-@InterfaceStability.Evolving
 public interface Updater {
     
   /**

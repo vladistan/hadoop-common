@@ -1,0 +1,98 @@
+From 97dbe9075fa8a22b3b87c512093a9acc125ce466 Mon Sep 17 00:00:00 2001
+From: Colin Patrick Mccabe <cmccabe@cloudera.com>
+Date: Fri, 20 Jul 2012 14:08:55 -0700
+Subject: [PATCH 1319/1344] HDFS-3633. hdfsDelete should pass JNI_FALSE or JNI_TRUE.
+
+Also add recurisve argument to hdfsDelete.
+
+Ref: CDH-6716
+Author: Colin Patrick McCabe
+---
+ src/c++/libhdfs/hdfs.c                        |    7 ++++---
+ src/c++/libhdfs/hdfs.h                        |    5 ++++-
+ src/c++/libhdfs/tests/test_libhdfs_threaded.c |    4 ++--
+ src/contrib/fuse-dfs/src/fuse_trash.c         |    2 +-
+ 4 files changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/src/c++/libhdfs/hdfs.c b/src/c++/libhdfs/hdfs.c
+index 60680b4..194ed81 100644
+--- a/src/c++/libhdfs/hdfs.c
++++ b/src/c++/libhdfs/hdfs.c
+@@ -1332,7 +1332,7 @@ int hdfsMove(hdfsFS srcFS, const char* src, hdfsFS dstFS, const char* dst)
+ 
+ 
+ 
+-int hdfsDelete(hdfsFS fs, const char* path)
++int hdfsDelete(hdfsFS fs, const char* path, int recursive)
+ {
+     // JAVA EQUIVALENT:
+     //  File f = new File(path);
+@@ -1356,9 +1356,10 @@ int hdfsDelete(hdfsFS fs, const char* path)
+     //Delete the file
+     jvalue jVal;
+     jthrowable jExc = NULL;
++    jboolean jRecursive = recursive ? JNI_TRUE : JNI_FALSE;
+     if (invokeMethod(env, &jVal, &jExc, INSTANCE, jFS, HADOOP_FS,
+-                     "delete", "(Lorg/apache/hadoop/fs/Path;)Z",
+-                     jPath) != 0) {
++                     "delete", "(Lorg/apache/hadoop/fs/Path;Z)Z",
++                     jPath, jRecursive) != 0) {
+         errno = errnoFromException(jExc, env, "org.apache.hadoop.fs."
+                                    "FileSystem::delete");
+         destroyLocalReference(env, jPath);
+diff --git a/src/c++/libhdfs/hdfs.h b/src/c++/libhdfs/hdfs.h
+index c2f521c..5e945b3 100644
+--- a/src/c++/libhdfs/hdfs.h
++++ b/src/c++/libhdfs/hdfs.h
+@@ -398,9 +398,12 @@ extern  "C" {
+      * hdfsDelete - Delete file. 
+      * @param fs The configured filesystem handle.
+      * @param path The path of the file. 
++     * @param recursive if path is a directory and set to
++     * non-zero, the directory is deleted else throws an exception. In
++     * case of a file the recursive argument is irrelevant.
+      * @return Returns 0 on success, -1 on error. 
+      */
+-    int hdfsDelete(hdfsFS fs, const char* path);
++    int hdfsDelete(hdfsFS fs, const char* path, int recursive);
+ 
+ 
+     /**
+diff --git a/src/c++/libhdfs/tests/test_libhdfs_threaded.c b/src/c++/libhdfs/tests/test_libhdfs_threaded.c
+index f993976..835ef85 100644
+--- a/src/c++/libhdfs/tests/test_libhdfs_threaded.c
++++ b/src/c++/libhdfs/tests/test_libhdfs_threaded.c
+@@ -67,7 +67,7 @@ static int doTestHdfsOperations(struct tlhThreadInfo *ti, hdfsFS fs)
+     snprintf(prefix, sizeof(prefix), "/tlhData%04d", ti->threadIdx);
+ 
+     if (hdfsExists(fs, prefix) == 0) {
+-        EXPECT_ZERO(hdfsDelete(fs, prefix));
++        EXPECT_ZERO(hdfsDelete(fs, prefix, 1));
+     }
+     EXPECT_ZERO(hdfsCreateDirectory(fs, prefix));
+     snprintf(tmp, sizeof(tmp), "%s/file", prefix);
+@@ -138,7 +138,7 @@ static int doTestHdfsOperations(struct tlhThreadInfo *ti, hdfsFS fs)
+ //    EXPECT_ZERO(strcmp("doop2", fileInfo->mGroup));
+ //    hdfsFreeFileInfo(fileInfo, 1);
+ 
+-    EXPECT_ZERO(hdfsDelete(fs, prefix));
++    EXPECT_ZERO(hdfsDelete(fs, prefix, 1));
+     return 0;
+ }
+ 
+diff --git a/src/contrib/fuse-dfs/src/fuse_trash.c b/src/contrib/fuse-dfs/src/fuse_trash.c
+index 4f87197..416faab 100644
+--- a/src/contrib/fuse-dfs/src/fuse_trash.c
++++ b/src/contrib/fuse-dfs/src/fuse_trash.c
+@@ -117,7 +117,7 @@ int hdfsDeleteWithTrash(hdfsFS userFS, const char *path, int useTrash) {
+     return ret;
+   }
+ 
+-  if (hdfsDelete(userFS, path)) {
++  if (hdfsDelete(userFS, path, 1)) {
+     ERROR("Trying to delete the file %s", path);
+     return -EIO;
+   }
+-- 
+1.7.0.4
+

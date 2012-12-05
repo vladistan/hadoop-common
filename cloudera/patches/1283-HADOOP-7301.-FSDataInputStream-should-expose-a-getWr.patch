@@ -1,0 +1,60 @@
+From 0598122f91a9c3ffd9ec106941ab62a18c86a422 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Sat, 30 Jun 2012 19:06:24 -0700
+Subject: [PATCH 1283/1344] HADOOP-7301. FSDataInputStream should expose a getWrappedStream method.
+
+Reason: Testing
+Author: Jonathan Hsieh
+Ref: CDH-4806
+---
+ .../org/apache/hadoop/fs/FSDataInputStream.java    |    5 +++++
+ .../apache/hadoop/fs/FSMainOperationsBaseTest.java |   12 +++++++++++-
+ 2 files changed, 16 insertions(+), 1 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/fs/FSDataInputStream.java b/src/core/org/apache/hadoop/fs/FSDataInputStream.java
+index 1d44dec..2156e83 100644
+--- a/src/core/org/apache/hadoop/fs/FSDataInputStream.java
++++ b/src/core/org/apache/hadoop/fs/FSDataInputStream.java
+@@ -59,4 +59,9 @@ public class FSDataInputStream extends DataInputStream
+   public boolean seekToNewSource(long targetPos) throws IOException {
+     return ((Seekable)in).seekToNewSource(targetPos); 
+   }
++
++  // Returns the underlying input stream. This is used by unit tests.
++  public InputStream getWrappedStream() {
++    return in;
++  }
+ }
+diff --git a/src/test/org/apache/hadoop/fs/FSMainOperationsBaseTest.java b/src/test/org/apache/hadoop/fs/FSMainOperationsBaseTest.java
+index 4b16ae9..18017de 100644
+--- a/src/test/org/apache/hadoop/fs/FSMainOperationsBaseTest.java
++++ b/src/test/org/apache/hadoop/fs/FSMainOperationsBaseTest.java
+@@ -20,6 +20,7 @@ package org.apache.hadoop.fs;
+ 
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
++import java.io.InputStream;
+ 
+ 
+ 
+@@ -718,7 +719,16 @@ public abstract class FSMainOperationsBaseTest  {
+     out.close();
+   }
+ 
+-  
++  @Test
++  public void testGetWrappedInputStream() throws IOException {
++    Path src = getTestRootPath(fSys, "test/hadoop/file");
++    createFile(src);
++    FSDataInputStream in = fSys.open(src);
++    InputStream is = in.getWrappedStream();
++    in.close();
++    Assert.assertNotNull(is);  
++  }
++
+   protected void createFile(Path path) throws IOException {
+     FileSystemTestHelper.createFile(fSys, path);
+   }
+-- 
+1.7.0.4
+

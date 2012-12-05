@@ -27,6 +27,7 @@ import org.apache.commons.daemon.DaemonContext;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.server.common.HdfsConstants;
 import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.mortbay.jetty.nio.SelectChannelConnector;
 
 /**
@@ -58,10 +59,7 @@ public class SecureDataNodeStarter implements Daemon {
   @Override
   public void init(DaemonContext context) throws Exception {
     System.err.println("Initializing secure datanode resources");
-    // We should only start up a secure datanode in a Kerberos-secured cluster
-    Configuration conf = new Configuration(); // Skip UGI method to not log in
-    if(!conf.get(HADOOP_SECURITY_AUTHENTICATION).equals("kerberos"))
-      throw new RuntimeException("Cannot start secure datanode in unsecure cluster");
+    Configuration conf = new Configuration();
     
     // Stash command-line arguments for regular datanode
     args = context.getArguments();
@@ -91,14 +89,13 @@ public class SecureDataNodeStarter implements Daemon {
     if(listener.getPort() != infoSocAddr.getPort())
       throw new RuntimeException("Unable to bind on specified info port in secure " +
           "context. Needed " + socAddr.getPort() + ", got " + ss.getLocalPort());
-   
-    if(ss.getLocalPort() >= 1023 || listener.getPort() >= 1023)
-      throw new RuntimeException("Cannot start secure datanode on non-privileged "
-         +" ports. (streaming port = " + ss + " ) (http listener port = " + 
-         listener.getConnection() + "). Exiting.");
- 
     System.err.println("Successfully obtained privileged resources (streaming port = "
         + ss + " ) (http listener port = " + listener.getConnection() +")");
+    
+    if ((ss.getLocalPort() >= 1023 || listener.getPort() >= 1023) &&
+        UserGroupInformation.isSecurityEnabled()) {
+      throw new RuntimeException("Cannot start secure datanode with unprivileged ports");
+    }
     
     resources = new SecureResources(ss, listener);
   }

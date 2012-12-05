@@ -1,0 +1,423 @@
+From c22c752600071ad91597d2cd5ae4f816c67f17c2 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Sat, 24 Sep 2011 06:20:47 +0000
+Subject: [PATCH 1225/1344] HDFS-2356.  Support case insensitive query parameter names in webhdfs.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1175114 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 2a275240cfb895248a358e839a6f7015b5f9afdd)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../web/resources/DatanodeWebHdfsMethods.java      |    4 +
+ .../hadoop/hdfs/server/namenode/JspHelper.java     |    3 +-
+ .../web/resources/NamenodeWebHdfsMethods.java      |    4 +
+ .../org/apache/hadoop/hdfs/web/ParamFilter.java    |   85 ++++++++++++++++++++
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |    2 +-
+ .../hadoop/hdfs/web/resources/AccessTimeParam.java |    2 +-
+ .../hadoop/hdfs/web/resources/BlockSizeParam.java  |    2 +-
+ .../hadoop/hdfs/web/resources/BufferSizeParam.java |    2 +-
+ .../hadoop/hdfs/web/resources/DelegationParam.java |    3 +-
+ .../hadoop/hdfs/web/resources/DeleteOpParam.java   |    3 -
+ .../hadoop/hdfs/web/resources/DstPathParam.java    |    2 +-
+ .../hadoop/hdfs/web/resources/GetOpParam.java      |    3 -
+ .../hadoop/hdfs/web/resources/HttpOpParam.java     |    3 +
+ .../hdfs/web/resources/ModificationTimeParam.java  |    2 +-
+ .../hadoop/hdfs/web/resources/PostOpParam.java     |    3 -
+ .../hadoop/hdfs/web/resources/PutOpParam.java      |    3 -
+ .../hdfs/web/TestWebHdfsFileSystemContract.java    |   32 +++++++-
+ 17 files changed, 136 insertions(+), 22 deletions(-)
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/ParamFilter.java
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+index 856e49a..b1eff14 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -48,6 +48,7 @@ import org.apache.hadoop.hdfs.DFSClient;
+ import org.apache.hadoop.hdfs.DFSClient.DFSDataInputStream;
+ import org.apache.hadoop.hdfs.server.datanode.DataNode;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
++import org.apache.hadoop.hdfs.web.ParamFilter;
+ import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+ import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
+@@ -64,8 +65,11 @@ import org.apache.hadoop.hdfs.web.resources.UriFsPathParam;
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.security.UserGroupInformation;
+ 
++import com.sun.jersey.spi.container.ResourceFilters;
++
+ /** Web-hdfs DataNode implementation. */
+ @Path("")
++@ResourceFilters(ParamFilter.class)
+ public class DatanodeWebHdfsMethods {
+   public static final Log LOG = LogFactory.getLog(DatanodeWebHdfsMethods.class);
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
+index 961c61f..05717d1 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
+@@ -53,6 +53,7 @@ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifie
+ import org.apache.hadoop.hdfs.server.common.HdfsConstants;
+ import org.apache.hadoop.hdfs.server.common.UpgradeStatusReport;
+ import org.apache.hadoop.hdfs.server.datanode.DataNode;
++import org.apache.hadoop.hdfs.web.resources.DelegationParam;
+ import org.apache.hadoop.hdfs.web.resources.UserParam;
+ import org.apache.hadoop.http.HtmlQuoting;
+ import org.apache.hadoop.net.NetUtils;
+@@ -68,7 +69,7 @@ import org.apache.hadoop.net.NetUtils;
+ public class JspHelper {
+   public static final String CURRENT_CONF = "current.conf";
+   final static public String WEB_UGI_PROPERTY_NAME = "dfs.web.ugi";
+-  public static final String DELEGATION_PARAMETER_NAME = "delegation";
++  public static final String DELEGATION_PARAMETER_NAME = DelegationParam.NAME;
+   static final String SET_DELEGATION = "&" + DELEGATION_PARAMETER_NAME +
+                                               "=";
+   private static final Log LOG = LogFactory.getLog(JspHelper.class);
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index f58d045..bd6717d 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -53,6 +53,7 @@ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretMan
+ import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.web.JsonUtil;
++import org.apache.hadoop.hdfs.web.ParamFilter;
+ import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+ import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
+ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+@@ -84,8 +85,11 @@ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+ 
++import com.sun.jersey.spi.container.ResourceFilters;
++
+ /** Web-hdfs NameNode implementation. */
+ @Path("")
++@ResourceFilters(ParamFilter.class)
+ public class NamenodeWebHdfsMethods {
+   public static final Log LOG = LogFactory.getLog(NamenodeWebHdfsMethods.class);
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/ParamFilter.java b/src/hdfs/org/apache/hadoop/hdfs/web/ParamFilter.java
+new file mode 100644
+index 0000000..687b874
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/ParamFilter.java
+@@ -0,0 +1,85 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web;
++
++import java.net.URI;
++import java.util.List;
++import java.util.Map;
++
++import javax.ws.rs.core.MultivaluedMap;
++import javax.ws.rs.core.UriBuilder;
++
++import com.sun.jersey.spi.container.ContainerRequest;
++import com.sun.jersey.spi.container.ContainerRequestFilter;
++import com.sun.jersey.spi.container.ContainerResponseFilter;
++import com.sun.jersey.spi.container.ResourceFilter;
++
++/**
++ * A filter to change parameter names to lower cases
++ * so that parameter names are considered as case insensitive.
++ */
++public class ParamFilter implements ResourceFilter {
++  private static final ContainerRequestFilter LOWER_CASE
++      = new ContainerRequestFilter() {
++    @Override
++    public ContainerRequest filter(final ContainerRequest request) {
++      final MultivaluedMap<String, String> parameters = request.getQueryParameters();
++      if (containsUpperCase(parameters.keySet())) {
++        //rebuild URI
++        final URI lower = rebuildQuery(request.getRequestUri(), parameters);
++        request.setUris(request.getBaseUri(), lower);
++      }
++      return request;
++    }
++  };
++
++  @Override
++  public ContainerRequestFilter getRequestFilter() {
++    return LOWER_CASE;
++  }
++
++  @Override
++  public ContainerResponseFilter getResponseFilter() {
++    return null;
++  }
++
++  /** Do the strings contain upper case letters? */
++  private static boolean containsUpperCase(final Iterable<String> strings) {
++    for(String s : strings) {
++      for(int i = 0; i < s.length(); i++) {
++        if (Character.isUpperCase(s.charAt(i))) {
++          return true;
++        }
++      }
++    }
++    return false;
++  }
++
++  /** Rebuild the URI query with lower case parameter names. */
++  private static URI rebuildQuery(final URI uri,
++      final MultivaluedMap<String, String> parameters) {
++    UriBuilder b = UriBuilder.fromUri(uri).replaceQuery("");
++    for(Map.Entry<String, List<String>> e : parameters.entrySet()) {
++      final String key = e.getKey().toLowerCase();
++      for(String v : e.getValue()) {
++        b = b.queryParam(key, v);
++      }
++    }
++    return b.build();
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 18714d0..a0163f4 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -176,7 +176,7 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+     return url;
+   }
+ 
+-  private URL toUrl(final HttpOpParam.Op op, final Path fspath,
++  URL toUrl(final HttpOpParam.Op op, final Path fspath,
+       final Param<?,?>... parameters) throws IOException {
+     //initialize URI path and query
+     final String path = "/" + PATH_PREFIX
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java
+index 830e5cd..8d82131 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java
+@@ -20,7 +20,7 @@ package org.apache.hadoop.hdfs.web.resources;
+ /** Access time parameter. */
+ public class AccessTimeParam extends LongParam {
+   /** Parameter name. */
+-  public static final String NAME = "accessTime";
++  public static final String NAME = "accesstime";
+   /** Default parameter value. */
+   public static final String DEFAULT = "-1";
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java
+index 4d01625..5fc2666 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java
+@@ -23,7 +23,7 @@ import org.apache.hadoop.hdfs.protocol.FSConstants;
+ /** Block size parameter. */
+ public class BlockSizeParam extends LongParam {
+   /** Parameter name. */
+-  public static final String NAME = "blockSize";
++  public static final String NAME = "blocksize";
+   /** Default parameter value. */
+   public static final String DEFAULT = NULL;
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java
+index 59f4d4f..0634642 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java
+@@ -22,7 +22,7 @@ import org.apache.hadoop.conf.Configuration;
+ /** Buffer size parameter. */
+ public class BufferSizeParam extends IntegerParam {
+   /** Parameter name. */
+-  public static final String NAME = "bufferSize";
++  public static final String NAME = "buffersize";
+   /** Default parameter value. */
+   public static final String DEFAULT = NULL;
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DelegationParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DelegationParam.java
+index 3212229..ad08773 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DelegationParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DelegationParam.java
+@@ -17,13 +17,12 @@
+  */
+ package org.apache.hadoop.hdfs.web.resources;
+ 
+-import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+ import org.apache.hadoop.security.UserGroupInformation;
+ 
+ /** Delegation token parameter. */
+ public class DelegationParam extends StringParam {
+   /** Parameter name. */
+-  public static final String NAME = JspHelper.DELEGATION_PARAMETER_NAME;
++  public static final String NAME = "delegation";
+   /** Default parameter value. */
+   public static final String DEFAULT = "";
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DeleteOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DeleteOpParam.java
+index e61e858..12962b4 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DeleteOpParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DeleteOpParam.java
+@@ -21,9 +21,6 @@ import java.net.HttpURLConnection;
+ 
+ /** Http DELETE operation parameter. */
+ public class DeleteOpParam extends HttpOpParam<DeleteOpParam.Op> {
+-  /** Parameter name. */
+-  public static final String NAME = "deleteOp";
+-
+   /** Delete operations. */
+   public static enum Op implements HttpOpParam.Op {
+     DELETE(HttpURLConnection.HTTP_OK),
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java
+index 7d522a3..5fa5245 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java
+@@ -22,7 +22,7 @@ import org.apache.hadoop.fs.Path;
+ /** Destination path parameter. */
+ public class DstPathParam extends StringParam {
+   /** Parameter name. */
+-  public static final String NAME = "dstPath";
++  public static final String NAME = "dstpath";
+   /** Default parameter value. */
+   public static final String DEFAULT = "";
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
+index aeb3135..d547f1b 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
+@@ -21,9 +21,6 @@ import java.net.HttpURLConnection;
+ 
+ /** Http GET operation parameter. */
+ public class GetOpParam extends HttpOpParam<GetOpParam.Op> {
+-  /** Parameter name. */
+-  public static final String NAME = "getOp";
+-
+   /** Get operations. */
+   public static enum Op implements HttpOpParam.Op {
+     OPEN(HttpURLConnection.HTTP_OK),
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java
+index 644c403..422ec0f 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java
+@@ -20,6 +20,9 @@ package org.apache.hadoop.hdfs.web.resources;
+ /** Http operation parameter. */
+ public abstract class HttpOpParam<E extends Enum<E> & HttpOpParam.Op>
+     extends EnumParam<E> {
++  /** Parameter name. */
++  public static final String NAME = "op";
++
+   /** Default parameter value. */
+   public static final String DEFAULT = NULL;
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java
+index d43da07..a0e38a9 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java
+@@ -20,7 +20,7 @@ package org.apache.hadoop.hdfs.web.resources;
+ /** Modification time parameter. */
+ public class ModificationTimeParam extends LongParam {
+   /** Parameter name. */
+-  public static final String NAME = "modificationTime";
++  public static final String NAME = "modificationtime";
+   /** Default parameter value. */
+   public static final String DEFAULT = "-1";
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PostOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PostOpParam.java
+index 116d6af..b553ecc 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PostOpParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PostOpParam.java
+@@ -21,9 +21,6 @@ import java.net.HttpURLConnection;
+ 
+ /** Http POST operation parameter. */
+ public class PostOpParam extends HttpOpParam<PostOpParam.Op> {
+-  /** Parameter name. */
+-  public static final String NAME = "postOp";
+-
+   /** Post operations. */
+   public static enum Op implements HttpOpParam.Op {
+     APPEND(HttpURLConnection.HTTP_OK),
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java
+index 00703fe..dcfaa6f 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java
+@@ -21,9 +21,6 @@ import java.net.HttpURLConnection;
+ 
+ /** Http POST operation parameter. */
+ public class PutOpParam extends HttpOpParam<PutOpParam.Op> {
+-  /** Parameter name. */
+-  public static final String NAME = "putOp";
+-
+   /** Put operations. */
+   public static enum Op implements HttpOpParam.Op {
+     CREATE(true, HttpURLConnection.HTTP_CREATED),
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+index 0523a2b..ec73833 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
++++ b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+@@ -18,20 +18,24 @@
+ 
+ package org.apache.hadoop.hdfs.web;
+ 
++import java.io.BufferedReader;
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
++import java.io.InputStreamReader;
++import java.net.HttpURLConnection;
+ import java.net.URI;
++import java.net.URL;
+ import java.security.PrivilegedExceptionAction;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.BlockLocation;
+-import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.FileSystemContractBaseTest;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.MiniDFSCluster;
++import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+ import org.apache.hadoop.security.AccessControlException;
+ import org.apache.hadoop.security.UserGroupInformation;
+ 
+@@ -149,4 +153,30 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+       assertEquals(expected[i].toString(), computed[i].toString());
+     }
+   }
++
++  public void testCaseInsensitive() throws IOException {
++    final Path p = new Path("/test/testCaseInsensitive");
++    final WebHdfsFileSystem webhdfs = (WebHdfsFileSystem)fs;
++    final PutOpParam.Op op = PutOpParam.Op.MKDIRS;
++
++    //replace query with mix case letters
++    final URL url = webhdfs.toUrl(op, p);
++    WebHdfsFileSystem.LOG.info("url      = " + url);
++    final URL replaced = new URL(url.toString().replace(op.toQueryString(),
++        "Op=mkDIrs"));
++    WebHdfsFileSystem.LOG.info("replaced = " + replaced);
++
++    //connect with the replaced URL.
++    final HttpURLConnection conn = (HttpURLConnection)replaced.openConnection();
++    conn.setRequestMethod(op.getType().toString());
++    conn.connect();
++    final BufferedReader in = new BufferedReader(new InputStreamReader(
++        conn.getInputStream()));
++    for(String line; (line = in.readLine()) != null; ) {
++      WebHdfsFileSystem.LOG.info("> " + line);
++    }
++
++    //check if the command successes.
++    assertTrue(fs.getFileStatus(p).isDir());
++  }
+ }
+-- 
+1.7.0.4
+

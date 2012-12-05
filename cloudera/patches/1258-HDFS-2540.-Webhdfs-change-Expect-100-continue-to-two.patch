@@ -1,0 +1,218 @@
+From 3e503683cd06c6dad4cd6de5e4ce3e38f76aaa88 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Tue, 8 Nov 2011 19:29:48 +0000
+Subject: [PATCH 1258/1344] HDFS-2540. Webhdfs: change "Expect: 100-continue" to two-step write; change "HdfsFileStatus" and "localName" respectively to "FileStatus" and "pathSuffix" in JSON response.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1199401 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 59b2829a3a6a0c7c6368ee638a679077275c7dca)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../web/resources/NamenodeWebHdfsMethods.java      |    5 +-
+ src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java  |   10 ++--
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |   40 ++++++++++++++---
+ .../hadoop/hdfs/web/resources/HttpOpParam.java     |   46 ++++++++++++++++++++
+ 4 files changed, 88 insertions(+), 13 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index f7088cb..569824c 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -47,6 +47,7 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.ContentSummary;
++import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+@@ -555,8 +556,8 @@ public class NamenodeWebHdfsMethods {
+       @Override
+       public void write(final OutputStream outstream) throws IOException {
+         final PrintStream out = new PrintStream(outstream);
+-        out.println("{\"" + HdfsFileStatus.class.getSimpleName() + "es\":{\""
+-            + HdfsFileStatus.class.getSimpleName() + "\":[");
++        out.println("{\"" + FileStatus.class.getSimpleName() + "es\":{\""
++            + FileStatus.class.getSimpleName() + "\":[");
+ 
+         final HdfsFileStatus[] partial = first.getPartialListing();
+         if (partial.length > 0) {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+index 51cbd31..e2abb7b 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+@@ -28,6 +28,7 @@ import java.util.TreeMap;
+ 
+ import org.apache.hadoop.fs.ContentSummary;
+ import org.apache.hadoop.fs.FileChecksum;
++import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSUtil;
+@@ -149,7 +150,7 @@ public class JsonUtil {
+       return null;
+     }
+     final Map<String, Object> m = new TreeMap<String, Object>();
+-    m.put("localName", status.getLocalName());
++    m.put("pathSuffix", status.getLocalName());
+     m.put("type", PathType.valueOf(status));
+     m.put("length", status.getLen());
+     m.put("owner", status.getOwner());
+@@ -159,8 +160,7 @@ public class JsonUtil {
+     m.put("modificationTime", status.getModificationTime());
+     m.put("blockSize", status.getBlockSize());
+     m.put("replication", status.getReplication());
+-    return includeType ? toJsonString(HdfsFileStatus.class, m) : 
+-      JSON.toString(m);
++    return includeType ? toJsonString(FileStatus.class, m): JSON.toString(m);
+   }
+ 
+   /** Convert a Json map to a HdfsFileStatus object. */
+@@ -170,8 +170,8 @@ public class JsonUtil {
+     }
+ 
+     final Map<?, ?> m = includesType ? 
+-        (Map<?, ?>)json.get(HdfsFileStatus.class.getSimpleName()) : json;
+-    final String localName = (String) m.get("localName");
++        (Map<?, ?>)json.get(FileStatus.class.getSimpleName()) : json;
++    final String localName = (String) m.get("pathSuffix");
+     final PathType type = PathType.valueOf((String) m.get("type"));
+ 
+     final long len = (Long) m.get("length");
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 7463e77..2f96fb7 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -325,14 +325,13 @@ public class WebHdfsFileSystem extends FileSystem
+     final URL url = toUrl(op, fspath, parameters);
+ 
+     //connect and get response
+-    final HttpURLConnection conn = getHttpUrlConnection(url);
++    HttpURLConnection conn = getHttpUrlConnection(url);
+     try {
+       conn.setRequestMethod(op.getType().toString());
+-      conn.setDoOutput(op.getDoOutput());
+       if (op.getDoOutput()) {
+-        conn.setRequestProperty("Expect", "100-Continue");
+-        conn.setInstanceFollowRedirects(true);
++        conn = twoStepWrite(conn, op);
+       }
++      conn.setDoOutput(op.getDoOutput());
+       conn.connect();
+       return conn;
+     } catch (IOException e) {
+@@ -340,6 +339,35 @@ public class WebHdfsFileSystem extends FileSystem
+       throw e;
+     }
+   }
++  
++  /**
++   * Two-step Create/Append:
++   * Step 1) Submit a Http request with neither auto-redirect nor data. 
++   * Step 2) Submit Http PUT with the URL from the Location header with data.
++   * 
++   * The reason of having two-step create/append is for preventing clients to
++   * send out the data before the redirect. This issue is addressed by the
++   * "Expect: 100-continue" header in HTTP/1.1; see RFC 2616, Section 8.2.3.
++   * Unfortunately, there are software library bugs (e.g. Jetty 6 http server
++   * and Java 6 http client), which do not correctly implement "Expect:
++   * 100-continue". The two-step create/append is a temporary workaround for
++   * the software library bugs.
++   */
++  private static HttpURLConnection twoStepWrite(HttpURLConnection conn,
++      final HttpOpParam.Op op) throws IOException {
++    //Step 1) Submit a Http request with neither auto-redirect nor data. 
++    conn.setInstanceFollowRedirects(false);
++    conn.setDoOutput(false);
++    conn.connect();
++    validateResponse(HttpOpParam.TemporaryRedirectOp.valueOf(op), conn);
++    final String redirect = conn.getHeaderField("Location");
++    conn.disconnect();
++
++    //Step 2) Submit Http PUT with the URL from the Location header with data.
++    conn = (HttpURLConnection)new URL(redirect).openConnection();
++    conn.setRequestMethod(op.getType().toString());
++    return conn;
++  }
+ 
+   /**
+    * Run a http operation.
+@@ -605,8 +633,8 @@ public class WebHdfsFileSystem extends FileSystem
+ 
+     final HttpOpParam.Op op = GetOpParam.Op.LISTSTATUS;
+     final Map<?, ?> json  = run(op, f);
+-    final Map<?, ?> rootmap = (Map<?, ?>)json.get(HdfsFileStatus.class.getSimpleName() + "es");
+-    final Object[] array = (Object[])rootmap.get(HdfsFileStatus.class.getSimpleName());
++    final Map<?, ?> rootmap = (Map<?, ?>)json.get(FileStatus.class.getSimpleName() + "es");
++    final Object[] array = (Object[])rootmap.get(FileStatus.class.getSimpleName());
+ 
+     //convert FileStatus
+     final FileStatus[] statuses = new FileStatus[array.length];
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java
+index 422ec0f..9e1438d 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java
+@@ -17,6 +17,9 @@
+  */
+ package org.apache.hadoop.hdfs.web.resources;
+ 
++import javax.ws.rs.core.Response;
++
++
+ /** Http operation parameter. */
+ public abstract class HttpOpParam<E extends Enum<E> & HttpOpParam.Op>
+     extends EnumParam<E> {
+@@ -46,6 +49,49 @@ public abstract class HttpOpParam<E extends Enum<E> & HttpOpParam.Op>
+     public String toQueryString();
+   }
+ 
++  /** Expects HTTP response 307 "Temporary Redirect". */
++  public static class TemporaryRedirectOp implements Op {
++    static final TemporaryRedirectOp CREATE = new TemporaryRedirectOp(PutOpParam.Op.CREATE);
++    static final TemporaryRedirectOp APPEND = new TemporaryRedirectOp(PostOpParam.Op.APPEND);
++    
++    /** Get an object for the given op. */
++    public static TemporaryRedirectOp valueOf(final Op op) {
++      if (op == CREATE.op) {
++        return CREATE;
++      } if (op == APPEND.op) {
++        return APPEND;
++      }
++      throw new IllegalArgumentException(op + " not found.");
++    }
++
++    private final Op op;
++
++    private TemporaryRedirectOp(final Op op) {
++      this.op = op;
++    }
++
++    @Override
++    public Type getType() {
++      return op.getType();
++    }
++
++    @Override
++    public boolean getDoOutput() {
++      return op.getDoOutput();
++    }
++
++    /** Override the original expected response with "Temporary Redirect". */
++    @Override
++    public int getExpectedHttpResponseCode() {
++      return Response.Status.TEMPORARY_REDIRECT.getStatusCode();
++    }
++
++    @Override
++    public String toQueryString() {
++      return op.toQueryString();
++    }
++  }
++
+   HttpOpParam(final Domain<E> domain, final E value) {
+     super(domain, value);
+   }
+-- 
+1.7.0.4
+

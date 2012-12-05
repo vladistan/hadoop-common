@@ -23,28 +23,35 @@
 
 int dfs_chmod(const char *path, mode_t mode)
 {
+  struct hdfsConn *conn = NULL;
+  hdfsFS fs;
   TRACE1("chmod", path)
-
-#if PERMS
-  // retrieve dfs specific data
+  int ret = 0;
   dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
 
-  // check params and the context var
   assert(path);
   assert(dfs);
   assert('/' == *path);
 
-  hdfsFS userFS;
-  // if not connected, try to connect and fail out if we can't.
-  if ((userFS = doConnectAsUser(dfs->nn_hostname,dfs->nn_port))== NULL) {
-    syslog(LOG_ERR, "ERROR: could not connect to dfs %s:%d\n", __FILE__, __LINE__);
-    return -EIO;
+  ret = fuseConnectAsThreadUid(&conn);
+  if (ret) {
+    fprintf(stderr, "fuseConnectAsThreadUid: failed to open a libhdfs "
+            "connection!  error %d.\n", ret);
+    ret = -EIO;
+    goto cleanup;
+  }
+  fs = hdfsConnGetFs(conn);
+
+  if (hdfsChmod(fs, path, (short)mode)) {
+    ERROR("Could not chmod %s to %d", path, (int)mode);
+    ret = (errno > 0) ? -errno : -EIO;
+    goto cleanup;
   }
 
-  if (hdfsChmod(userFS, path, (short)mode)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to chmod %s to %d",path, (int)mode);
-    return -EIO;
+cleanup:
+  if (conn) {
+    hdfsConnRelease(conn);
   }
-#endif
-  return 0;
+
+  return ret;
 }

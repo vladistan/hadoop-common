@@ -1,3 +1,22 @@
+<%
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file 
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+%>
 <%@ page
   contentType="text/html; charset=UTF-8"
   import="javax.servlet.*"
@@ -88,7 +107,6 @@
                              String kind, 
                              String cause)
       throws IOException, InterruptedException, ServletException {
-    
     boolean includeMap = false;
     boolean includeReduce = false;
     if (kind == null) {
@@ -122,9 +140,11 @@
       return;
     }
     	
-    out.print("<table border=2 cellpadding=\"5\" cellspacing=\"2\">");
+    out.print("<table class=\"jobtasks datatable\">");
+    out.print("<thead>");
     out.print("<tr><th>Attempt</th><th>Task</th><th>Machine</th><th>State</th>" +
               "<th>Error</th><th>Logs</th></tr>\n");
+    out.print("</thead><tbody>\n");
     if (includeMap) {
       TaskInProgress[] tips = job.getTasks(TaskType.MAP);
       for(int i=0; i < tips.length; ++i) {
@@ -137,6 +157,7 @@
         printFailedAttempts(out, tracker, tips[i], state);
       }
     }
+    out.print("</tbody>\n");
     out.print("</table>\n");
   }
 %>
@@ -167,7 +188,11 @@
 
 <!DOCTYPE html>
 <html>
+<head>
 <title>Hadoop <%=jobId%> failures on <%=trackerName%></title>
+<link rel="stylesheet" type="text/css" href="/static/hadoop.css">
+<link rel="icon" type="image/vnd.microsoft.icon" href="/static/images/favicon.ico" />
+</head>
 <body>
 <h1>Hadoop <a href="jobdetails.jsp?jobid=<%=jobId%>"><%=jobId%></a>
 failures on <a href="jobtracker.jsp"><%=trackerName%></a></h1>

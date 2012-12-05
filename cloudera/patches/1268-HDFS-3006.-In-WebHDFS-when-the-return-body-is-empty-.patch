@@ -1,0 +1,204 @@
+From c8416fc6dfb61e56c44e94d15efafc6f24a1b69c Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Sat, 25 Feb 2012 00:18:33 +0000
+Subject: [PATCH 1268/1344] HDFS-3006. In WebHDFS, when the return body is empty, set the Content-Type to application/octet-stream instead of application/json.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1293490 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 736c9aac92e4eb5a86bcd0892c7194c20b494143)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../web/resources/DatanodeWebHdfsMethods.java      |   12 +++++-----
+ .../web/resources/NamenodeWebHdfsMethods.java      |   24 ++++++++++----------
+ .../hdfs/web/TestWebHdfsFileSystemContract.java    |    3 ++
+ 3 files changed, 21 insertions(+), 18 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+index 3ebbda4..9bc867c 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -114,7 +114,7 @@ public class DatanodeWebHdfsMethods {
+   @PUT
+   @Path("/")
+   @Consumes({"*/*"})
+-  @Produces({MediaType.APPLICATION_JSON})
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response putRoot(
+       final InputStream in,
+       @Context final UserGroupInformation ugi,
+@@ -141,7 +141,7 @@ public class DatanodeWebHdfsMethods {
+   @PUT
+   @Path("{" + UriFsPathParam.NAME + ":.*}")
+   @Consumes({"*/*"})
+-  @Produces({MediaType.APPLICATION_JSON})
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response put(
+       final InputStream in,
+       @Context final UserGroupInformation ugi,
+@@ -196,7 +196,7 @@ public class DatanodeWebHdfsMethods {
+       }
+       final String nnAddr = NameNode.getInfoServer(conf);
+       final URI uri = new URI(WebHdfsFileSystem.SCHEME + "://" + nnAddr + fullpath);
+-      return Response.created(uri).type(MediaType.APPLICATION_JSON).build();
++      return Response.created(uri).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     default:
+       throw new UnsupportedOperationException(op + " is not supported");
+@@ -209,7 +209,7 @@ public class DatanodeWebHdfsMethods {
+   @POST
+   @Path("/")
+   @Consumes({"*/*"})
+-  @Produces({MediaType.APPLICATION_JSON})
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response postRoot(
+       final InputStream in,
+       @Context final UserGroupInformation ugi,
+@@ -227,7 +227,7 @@ public class DatanodeWebHdfsMethods {
+   @POST
+   @Path("{" + UriFsPathParam.NAME + ":.*}")
+   @Consumes({"*/*"})
+-  @Produces({MediaType.APPLICATION_JSON})
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response post(
+       final InputStream in,
+       @Context final UserGroupInformation ugi,
+@@ -267,7 +267,7 @@ public class DatanodeWebHdfsMethods {
+         IOUtils.cleanup(LOG, out);
+         IOUtils.cleanup(LOG, dfsclient);
+       }
+-      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     default:
+       throw new UnsupportedOperationException(op + " is not supported");
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index 6e8da8d..e016a9b 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -203,7 +203,7 @@ public class NamenodeWebHdfsMethods {
+   @PUT
+   @Path("/")
+   @Consumes({"*/*"})
+-  @Produces({MediaType.APPLICATION_JSON})
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response putRoot(
+       @Context final UserGroupInformation ugi,
+       @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
+@@ -246,7 +246,7 @@ public class NamenodeWebHdfsMethods {
+   @PUT
+   @Path("{" + UriFsPathParam.NAME + ":.*}")
+   @Consumes({"*/*"})
+-  @Produces({MediaType.APPLICATION_JSON})
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response put(
+       @Context final UserGroupInformation ugi,
+       @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
+@@ -302,7 +302,7 @@ public class NamenodeWebHdfsMethods {
+       final URI uri = redirectURI(namenode, ugi, delegation, username, doAsUser,
+           fullpath, op.getValue(), -1L,
+           permission, overwrite, bufferSize, replication, blockSize);
+-      return Response.temporaryRedirect(uri).build();
++      return Response.temporaryRedirect(uri).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     } 
+     case MKDIRS:
+     {
+@@ -329,17 +329,17 @@ public class NamenodeWebHdfsMethods {
+       }
+ 
+       namenode.setOwner(fullpath, owner.getValue(), group.getValue());
+-      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     case SETPERMISSION:
+     {
+       namenode.setPermission(fullpath, permission.getFsPermission());
+-      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     case SETTIMES:
+     {
+       namenode.setTimes(fullpath, modificationTime.getValue(), accessTime.getValue());
+-      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     case RENEWDELEGATIONTOKEN:
+     {
+@@ -354,7 +354,7 @@ public class NamenodeWebHdfsMethods {
+       final Token<DelegationTokenIdentifier> token = new Token<DelegationTokenIdentifier>();
+       token.decodeFromUrlString(delegationTokenArgument.getValue());
+       namenode.cancelDelegationToken(token);
+-      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     default:
+       throw new UnsupportedOperationException(op + " is not supported");
+@@ -371,7 +371,7 @@ public class NamenodeWebHdfsMethods {
+   @POST
+   @Path("/")
+   @Consumes({"*/*"})
+-  @Produces({MediaType.APPLICATION_JSON})
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response postRoot(
+       @Context final UserGroupInformation ugi,
+       @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
+@@ -392,7 +392,7 @@ public class NamenodeWebHdfsMethods {
+   @POST
+   @Path("{" + UriFsPathParam.NAME + ":.*}")
+   @Consumes({"*/*"})
+-  @Produces({MediaType.APPLICATION_JSON})
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response post(
+       @Context final UserGroupInformation ugi,
+       @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
+@@ -424,7 +424,7 @@ public class NamenodeWebHdfsMethods {
+     {
+       final URI uri = redirectURI(namenode, ugi, delegation, username, doAsUser,
+           fullpath, op.getValue(), -1L, bufferSize);
+-      return Response.temporaryRedirect(uri).build();
++      return Response.temporaryRedirect(uri).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     default:
+       throw new UnsupportedOperationException(op + " is not supported");
+@@ -506,7 +506,7 @@ public class NamenodeWebHdfsMethods {
+     {
+       final URI uri = redirectURI(namenode, ugi, delegation, username, doAsUser,
+           fullpath, op.getValue(), offset.getValue(), offset, length, bufferSize);
+-      return Response.temporaryRedirect(uri).build();
++      return Response.temporaryRedirect(uri).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     case GET_BLOCK_LOCATIONS:
+     {
+@@ -542,7 +542,7 @@ public class NamenodeWebHdfsMethods {
+     {
+       final URI uri = redirectURI(namenode, ugi, delegation, username, doAsUser,
+           fullpath, op.getValue(), -1L);
+-      return Response.temporaryRedirect(uri).build();
++      return Response.temporaryRedirect(uri).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     case GETDELEGATIONTOKEN:
+     {
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+index d144672..b0f5f9f 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
++++ b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+@@ -27,6 +27,7 @@ import java.net.URL;
+ import java.util.Map;
+ 
+ import javax.servlet.http.HttpServletResponse;
++import javax.ws.rs.core.MediaType;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.BlockLocation;
+@@ -335,6 +336,8 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+       conn.setRequestMethod(op.getType().toString());
+       conn.connect();
+       assertEquals(HttpServletResponse.SC_OK, conn.getResponseCode());
++      assertEquals(0, conn.getContentLength());
++      assertEquals(MediaType.APPLICATION_OCTET_STREAM, conn.getContentType());
+       assertEquals((short)0755, webhdfs.getFileStatus(dir).getPermission().toShort());
+       conn.disconnect();
+     }
+-- 
+1.7.0.4
+

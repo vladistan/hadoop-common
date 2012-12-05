@@ -1,0 +1,34 @@
+From bfc5a028d2348125a9ef28b8de6deb878938efd0 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@apache.org>
+Date: Sat, 7 Jul 2012 22:36:57 +0000
+Subject: [PATCH 1286/1344] HDFS-3604. Add dfs.webhdfs.enabled to hdfs-default.xml. Contributed by Eli Collins
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1358661 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit ba9f3195396425d5ece327187b7b90021eef425e)
+
+Author: Eli Collins
+Ref: CDH-4806
+---
+ src/hdfs/hdfs-default.xml |    8 ++++++++
+ 1 files changed, 8 insertions(+), 0 deletions(-)
+
+diff --git a/src/hdfs/hdfs-default.xml b/src/hdfs/hdfs-default.xml
+index 09b1166..4275ee0 100644
+--- a/src/hdfs/hdfs-default.xml
++++ b/src/hdfs/hdfs-default.xml
+@@ -543,4 +543,12 @@ creations/deletions), or "all".</description>
+   </description>
+ </property>
+ 
++<property>
++  <name>dfs.webhdfs.enabled</name>
++  <value>false</value>
++  <description>
++    Enable WebHDFS (REST API) in Namenodes and Datanodes.
++  </description>
++</property>
++
+ </configuration>
+-- 
+1.7.0.4
+

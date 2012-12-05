@@ -60,20 +60,15 @@ public class KeyValueLineRecordReader implements RecordReader<Text, Text> {
     this.separator = (byte) sepStr.charAt(0);
   }
 
-  public static int findSeparator(byte[] utf, int start, int length, byte sep) {
-    for (int i = start; i < (start + length); i++) {
-      if (utf[i] == sep) {
-        return i;
-      }
-    }
-    return -1;
+  public static int findSeparator(byte[] utf, int start, int length, 
+      byte sep) {
+    return org.apache.hadoop.mapreduce.lib.input.
+      KeyValueLineRecordReader.findSeparator(utf, start, length, sep);
   }
 
   /** Read key/value pair in a line. */
   public synchronized boolean next(Text key, Text value)
     throws IOException {
-    Text tKey = key;
-    Text tValue = value;
     byte[] line = null;
     int lineLen = -1;
     if (lineRecordReader.next(dummyKey, innerValue)) {
@@ -85,19 +80,8 @@ public class KeyValueLineRecordReader implements RecordReader<Text, Text> {
     if (line == null)
       return false;
     int pos = findSeparator(line, 0, lineLen, this.separator);
-    if (pos == -1) {
-      tKey.set(line, 0, lineLen);
-      tValue.set("");
-    } else {
-      int keyLen = pos;
-      byte[] keyBytes = new byte[keyLen];
-      System.arraycopy(line, 0, keyBytes, 0, keyLen);
-      int valLen = lineLen - keyLen - 1;
-      byte[] valBytes = new byte[valLen];
-      System.arraycopy(line, pos + 1, valBytes, 0, valLen);
-      tKey.set(keyBytes);
-      tValue.set(valBytes);
-    }
+    org.apache.hadoop.mapreduce.lib.input.KeyValueLineRecordReader.
+      setKeyValue(key, value, line, lineLen, pos);
     return true;
   }
   

@@ -82,7 +82,7 @@ public class LoggedNetworkTopology implements DeepCompare {
    * @param level
    *          the level number
    */
-  LoggedNetworkTopology(Set<ParsedHost> hosts, String name, int level) {
+  LoggedNetworkTopology(HashSet<ParsedHost> hosts, String name, int level) {
 
     this.name = name;
     this.children = null;
@@ -117,10 +117,6 @@ public class LoggedNetworkTopology implements DeepCompare {
     } else {
       // nothing to do here
     }
-  }
-
-  LoggedNetworkTopology(Set<ParsedHost> hosts) {
-    this(hosts, "<root>", 0);
   }
 
   public String getName() {

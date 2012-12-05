@@ -1,0 +1,31 @@
+From 6ad6306de4b2d5e353e45c7486a285b7862f2687 Mon Sep 17 00:00:00 2001
+From: Jitendra Nath Pandey <jitendra@apache.org>
+Date: Sat, 26 Nov 2011 11:07:55 +0000
+Subject: [PATCH 1262/1344] HADOOP-7854. UGI getCurrentUser is not synchronized. Contributed by Daryn Sharp.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1206427 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 5704e3add0577608795159fa3ec2f5046b424cd5)
+
+Author: Daryn Sharp
+Ref: CDH-4806
+---
+ .../hadoop/security/UserGroupInformation.java      |    3 ++-
+ 1 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/security/UserGroupInformation.java b/src/core/org/apache/hadoop/security/UserGroupInformation.java
+index b8e0907..fe6890b 100644
+--- a/src/core/org/apache/hadoop/security/UserGroupInformation.java
++++ b/src/core/org/apache/hadoop/security/UserGroupInformation.java
+@@ -512,7 +512,8 @@ public class UserGroupInformation {
+    * @return the current user
+    * @throws IOException if login fails
+    */
+-  public static UserGroupInformation getCurrentUser() throws IOException {
++  public synchronized
++  static UserGroupInformation getCurrentUser() throws IOException {
+     AccessControlContext context = AccessController.getContext();
+     Subject subject = Subject.getSubject(context);
+     if (subject == null || subject.getPrincipals(User.class).isEmpty()) {
+-- 
+1.7.0.4
+

@@ -55,89 +55,76 @@ public class TestSymLink extends TestCase
   {
   }
 
-  public void testSymLink()
+  public void testSymLink() throws Exception
   {
-    try {
-      boolean mayExit = false;
-      MiniMRCluster mr = null;
-      MiniDFSCluster dfs = null; 
-      try{
-        Configuration conf = new Configuration();
-        dfs = new MiniDFSCluster(conf, 1, true, null);
-        FileSystem fileSys = dfs.getFileSystem();
-        String namenode = fileSys.getName();
-        mr  = new MiniMRCluster(1, namenode, 3);
-        // During tests, the default Configuration will use a local mapred
-        // So don't specify -config or -cluster
-        String strJobtracker = "mapred.job.tracker=" + "localhost:" + mr.getJobTrackerPort();
-        String strNamenode = "fs.default.name=" + namenode;
-        String argv[] = new String[] {
-          "-input", INPUT_FILE,
-          "-output", OUTPUT_DIR,
-          "-mapper", map,
-          "-reducer", reduce,
-          //"-verbose",
-          //"-jobconf", "stream.debug=set"
-          "-jobconf", strNamenode,
-          "-jobconf", strJobtracker,
-          "-jobconf", "stream.tmpdir="+System.getProperty("test.build.data","/tmp"),
-          "-jobconf", 
-            JobConf.MAPRED_MAP_TASK_JAVA_OPTS + "=" +
-              "-Dcontrib.name=" + System.getProperty("contrib.name") + " " +
-              "-Dbuild.test=" + System.getProperty("build.test") + " " +
-              conf.get(JobConf.MAPRED_MAP_TASK_JAVA_OPTS, 
-                       conf.get(JobConf.MAPRED_TASK_JAVA_OPTS, "")),
-          "-jobconf", 
-            JobConf.MAPRED_REDUCE_TASK_JAVA_OPTS + "=" +
-              "-Dcontrib.name=" + System.getProperty("contrib.name") + " " +
-              "-Dbuild.test=" + System.getProperty("build.test") + " " +
-              conf.get(JobConf.MAPRED_REDUCE_TASK_JAVA_OPTS, 
-                       conf.get(JobConf.MAPRED_TASK_JAVA_OPTS, "")),
-          "-cacheFile", "hdfs://"+fileSys.getName()+CACHE_FILE + "#testlink"
-        };
+    boolean mayExit = false;
+    MiniMRCluster mr = null;
+    MiniDFSCluster dfs = null; 
+    try{
+      Configuration conf = new Configuration();
+      dfs = new MiniDFSCluster(conf, 1, true, null);
+      FileSystem fileSys = dfs.getFileSystem();
+      String namenode = fileSys.getName();
+      mr  = new MiniMRCluster(1, namenode, 3);
+      // During tests, the default Configuration will use a local mapred
+      // So don't specify -config or -cluster
+      String strJobtracker = "mapred.job.tracker=" + "localhost:" + mr.getJobTrackerPort();
+      String strNamenode = "fs.default.name=" + namenode;
+      String argv[] = new String[] {
+        "-input", INPUT_FILE,
+        "-output", OUTPUT_DIR,
+        "-mapper", map,
+        "-reducer", reduce,
+        //"-verbose",
+        //"-jobconf", "stream.debug=set"
+        "-jobconf", strNamenode,
+        "-jobconf", strJobtracker,
+        "-jobconf", "stream.tmpdir="+System.getProperty("test.build.data","/tmp"),
+        "-jobconf", 
+          JobConf.MAPRED_MAP_TASK_JAVA_OPTS + "=" +
+            "-Dcontrib.name=" + System.getProperty("contrib.name") + " " +
+            "-Dbuild.test=" + System.getProperty("build.test") + " " +
+            conf.get(JobConf.MAPRED_MAP_TASK_JAVA_OPTS, 
+                     conf.get(JobConf.MAPRED_TASK_JAVA_OPTS, "")),
+        "-jobconf", 
+          JobConf.MAPRED_REDUCE_TASK_JAVA_OPTS + "=" +
+            "-Dcontrib.name=" + System.getProperty("contrib.name") + " " +
+            "-Dbuild.test=" + System.getProperty("build.test") + " " +
+            conf.get(JobConf.MAPRED_REDUCE_TASK_JAVA_OPTS, 
+                     conf.get(JobConf.MAPRED_TASK_JAVA_OPTS, "")),
+        "-cacheFile", "hdfs://"+fileSys.getName()+CACHE_FILE + "#testlink"
+      };
 
-        fileSys.delete(new Path(OUTPUT_DIR), true);
+      fileSys.delete(new Path(OUTPUT_DIR), true);
       
+      DataOutputStream file = fileSys.create(new Path(INPUT_FILE));
+      file.writeBytes(mapString);
+      file.close();
+      file = fileSys.create(new Path(CACHE_FILE));
+      file.writeBytes(cacheString);
+      file.close();
         
-        DataOutputStream file = fileSys.create(new Path(INPUT_FILE));
-        file.writeBytes(mapString);
-        file.close();
-        file = fileSys.create(new Path(CACHE_FILE));
-        file.writeBytes(cacheString);
-        file.close();
-          
-        job = new StreamJob(argv, mayExit);      
-        job.go();
+      job = new StreamJob(argv, mayExit);      
+      job.go();
 
-        fileSys = dfs.getFileSystem();
-        String line = null;
-        Path[] fileList = FileUtil.stat2Paths(fileSys.listStatus(
-                                                new Path(OUTPUT_DIR),
-                                                new Utils.OutputFileUtils
-                                                .OutputFilesFilter()));
-        for (int i = 0; i < fileList.length; i++){
-          System.out.println(fileList[i].toString());
-          BufferedReader bread =
-            new BufferedReader(new InputStreamReader(fileSys.open(fileList[i])));
-          line = bread.readLine();
-          System.out.println(line);
-        }
-        assertEquals(cacheString + "\t", line);
-      } finally{
-        if (dfs != null) { dfs.shutdown(); }
-        if (mr != null) { mr.shutdown();}
+      fileSys = dfs.getFileSystem();
+      String line = null;
+      Path[] fileList = FileUtil.stat2Paths(fileSys.listStatus(
+                                              new Path(OUTPUT_DIR),
+                                              new Utils.OutputFileUtils
+                                              .OutputFilesFilter()));
+      for (int i = 0; i < fileList.length; i++){
+        System.out.println(fileList[i].toString());
+        BufferedReader bread =
+          new BufferedReader(new InputStreamReader(fileSys.open(fileList[i])));
+        line = bread.readLine();
+        System.out.println(line);
       }
-      
-    } catch(Exception e) {
-      failTrace(e);
+      assertEquals(cacheString + "\t", line);
+    } finally{
+      if (dfs != null) { dfs.shutdown(); }
+      if (mr != null) { mr.shutdown();}
     }
-  }
-
-  void failTrace(Exception e)
-  {
-    StringWriter sw = new StringWriter();
-    e.printStackTrace(new PrintWriter(sw));
-    fail(sw.toString());
   }
 
   public static void main(String[]args) throws Exception

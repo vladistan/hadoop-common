@@ -1,0 +1,201 @@
+From efb02cb88a4f939be9706a78465575af9c6a35f3 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Mon, 23 Jul 2012 08:43:19 -0700
+Subject: [PATCH 1325/1344] HDFS-3334. Fix ByteRangeInputStream stream leakage.
+
+Reason: Bug fix
+Author: Daryn Sharp
+Ref: CDH-4806
+---
+ .../apache/hadoop/hdfs/ByteRangeInputStream.java   |   73 +++++++++++++-------
+ .../org/apache/hadoop/hdfs/TestHftpFileSystem.java |   40 +++++++++++
+ 2 files changed, 89 insertions(+), 24 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/ByteRangeInputStream.java b/src/hdfs/org/apache/hadoop/hdfs/ByteRangeInputStream.java
+index 36c7c1d..a635ea2 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/ByteRangeInputStream.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/ByteRangeInputStream.java
+@@ -26,6 +26,8 @@ import java.net.URL;
+ import org.apache.hadoop.fs.FSInputStream;
+ import org.apache.hadoop.hdfs.server.namenode.StreamFile;
+ 
++import org.apache.hadoop.thirdparty.guava.common.annotations.VisibleForTesting;
++
+ /**
+  * To support HTTP byte streams, a new connection to an HTTP server needs to be
+  * created each time. This class hides the complexity of those multiple 
+@@ -60,7 +62,7 @@ public abstract class ByteRangeInputStream extends FSInputStream {
+   }
+ 
+   enum StreamStatus {
+-    NORMAL, SEEK
++    NORMAL, SEEK, CLOSED
+   }
+   protected InputStream in;
+   protected URLOpener originalURL;
+@@ -88,31 +90,40 @@ public abstract class ByteRangeInputStream extends FSInputStream {
+   protected abstract URL getResolvedUrl(final HttpURLConnection connection
+       ) throws IOException;
+ 
+-  private InputStream getInputStream() throws IOException {
+-    if (status != StreamStatus.NORMAL) {
+-      
+-      if (in != null) {
+-        in.close();
+-        in = null;
+-      }
+-      
+-      // Use the original url if no resolved url exists, eg. if
+-      // it's the first time a request is made.
+-      final URLOpener opener =
++  @VisibleForTesting
++  protected InputStream getInputStream() throws IOException {
++    switch (status) {
++      case NORMAL:
++        break;
++      case SEEK:
++        if (in != null) {
++          in.close();
++        }
++        in = openInputStream();
++        status = StreamStatus.NORMAL;
++        break;
++      case CLOSED:
++        throw new IOException("Stream closed");
++    }
++    return in;
++  }
++
++  @VisibleForTesting
++  protected InputStream openInputStream() throws IOException {
++    // Use the original url if no resolved url exists, eg. if
++    // it's the first time a request is made.
++    final URLOpener opener =
+         (resolvedURL.getURL() == null) ? originalURL : resolvedURL;
+ 
+-      final HttpURLConnection connection = opener.openConnection(startPos);
+-      connection.connect();
+-      checkResponseCode(connection);
++    final HttpURLConnection connection = opener.openConnection(startPos);
++    connection.connect();
++    checkResponseCode(connection);
+ 
+-      final String cl = connection.getHeaderField(StreamFile.CONTENT_LENGTH);
+-      filelength = (cl == null) ? -1 : Long.parseLong(cl);
+-      in = connection.getInputStream();
++    final String cl = connection.getHeaderField(StreamFile.CONTENT_LENGTH);
++    filelength = (cl == null) ? -1 : Long.parseLong(cl);
++    in = connection.getInputStream();
++    resolvedURL.setURL(getResolvedUrl(connection));
+ 
+-      resolvedURL.setURL(getResolvedUrl(connection));
+-      status = StreamStatus.NORMAL;
+-    }
+-    
+     return in;
+   }
+   
+@@ -137,17 +148,21 @@ public abstract class ByteRangeInputStream extends FSInputStream {
+    * The next read() will be from that location.  Can't
+    * seek past the end of the file.
+    */
++  @Override
+   public void seek(long pos) throws IOException {
+     if (pos != currentPos) {
+       startPos = pos;
+       currentPos = pos;
+-      status = StreamStatus.SEEK;
++      if (status != StreamStatus.CLOSED) {
++        status = StreamStatus.SEEK;
++      }
+     }
+   }
+ 
+   /**
+    * Return the current offset from the start of the file
+    */
++  @Override
+   public long getPos() throws IOException {
+     return currentPos;
+   }
+@@ -156,7 +171,17 @@ public abstract class ByteRangeInputStream extends FSInputStream {
+    * Seeks a different copy of the data.  Returns true if
+    * found a new source, false otherwise.
+    */
++  @Override
+   public boolean seekToNewSource(long targetPos) throws IOException {
+     return false;
+   }
+-}
+\ No newline at end of file
++  
++  @Override
++  public void close() throws IOException {
++    if (in != null) {
++      in.close();
++      in = null;
++    }
++    status = StreamStatus.CLOSED;
++  }
++}
+diff --git a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+index a3622a2..4da2c32 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
++++ b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+@@ -19,6 +19,7 @@
+ package org.apache.hadoop.hdfs;
+ 
+ import java.io.IOException;
++import java.io.InputStream;
+ import java.net.HttpURLConnection;
+ import java.net.URI;
+ import java.net.URISyntaxException;
+@@ -236,6 +237,45 @@ public class TestHftpFileSystem {
+     assertEquals('7', in.read());
+   }
+   
++  @Test
++  public void testReadClosedStream() throws IOException {
++    final Path testFile = new Path("/testfile+2");
++    FSDataOutputStream os = hdfs.create(testFile, true);
++    os.writeBytes("0123456789");
++    os.close();
++
++    // ByteRangeInputStream delays opens until reads.  Make sure it doesn't
++    // open a closed stream that has never been opened
++    FSDataInputStream in = hftpFs.open(testFile);
++    in.close();
++    checkClosedStream(in);
++    checkClosedStream(in.getWrappedStream());
++
++    // force the stream to connect and then close it
++    in = hftpFs.open(testFile);
++    int ch = in.read(); 
++    assertEquals('0', ch);
++    in.close();
++    checkClosedStream(in);
++    checkClosedStream(in.getWrappedStream());
++
++    // make sure seeking doesn't automagically reopen the stream
++    in.seek(4);
++    checkClosedStream(in);
++    checkClosedStream(in.getWrappedStream());
++  }
++  
++  private void checkClosedStream(InputStream is) {
++    IOException ioe = null;
++    try {
++      is.read();
++    } catch (IOException e) {
++      ioe = e;
++    }
++    assertNotNull("No exception on closed read", ioe);
++    assertEquals("Stream closed", ioe.getMessage());
++  }
++
+   public void resetFileSystem() throws IOException {
+     // filesystem caching has a quirk/bug that it caches based on the user's
+     // given uri.  the result is if a filesystem is instantiated with no port,
+-- 
+1.7.0.4
+

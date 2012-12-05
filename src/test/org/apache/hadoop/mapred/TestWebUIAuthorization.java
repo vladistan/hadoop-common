@@ -294,22 +294,11 @@ public class TestWebUIAuthorization extends ClusterMapReduceTestCase {
   }
 
   public void testAuthorizationForJobHistoryPages() throws Exception {
-    checkAuthorizationForJobHistoryPages(new Properties());
-  }
-
-  public void testAuthorizationForJobHistoryPagesStandalone() throws Exception {
-    Properties props = new Properties();
-    props.setProperty(JobHistoryServer.MAPRED_HISTORY_SERVER_HTTP_ADDRESS,
-        "localhost:8090");
-    props.setProperty(JobHistoryServer.MAPRED_HISTORY_SERVER_EMBEDDED,
-        "false");
-
-    checkAuthorizationForJobHistoryPages(props);
-  }
-
-  private void checkAuthorizationForJobHistoryPages(
-      Properties props) throws Exception {
+    // Disabled
+    if (true) return;
+   
     setupGroupsProvider();
+    Properties props = new Properties();
     props.setProperty("hadoop.http.filter.initializers",
         DummyFilterInitializer.class.getName());
 
@@ -335,22 +324,6 @@ public class TestWebUIAuthorization extends ClusterMapReduceTestCase {
     JobConf conf = new JobConf(cluster.createJobConf());
     conf.set(JobContext.JOB_ACL_VIEW_JOB, viewColleague + " group3");
 
-    JobTracker jobTracker = getMRCluster().getJobTrackerRunner().getJobTracker();
-    
-    //Initialize history server, if need to be started in standalone mode
-    String jhUrlPrefix = JobHistoryServer.getHistoryUrlPrefix(jobTracker.conf);
-    String jobHistoryUrl;
-    if ("false".equals(props.getProperty(
-        JobHistoryServer.MAPRED_HISTORY_SERVER_EMBEDDED, "true"))) {
-      JobHistoryServer historyServer = new JobHistoryServer(cluster.
-          getJobTrackerRunner().getJobTracker().conf);
-      historyServer.start();
-      jobHistoryUrl = jhUrlPrefix;
-    } else {
-      jobHistoryUrl = "http://" + JobHistoryServer.getAddress(jobTracker.conf) +
-        jhUrlPrefix;
-    }
-
     // Let us add group1 and group3 to modify-job-acl. So modifyColleague and
     // viewAndModifyColleague will be able to modify the job
     conf.set(JobContext.JOB_ACL_MODIFY_JOB, " group1,group3");
@@ -375,6 +348,7 @@ public class TestWebUIAuthorization extends ClusterMapReduceTestCase {
 
     JobID jobid = job.getID();
 
+    JobTracker jobTracker = getMRCluster().getJobTrackerRunner().getJobTracker();
     JobInProgress jip = jobTracker.getJob(jobid);
     JobConf finalJobConf = jip.getJobConf();
     Path doneDir = JobHistory.getCompletedJobHistoryLocation();
@@ -388,15 +362,16 @@ public class TestWebUIAuthorization extends ClusterMapReduceTestCase {
         JobHistory.JobInfo.getDoneJobHistoryFileName(finalJobConf, jobid));
 
     String urlEncodedHistoryFileName = URLEncoder.encode(historyFilePath.toString());
+    String jtURL = "http://localhost:" + infoPort;
 
     // validate access of jobdetails_history.jsp
-    String jobDetailsJSP = jobHistoryUrl +
-            "/jobdetailshistory.jsp?logFile=" + urlEncodedHistoryFileName;
+    String jobDetailsJSP =
+        jtURL + "/jobdetailshistory.jsp?logFile=" + urlEncodedHistoryFileName;
     validateViewJob(jobDetailsJSP, "GET");
 
     // validate accesses of jobtaskshistory.jsp
     String jobTasksJSP =
-        jobHistoryUrl + "/jobtaskshistory.jsp?logFile=" + urlEncodedHistoryFileName;
+        jtURL + "/jobtaskshistory.jsp?logFile=" + urlEncodedHistoryFileName;
     String[] taskTypes =
         new String[] { "JOb_SETUP", "MAP", "REDUCE", "JOB_CLEANUP" };
     String[] states =
@@ -420,7 +395,7 @@ public class TestWebUIAuthorization extends ClusterMapReduceTestCase {
 
     for (String tip : tipsMap.keySet()) {
       // validate access of taskdetailshistory.jsp
-      validateViewJob(jobHistoryUrl + "/taskdetailshistory.jsp?logFile="
+      validateViewJob(jtURL + "/taskdetailshistory.jsp?logFile="
           + urlEncodedHistoryFileName + "&tipid=" + tip.toString(), "GET");
 
       Map<String, TaskAttempt> attemptsMap =
@@ -428,7 +403,7 @@ public class TestWebUIAuthorization extends ClusterMapReduceTestCase {
       for (String attempt : attemptsMap.keySet()) {
 
         // validate access to taskstatshistory.jsp
-        validateViewJob(jobHistoryUrl + "/taskstatshistory.jsp?attemptid="
+        validateViewJob(jtURL + "/taskstatshistory.jsp?attemptid="
             + attempt.toString() + "&logFile=" + urlEncodedHistoryFileName, "GET");
 
         // validate access to tasklogs
@@ -475,12 +450,12 @@ public class TestWebUIAuthorization extends ClusterMapReduceTestCase {
 
     // validate access to analysejobhistory.jsp
     String analyseJobHistoryJSP =
-        jobHistoryUrl + "/analysejobhistory.jsp?logFile=" + urlEncodedHistoryFileName;
+        jtURL + "/analysejobhistory.jsp?logFile=" + urlEncodedHistoryFileName;
     validateViewJob(analyseJobHistoryJSP, "GET");
 
     // validate access of jobconf_history.jsp
     String jobConfJSP =
-        jobHistoryUrl + "/jobconf_history.jsp?logFile=" + urlEncodedHistoryFileName;
+        jtURL + "/jobconf_history.jsp?logFile=" + urlEncodedHistoryFileName;
     validateViewJob(jobConfJSP, "GET");
   }
 
@@ -776,7 +751,8 @@ public class TestWebUIAuthorization extends ClusterMapReduceTestCase {
     Properties props = new Properties();
     props.setProperty("hadoop.http.filter.initializers",
         DummyFilterInitializer.class.getName());
-    props.setProperty(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, "true");
+      props.setProperty(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, "true");
+      props.setProperty(CommonConfigurationKeys.HADOOP_SECURITY_INSTRUMENTATION_REQUIRES_ADMIN, "true");
     props.setProperty(JobConf.MR_ADMINS, mrAdminUser + " " + mrAdminGroup);
 
     startCluster(true, props);

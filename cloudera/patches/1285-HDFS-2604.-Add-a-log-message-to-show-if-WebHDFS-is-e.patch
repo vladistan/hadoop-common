@@ -1,0 +1,154 @@
+From bbadb440ef351312fc7407967ee92b5cfe6d13eb Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Tue, 29 Nov 2011 23:43:50 +0000
+Subject: [PATCH 1285/1344] HDFS-2604. Add a log message to show if WebHDFS is enabled and a configuration section in the forrest doc.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1208143 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit e6d478b179e30456fec6204c45f4a021cf737804)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../src/documentation/content/xdocs/webhdfs.xml    |   22 ++++++++++++++++++++
+ .../hadoop/hdfs/server/datanode/DataNode.java      |    3 +-
+ .../hadoop/hdfs/server/namenode/NameNode.java      |    3 +-
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |    8 +++++++
+ .../security/TestDelegationTokenForProxyUser.java  |   20 +++++++++++++++++-
+ 5 files changed, 51 insertions(+), 5 deletions(-)
+
+diff --git a/src/docs/src/documentation/content/xdocs/webhdfs.xml b/src/docs/src/documentation/content/xdocs/webhdfs.xml
+index da75bbf..112032a 100644
+--- a/src/docs/src/documentation/content/xdocs/webhdfs.xml
++++ b/src/docs/src/documentation/content/xdocs/webhdfs.xml
+@@ -138,6 +138,28 @@
+   http://&lt;HOST&gt;:&lt;HTTP_PORT&gt;/webhdfs/v1/&lt;PATH&gt;?op=...
+ </source>
+       </section>
++<!-- ***************************************************************************** -->
++      <section>
++        <title>HDFS Configuration Options</title>
++<p>
++  Below are the HDFS configuration options for WebHDFS.
++</p>
++<table>
++<tr><th>Property Name</th><th>Description</th></tr>
++<tr><td><code>dfs.webhdfs.enabled</code></td>
++<td>Enable/disable WebHDFS in Namenodes and Datanodes
++</td></tr>
++<tr><td><code>dfs.web.authentication.kerberos.principal</code></td>
++<td>The HTTP Kerberos principal used by Hadoop-Auth in the HTTP endpoint.
++    The HTTP Kerberos principal MUST start with 'HTTP/' per Kerberos
++    HTTP SPENGO specification.
++</td></tr>
++<tr><td><code>dfs.web.authentication.kerberos.keytab</code></td>
++<td>The Kerberos keytab file with the credentials for the
++    HTTP Kerberos principal used by Hadoop-Auth in the HTTP endpoint.
++</td></tr>
++</table>
++      </section>
+     </section>
+ <!-- ***************************************************************************** -->
+     <section id="Authentication">
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+index 3905641..ea0c311 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+@@ -512,8 +512,7 @@ public class DataNode extends Configured
+     this.infoServer.addServlet(null, "/blockScannerReport", 
+                                DataBlockScanner.Servlet.class);
+ 
+-    if (conf.getBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY,
+-        DFSConfigKeys.DFS_WEBHDFS_ENABLED_DEFAULT)) {
++    if (WebHdfsFileSystem.isEnabled(conf, LOG)) {
+       infoServer.addJerseyResourcePackage(DatanodeWebHdfsMethods.class
+           .getPackage().getName() + ";" + Param.class.getPackage().getName(),
+           WebHdfsFileSystem.PATH_PREFIX + "/*");
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+index ae2de75..beac116 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+@@ -403,8 +403,7 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+               infoPort == 0, conf, 
+               SecurityUtil.getAdminAcls(conf, DFSConfigKeys.DFS_ADMIN)) {
+             {
+-              if (conf.getBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY,
+-                  DFSConfigKeys.DFS_WEBHDFS_ENABLED_DEFAULT)) {
++              if (WebHdfsFileSystem.isEnabled(conf, LOG)) {
+                 //add SPNEGO authentication filter for webhdfs
+                 final String name = "SPNEGO";
+                 final String classname =  AuthFilter.class.getName();
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 6fa08ef..4d106e0 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -127,6 +127,14 @@ public class WebHdfsFileSystem extends FileSystem
+     DT_RENEWER.addRenewAction(webhdfs);
+   }
+ 
++  /** Is WebHDFS enabled in conf? */
++  public static boolean isEnabled(final Configuration conf, final Log log) {
++    final boolean b = conf.getBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY,
++        DFSConfigKeys.DFS_WEBHDFS_ENABLED_DEFAULT);
++    log.info(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY + " = " + b);
++    return b;
++  }
++
+   private final UserGroupInformation ugi;
+   private InetSocketAddress nnAddr;
+   private Token<?> delegationToken;
+diff --git a/src/test/org/apache/hadoop/hdfs/security/TestDelegationTokenForProxyUser.java b/src/test/org/apache/hadoop/hdfs/security/TestDelegationTokenForProxyUser.java
+index 1d742fc..aaae3f5 100644
+--- a/src/test/org/apache/hadoop/hdfs/security/TestDelegationTokenForProxyUser.java
++++ b/src/test/org/apache/hadoop/hdfs/security/TestDelegationTokenForProxyUser.java
+@@ -53,6 +53,7 @@ import org.apache.hadoop.hdfs.web.WebHdfsTestUtil;
+ import org.apache.hadoop.hdfs.web.resources.DoAsParam;
+ import org.apache.hadoop.hdfs.web.resources.ExceptionHandler;
+ import org.apache.hadoop.hdfs.web.resources.GetOpParam;
++import org.apache.hadoop.hdfs.web.resources.PostOpParam;
+ import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+ import org.apache.hadoop.security.TestDoAsEffectiveUser;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -105,6 +106,7 @@ public class TestDelegationTokenForProxyUser {
+   public void setUp() throws Exception {
+     config = new Configuration();
+     config.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
++    config.setBoolean("dfs.support.broken.append", true);
+     config.setLong(
+         DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_MAX_LIFETIME_KEY, 10000);
+     config.setLong(
+@@ -197,9 +199,9 @@ public class TestDelegationTokenForProxyUser {
+       Assert.assertEquals("/user/" + PROXY_USER, responsePath);
+     }
+ 
++    final Path f = new Path("/testWebHdfsDoAs/a.txt");
+     {
+       //test create file with doAs
+-      final Path f = new Path("/testWebHdfsDoAs/a.txt");
+       final PutOpParam.Op op = PutOpParam.Op.CREATE;
+       final URL url = WebHdfsTestUtil.toUrl(webhdfs, op,  f, new DoAsParam(PROXY_USER));
+       WebHdfsTestUtil.LOG.info("url=" + url);
+@@ -213,5 +215,21 @@ public class TestDelegationTokenForProxyUser {
+       WebHdfsTestUtil.LOG.info("status.getOwner()=" + status.getOwner());
+       Assert.assertEquals(PROXY_USER, status.getOwner());
+     }
++
++    {
++      //test append file with doAs
++      final PostOpParam.Op op = PostOpParam.Op.APPEND;
++      final URL url = WebHdfsTestUtil.toUrl(webhdfs, op,  f, new DoAsParam(PROXY_USER));
++      HttpURLConnection conn = (HttpURLConnection) url.openConnection();
++      conn = WebHdfsTestUtil.twoStepWrite(conn, op);
++      final FSDataOutputStream out = WebHdfsTestUtil.write(webhdfs, op, conn, 4096);
++      out.write("\nHello again!".getBytes());
++      out.close();
++  
++      final FileStatus status = webhdfs.getFileStatus(f);
++      WebHdfsTestUtil.LOG.info("status.getOwner()=" + status.getOwner());
++      WebHdfsTestUtil.LOG.info("status.getLen()  =" + status.getLen());
++      Assert.assertEquals(PROXY_USER, status.getOwner());
++    }
+   }
+ }
+-- 
+1.7.0.4
+

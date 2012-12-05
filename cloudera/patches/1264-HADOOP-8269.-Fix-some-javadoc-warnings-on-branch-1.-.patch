@@ -1,0 +1,77 @@
+From d7b6e76770a8d46f79f76ef4eb04f65f8372ae3f Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@apache.org>
+Date: Wed, 11 Apr 2012 23:04:18 +0000
+Subject: [PATCH 1264/1344] HADOOP-8269. Fix some javadoc warnings on branch-1. Contributed by Eli Collins
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1325057 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 7b2f4a3aa153fd805360df883f43bdea9179d11d)
+
+Author: Eli Collins
+Ref: CDH-4806
+---
+ src/core/org/apache/hadoop/net/DNS.java            |    2 +-
+ src/core/org/apache/hadoop/net/NetUtils.java       |    2 +-
+ src/core/org/apache/hadoop/util/StringUtils.java   |    5 +++--
+ .../lib/partition/KeyFieldBasedComparator.java     |    4 ++--
+ 4 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/net/DNS.java b/src/core/org/apache/hadoop/net/DNS.java
+index 8b370f8..af7f7b4 100644
+--- a/src/core/org/apache/hadoop/net/DNS.java
++++ b/src/core/org/apache/hadoop/net/DNS.java
+@@ -119,7 +119,7 @@ public class DNS {
+   }
+ 
+   /**
+-   * Like {@link DNS#getIPs(String, boolean), but returns all
++   * Like {@link DNS#getIPs(String, boolean)}, but returns all
+    * IPs associated with the given interface and its subinterfaces.
+    */
+   public static String[] getIPs(String strInterface)
+diff --git a/src/core/org/apache/hadoop/net/NetUtils.java b/src/core/org/apache/hadoop/net/NetUtils.java
+index 84405e3..79b1849 100644
+--- a/src/core/org/apache/hadoop/net/NetUtils.java
++++ b/src/core/org/apache/hadoop/net/NetUtils.java
+@@ -656,7 +656,7 @@ public class NetUtils {
+    * also takes a local address and port to bind the socket to. 
+    * 
+    * @param socket
+-   * @param address the remote address
++   * @param endpoint the remote address
+    * @param localAddr the local address to bind the socket to
+    * @param timeout timeout in milliseconds
+    */
+diff --git a/src/core/org/apache/hadoop/util/StringUtils.java b/src/core/org/apache/hadoop/util/StringUtils.java
+index 8e574f4..91f8a94 100644
+--- a/src/core/org/apache/hadoop/util/StringUtils.java
++++ b/src/core/org/apache/hadoop/util/StringUtils.java
+@@ -737,8 +737,9 @@ public class StringUtils {
+   /**
+    * Concatenates stringified objects, using a separator.
+    *
+-   * @param separator Separator to join with.
+-   * @param objects Objects to join.
++   * @param separator to join with
++   * @param objects to join
++   * @return the joined string
+    */
+   public static String joinObjects(
+ 	  CharSequence separator, Iterable<? extends Object> objects) {
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/lib/partition/KeyFieldBasedComparator.java b/src/mapred/org/apache/hadoop/mapreduce/lib/partition/KeyFieldBasedComparator.java
+index f621a4d..98dacaa 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/lib/partition/KeyFieldBasedComparator.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/lib/partition/KeyFieldBasedComparator.java
+@@ -42,8 +42,8 @@ import org.apache.hadoop.mapreduce.lib.partition.KeyFieldHelper.KeyDescription;
+  *  character. If '.c' is omitted from pos1, it defaults to 1 (the beginning
+  *  of the field); if omitted from pos2, it defaults to 0 (the end of the
+  *  field). opts are ordering options (any of 'nr' as described above). 
+- * We assume that the fields in the key are separated by 
+- * {@link JobContext#MAP_OUTPUT_KEY_FIELD_SEPERATOR}.
++ * We assume that the fields in the key are separated by
++ * mapreduce.map.output.key.field.separator.
+  */
+ public class KeyFieldBasedComparator<K, V> extends WritableComparator 
+     implements Configurable {
+-- 
+1.7.0.4
+

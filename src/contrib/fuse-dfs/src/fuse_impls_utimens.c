@@ -20,14 +20,15 @@
 #include "fuse_impls.h"
 #include "fuse_connect.h"
 
- int dfs_utimens(const char *path, const struct timespec ts[2])
+int dfs_utimens(const char *path, const struct timespec ts[2])
 {
-  TRACE1("utimens", path)
-#if PERMS
-  // retrieve dfs specific data
+  struct hdfsConn *conn = NULL;
+  hdfsFS fs;
+  int ret = 0;
   dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
 
-  // check params and the context var
+  TRACE1("utimens", path)
+
   assert(path);
   assert(dfs);
   assert('/' == *path);
@@ -35,18 +36,35 @@
   time_t aTime = ts[0].tv_sec;
   time_t mTime = ts[1].tv_sec;
 
-  hdfsFS userFS;
-  // if not connected, try to connect and fail out if we can't.
-  if ((userFS = doConnectAsUser(dfs->nn_hostname,dfs->nn_port))== NULL) {
-    syslog(LOG_ERR, "ERROR: could not connect to dfs %s:%d\n", __FILE__, __LINE__);
-    return -EIO;
+  ret = fuseConnectAsThreadUid(&conn);
+  if (ret) {
+    fprintf(stderr, "fuseConnectAsThreadUid: failed to open a libhdfs "
+            "connection!  error %d.\n", ret);
+    ret = -EIO;
+    goto cleanup;
   }
+  fs = hdfsConnGetFs(conn);
 
-  if (hdfsUtime(userFS, path, mTime, aTime)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to utime %s to %ld/%ld",path, (long)mTime, (long)aTime);
-    fprintf(stderr,"ERROR: could not set utime for path %s\n",path);
-    return -EIO;
+  if (hdfsUtime(fs, path, mTime, aTime)) {
+    hdfsFileInfo *info = hdfsGetPathInfo(fs, path);
+    if (info == NULL) {
+      ret = (errno > 0) ? -errno : -ENOENT;
+      goto cleanup;
+    }
+    // Silently ignore utimens failure for directories, otherwise 
+    // some programs like tar will fail.
+    if (info->mKind == kObjectKindDirectory) {
+      ret = 0;
+    } else {
+      ret = (errno > 0) ? -errno : -EACCES;
+    }
+    goto cleanup;
   }
-#endif  
-  return 0;
+  ret = 0;
+
+cleanup:
+  if (conn) {
+    hdfsConnRelease(conn);
+  }
+  return ret;
 }

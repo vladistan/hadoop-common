@@ -16,20 +16,31 @@
  * limitations under the License.
  */
 
-#include <strings.h>
-
 #include "fuse_dfs.h"
 #include "fuse_init.h"
 #include "fuse_options.h"
 #include "fuse_context_handle.h"
+#include "fuse_connect.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void print_env_vars(void)
+{
+  const char *cp = getenv("CLASSPATH");
+  const char *ld = getenv("LD_LIBRARY_PATH");
+
+  ERROR("LD_LIBRARY_PATH=%s",ld == NULL ? "NULL" : ld);
+  ERROR("CLASSPATH=%s",cp == NULL ? "NULL" : cp);
+}
 
 // Hacked up function to basically do:
 //  protectedpaths = split(options.protected,':');
 
-void init_protectedpaths(dfs_context *dfs) {
-
+static void init_protectedpaths(dfs_context *dfs)
+{
   char *tmp = options.protected;
-
 
   // handle degenerate case up front.
   if (tmp == NULL || 0 == *tmp) {
@@ -37,12 +48,10 @@ void init_protectedpaths(dfs_context *dfs) {
     dfs->protectedpaths[0] = NULL;
     return;
   }
-  assert(tmp);
 
   if (options.debug) {
     print_options();
   }
-
 
   int i = 0;
   while (tmp && (NULL != (tmp = index(tmp,':')))) {
@@ -75,65 +84,71 @@ void init_protectedpaths(dfs_context *dfs) {
     j++;
   }
   dfs->protectedpaths[j] = NULL;
-
-  /*
-    j  = 0;
-    while (dfs->protectedpaths[j]) {
-    printf("dfs->protectedpaths[%d]=%s\n",j,dfs->protectedpaths[j]);
-    fflush(stdout);
-    j++;
-    }
-    exit(1);
-  */
 }
 
-void *dfs_init()
+static void dfsPrintOptions(FILE *fp, const struct options *o)
 {
+  INFO("Mounting with options: [ protected=%s, nn_uri=%s, nn_port=%d, "
+          "debug=%d, read_only=%d, initchecks=%d, "
+          "no_permissions=%d, usetrash=%d, entry_timeout=%d, "
+          "attribute_timeout=%d, rdbuffer_size=%zd, direct_io=%d ]",
+          (o->protected ? o->protected : "(NULL)"), o->nn_uri, o->nn_port, 
+          o->debug, o->read_only, o->initchecks,
+          o->no_permissions, o->usetrash, o->entry_timeout,
+          o->attribute_timeout, o->rdbuffer_size, o->direct_io);
+}
+
+void *dfs_init(void)
+{
+  int ret;
 
   //
   // Create a private struct of data we will pass to fuse here and which
   // will then be accessible on every call.
   //
-  dfs_context *dfs = (dfs_context*)malloc(sizeof (dfs_context));
-
-  if (NULL == dfs) {
-    syslog(LOG_ERR, "FATAL: could not malloc fuse dfs context struct - out of memory %s:%d", __FILE__, __LINE__);
+  dfs_context *dfs = calloc(1, sizeof(*dfs));
+  if (!dfs) {
+    ERROR("FATAL: could not malloc dfs_context");
     exit(1);
   }
 
   // initialize the context
   dfs->debug                 = options.debug;
-  dfs->nn_hostname           = options.server;
-  dfs->nn_port               = options.port;
-  dfs->fs                    = NULL;
   dfs->read_only             = options.read_only;
   dfs->usetrash              = options.usetrash;
   dfs->protectedpaths        = NULL;
   dfs->rdbuffer_size         = options.rdbuffer_size;
   dfs->direct_io             = options.direct_io;
 
-  bzero(dfs->dfs_uri,0);
-  sprintf(dfs->dfs_uri,"dfs://%s:%d/",dfs->nn_hostname,dfs->nn_port);
-  dfs->dfs_uri_len = strlen(dfs->dfs_uri);
-
-  // use ERR level to ensure it makes it into the log.
-  syslog(LOG_ERR, "mounting %s", dfs->dfs_uri);
+  dfsPrintOptions(stderr, &options);
 
   init_protectedpaths(dfs);
   assert(dfs->protectedpaths != NULL);
 
   if (dfs->rdbuffer_size <= 0) {
-    syslog(LOG_DEBUG, "WARN: dfs->rdbuffersize <= 0 = %ld %s:%d", dfs->rdbuffer_size, __FILE__, __LINE__);
+    DEBUG("dfs->rdbuffersize <= 0 = %zd", dfs->rdbuffer_size);
     dfs->rdbuffer_size = 32768;
+  }
+
+  ret = fuseConnectInit(options.nn_uri, options.nn_port);
+  if (ret) {
+    ERROR("FATAL: dfs_init: fuseConnectInit failed with error %d!", ret);
+    print_env_vars();
+    exit(EXIT_FAILURE);
+  }
+  if (options.initchecks == 1) {
+    ret = fuseConnectTest();
+    if (ret) {
+      ERROR("FATAL: dfs_init: fuseConnectTest failed with error %d!", ret);
+      print_env_vars();
+      exit(EXIT_FAILURE);
+    }
   }
   return (void*)dfs;
 }
 
 
-
-void dfs_destroy (void *ptr)
+void dfs_destroy(void *ptr)
 {
   TRACE("destroy")
-  dfs_context *dfs = (dfs_context*)ptr;
-  dfs->fs = NULL;
 }

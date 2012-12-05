@@ -16,14 +16,19 @@
 # Autoconf input file
 # $Id$
 
-AC_PREREQ(2.61)
 AC_INIT([libhdfs], [0.1.0], omalley@apache.org)
 AC_PREFIX_DEFAULT([`pwd`/../install])
+AC_CONFIG_AUX_DIR([config])
 
 # Generates Makefile from Makefile.am. Modify when new subdirs are added.
 # Change Makefile.am also to add subdirectly.
 AM_INIT_AUTOMAKE(foreign no-dist)
 AC_CONFIG_FILES(Makefile)
+
+# Dont generate rules to re-automake if timestamps are off
+# since we check in the generated files and revision control
+# doesn't track timestamps
+AM_MAINTAINER_MODE
 
 LT_INIT
  
@@ -112,9 +117,5 @@ AC_C_CONST
 AC_C_VOLATILE
 #AC_FUNC_MALLOC
 AC_HEADER_STDBOOL
-AC_TYPE_INT16_T
-AC_TYPE_INT32_T
-AC_TYPE_INT64_T
-AC_TYPE_UINT16_T
 AC_SUBST(PRODUCT_MK)
 AC_OUTPUT

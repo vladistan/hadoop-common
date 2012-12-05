@@ -22,8 +22,6 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
-import java.text.DecimalFormat;
-import java.text.NumberFormat;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.zip.GZIPInputStream;
@@ -38,6 +36,8 @@ import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.SequenceFile;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableComparable;
+import org.apache.hadoop.io.compress.CompressionCodec;
+import org.apache.hadoop.io.compress.CompressionCodecFactory;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.util.ReflectionUtils;
@@ -45,8 +45,12 @@ import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.hadoop.util.StringUtils;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
 /** Provide command line access to a FileSystem. */
 public class FsShell extends Configured implements Tool {
+  static final Log LOG = LogFactory.getLog(FsShell.class);
 
   protected FileSystem fs;
   private Trash trash;
@@ -391,17 +395,34 @@ public class FsShell extends Configured implements Tool {
 
   private InputStream forMagic(Path p, FileSystem srcFs) throws IOException {
     FSDataInputStream i = srcFs.open(p);
+
     switch(i.readShort()) {
-      case 0x1f8b: // RFC 1952
+      case 0x1f8b: { // RFC 1952
+        // Must be gzip
         i.seek(0);
         return new GZIPInputStream(i);
-      case 0x5345: // 'S' 'E'
+      }
+      case 0x5345: { // 'S' 'E'
+        // Might be a SequenceFile
         if (i.readByte() == 'Q') {
           i.close();
           return new TextRecordInputStream(srcFs.getFileStatus(p));
         }
+      }
+      default: {
+        // Check the type of compression instead, depending on Codec class's
+        // own detection methods, based on the provided path.
+        CompressionCodecFactory cf = new CompressionCodecFactory(getConf());
+        CompressionCodec codec = cf.getCodec(p);
+        if (codec != null) {
+	  i.seek(0);
+          return codec.createInputStream(i);
+        }
         break;
+      }
     }
+
+    // File is non-compressed, or not a file container we know.
     i.seek(0);
     return i;
   }
@@ -638,6 +659,28 @@ public class FsShell extends Configured implements Tool {
       }
       return numOfErrors;
     }
+  }
+
+   /**
+   * Show the size of a partition in the filesystem that contains
+   * the specified <i>path</i>.
+   * @param path a path specifying the source partition. null means /.
+   * @throws IOException  
+   */
+  void df(String path) throws IOException {
+    if (path == null) path = "/";
+    final Path srcPath = new Path(path);
+    final FileSystem srcFs = srcPath.getFileSystem(getConf());
+    if (! srcFs.exists(srcPath)) {
+      throw new FileNotFoundException("Cannot access "+srcPath.toString());
+    }
+    final FsStatus stats = srcFs.getStatus(srcPath);
+    final int PercentUsed = (int)(100.0f *  (float)stats.getUsed() / (float)stats.getCapacity());
+    System.out.println("Filesystem\t\tSize\tUsed\tAvail\tUse%");
+    System.out.printf("%s\t\t%d\t%d\t%d\t%d%%\n",
+      path, 
+      stats.getCapacity(), stats.getUsed(), stats.getRemaining(),
+      PercentUsed);
   }
 
   /**
@@ -904,6 +947,7 @@ public class FsShell extends Configured implements Tool {
         //
         rename(argv[i], dest);
       } catch (RemoteException e) {
+        LOG.debug("Error", e);
         //
         // This is a error returned by hadoop server. Print
         // out the first line of the error mesage.
@@ -918,6 +962,7 @@ public class FsShell extends Configured implements Tool {
                              ex.getLocalizedMessage());
         }
       } catch (IOException e) {
+        LOG.debug("Error", e);
         //
         // IO exception encountered locally.
         //
@@ -988,6 +1033,7 @@ public class FsShell extends Configured implements Tool {
         //
         copy(argv[i], dest, conf);
       } catch (RemoteException e) {
+        LOG.debug("Error", e);
         //
         // This is a error returned by hadoop server. Print
         // out the first line of the error mesage.
@@ -1003,6 +1049,7 @@ public class FsShell extends Configured implements Tool {
                              ex.getLocalizedMessage());
         }
       } catch (IOException e) {
+        LOG.debug("Error", e);
         //
         // IO exception encountered locally.
         //
@@ -1064,6 +1111,7 @@ public class FsShell extends Configured implements Tool {
           return;
         }
       } catch (IOException e) {
+        LOG.debug("Error", e);
         Exception cause = (Exception) e.getCause();
         String msg = "";
         if(cause != null) {
@@ -1233,6 +1281,7 @@ public class FsShell extends Configured implements Tool {
             errors += runCmdHandler(handler, file, srcFs, recursive);
           }
         } catch (IOException e) {
+          LOG.debug("Error", e);
           String msg = (e.getMessage() != null ? e.getLocalizedMessage() :
             (e.getCause().getMessage() != null ? 
                 e.getCause().getLocalizedMessage() : "null"));
@@ -1267,7 +1316,7 @@ public class FsShell extends Configured implements Tool {
     String summary = "hadoop fs is the command to execute fs commands. " +
       "The full syntax is: \n\n" +
       "hadoop fs [-fs <local | file system URI>] [-conf <configuration file>]\n\t" +
-      "[-D <property=value>] [-ls <path>] [-lsr <path>] [-du <path>]\n\t" + 
+      "[-D <property=value>] [-ls <path>] [-lsr <path>] [-df <path>] [-du <path>]\n\t" + 
       "[-dus <path>] [-mv <src> <dst>] [-cp <src> <dst>] [-rm [-skipTrash] <src>]\n\t" + 
       "[-rmr [-skipTrash] <src>] [-put <localsrc> ... <dst>] [-copyFromLocal <localsrc> ... <dst>]\n\t" +
       "[-moveFromLocal <localsrc> ... <dst>] [" + 
@@ -1312,6 +1361,10 @@ public class FsShell extends Configured implements Tool {
       "\t\tfile pattern.  Behaves very similarly to hadoop fs -ls,\n" + 
       "\t\texcept that the data is shown for all the entries in the\n" +
       "\t\tsubtree.\n";
+
+    String df = "-df [<path>]: \tShows the capacity, free and used space of the filesystem.\n"+
+      "\t\tIf the filesystem has multiple partitions, and no path to a particular partition\n"+
+      "\t\tis specified, then the status of the root partitions will be shown.\n";
 
     String du = "-du <path>: \tShow the amount of space, in bytes, used by the files that \n" +
       "\t\tmatch the specified file pattern.  Equivalent to the unix\n" + 
@@ -1401,9 +1454,10 @@ public class FsShell extends Configured implements Tool {
       "\t-R\tmodifies the files recursively. This is the only option\n" +
       "\t\tcurrently supported.\n\n" +
       "\tMODE\tMode is same as mode used for chmod shell command.\n" +
-      "\t\tOnly letters recognized are 'rwxX'. E.g. a+r,g-w,+rwx,o=r\n\n" +
-      "\tOCTALMODE Mode specifed in 3 digits. Unlike shell command,\n" +
-      "\t\tthis requires all three digits.\n" +
+      "\t\tOnly letters recognized are 'rwxXt'. E.g. +t,a+r,g-w,+rwx,o=r\n\n" +
+      "\tOCTALMODE Mode specifed in 3 or 4 digits. If 4 digits, the first may\n" +
+      "\tbe 1 or 0 to turn the sticky bit on or off, respectively.  Unlike " +
+      "\tshell command, it is not possible to specify only part of the mode\n" +
       "\t\tE.g. 754 is same as u=rwx,g=rx,o=r\n\n" +
       "\t\tIf none of 'augo' is specified, 'a' is assumed and unlike\n" +
       "\t\tshell command, no umask is applied.\n";
@@ -1439,6 +1493,8 @@ public class FsShell extends Configured implements Tool {
       System.out.println(ls);
     } else if ("lsr".equals(cmd)) {
       System.out.println(lsr);
+    } else if ("df".equals(cmd)) {
+      System.out.println(df);
     } else if ("du".equals(cmd)) {
       System.out.println(du);
     } else if ("dus".equals(cmd)) {
@@ -1498,6 +1554,7 @@ public class FsShell extends Configured implements Tool {
       System.out.println(fs);
       System.out.println(ls);
       System.out.println(lsr);
+      System.out.println(df);
       System.out.println(du);
       System.out.println(dus);
       System.out.println(mv);
@@ -1561,6 +1618,8 @@ public class FsShell extends Configured implements Tool {
           delete(argv[i], false, rmSkipTrash);
         } else if ("-rmr".equals(cmd)) {
           delete(argv[i], true, rmSkipTrash);
+        } else if ("-df".equals(cmd)) {
+          df(argv[i]);
         } else if ("-du".equals(cmd)) {
           du(argv[i]);
         } else if ("-dus".equals(cmd)) {
@@ -1577,6 +1636,7 @@ public class FsShell extends Configured implements Tool {
           text(argv[i]);
         }
       } catch (RemoteException e) {
+        LOG.debug("Error", e);
         //
         // This is a error returned by hadoop server. Print
         // out the first line of the error message.
@@ -1592,6 +1652,7 @@ public class FsShell extends Configured implements Tool {
                              ex.getLocalizedMessage());
         }
       } catch (IOException e) {
+        LOG.debug("Error", e);
         //
         // IO exception encountered locally.
         //
@@ -1628,6 +1689,9 @@ public class FsShell extends Configured implements Tool {
                "-text".equals(cmd)) {
       System.err.println("Usage: java FsShell" + 
                          " [" + cmd + " <path>]");
+    } else if ("-df".equals(cmd) ) {
+      System.err.println("Usage: java FsShell" +
+                         " [" + cmd + " [<path>]]");
     } else if (Count.matches(cmd)) {
       System.err.println(prefix + " [" + Count.USAGE + "]");
     } else if ("-rm".equals(cmd) || "-rmr".equals(cmd)) {
@@ -1664,6 +1728,7 @@ public class FsShell extends Configured implements Tool {
       System.err.println("Usage: java FsShell");
       System.err.println("           [-ls <path>]");
       System.err.println("           [-lsr <path>]");
+      System.err.println("           [-df [<path>]]");
       System.err.println("           [-du <path>]");
       System.err.println("           [-dus <path>]");
       System.err.println("           [" + Count.USAGE + "]");
@@ -1709,7 +1774,6 @@ public class FsShell extends Configured implements Tool {
     int exitCode = -1;
     int i = 0;
     String cmd = argv[i++];
-
     //
     // verify that we have enough command line parameters
     //
@@ -1739,7 +1803,6 @@ public class FsShell extends Configured implements Tool {
         return exitCode;
       }
     }
-
     // initialize FsShell
     try {
       init();
@@ -1748,6 +1811,7 @@ public class FsShell extends Configured implements Tool {
                          "... command aborted.");
       return exitCode;
     } catch (IOException e) {
+      LOG.debug("Error", e);
       System.err.println("Bad connection to FS. command aborted. exception: " +
           e.getLocalizedMessage());
       return exitCode;
@@ -1806,6 +1870,12 @@ public class FsShell extends Configured implements Tool {
         exitCode = doall(cmd, argv, i);
       } else if ("-expunge".equals(cmd)) {
         expunge();
+      } else if ("-df".equals(cmd)) {
+        if (argv.length-1 > 0) {
+          exitCode = doall(cmd, argv, i);
+        } else {
+          df(null);
+        }
       } else if ("-du".equals(cmd)) {
         if (i < argv.length) {
           exitCode = doall(cmd, argv, i);
@@ -1846,10 +1916,12 @@ public class FsShell extends Configured implements Tool {
         printUsage("");
       }
     } catch (IllegalArgumentException arge) {
+      LOG.debug("Error", arge);
       exitCode = -1;
       System.err.println(cmd.substring(1) + ": " + arge.getLocalizedMessage());
       printUsage(cmd);
     } catch (RemoteException e) {
+      LOG.debug("Error", e);
       //
       // This is a error returned by hadoop server. Print
       // out the first line of the error mesage, ignore the stack trace.
@@ -1864,6 +1936,7 @@ public class FsShell extends Configured implements Tool {
                            ex.getLocalizedMessage());  
       }
     } catch (IOException e) {
+      LOG.debug("Error", e);
       //
       // IO exception encountered locally.
       // 
@@ -1871,6 +1944,7 @@ public class FsShell extends Configured implements Tool {
       System.err.println(cmd.substring(1) + ": " + 
                          e.getLocalizedMessage());  
     } catch (Exception re) {
+      LOG.debug("Error", re);
       exitCode = -1;
       System.err.println(cmd.substring(1) + ": " + re.getLocalizedMessage());  
     } finally {

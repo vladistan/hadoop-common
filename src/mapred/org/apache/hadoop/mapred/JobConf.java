@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.util.Enumeration;
+import java.util.regex.Pattern;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -41,9 +42,11 @@ import org.apache.hadoop.mapred.lib.IdentityReducer;
 import org.apache.hadoop.mapred.lib.HashPartitioner;
 import org.apache.hadoop.mapred.lib.KeyFieldBasedComparator;
 import org.apache.hadoop.mapred.lib.KeyFieldBasedPartitioner;
+import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.Tool;
+import org.apache.log4j.Level;
 
 /** 
  * A map/reduce job configuration.
@@ -155,13 +158,19 @@ public class JobConf extends Configuration {
    * name is mentioned.
    */
   public static final String DEFAULT_QUEUE_NAME = "default";
-  
+
   static final String MAPRED_JOB_MAP_MEMORY_MB_PROPERTY =
       "mapred.job.map.memory.mb";
 
   static final String MAPRED_JOB_REDUCE_MEMORY_MB_PROPERTY =
       "mapred.job.reduce.memory.mb";
 
+  /** Pattern for the default unpacking behavior for job jars */
+  public static final Pattern UNPACK_JAR_PATTERN_DEFAULT =
+    Pattern.compile("(?:classes/|lib/).*");
+
+  public static final String JOB_LEVEL_AUTHORIZATION_ENABLING_FLAG = 
+	    "mapreduce.cluster.job-authorization-enabled";
   static final String MR_ACLS_ENABLED = "mapred.acls.enabled";
 
   static final String MR_ADMINS = "mapreduce.cluster.administrators";
@@ -316,6 +325,29 @@ public class JobConf extends Configuration {
   private Credentials credentials = new Credentials();
   
   /**
+   * Configuration key to set the logging {@link Level} for the map task.
+   *
+   * The allowed logging levels are:
+   * OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE and ALL.
+   */
+  public static final String MAPRED_MAP_TASK_LOG_LEVEL =
+    "mapred.map.child.log.level";
+
+  /**
+   * Configuration key to set the logging {@link Level} for the reduce task.
+   *
+   * The allowed logging levels are:
+   * OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE and ALL.
+   */
+  public static final String MAPRED_REDUCE_TASK_LOG_LEVEL =
+    "mapred.reduce.child.log.level";
+
+  /**
+   * Default logging level for map/reduce tasks.
+   */
+  public static final Level DEFAULT_LOG_LEVEL = Level.INFO;
+
+  /**
    * Construct a map/reduce job configuration.
    */
   public JobConf() {
@@ -416,6 +448,14 @@ public class JobConf extends Configuration {
    * @param jar the user jar for the map-reduce job.
    */
   public void setJar(String jar) { set("mapred.jar", jar); }
+
+  /**
+   * Get the pattern for jar contents to unpack on the tasktracker
+   */
+  public Pattern getJarUnpackPattern() {
+    return getPattern(JobContext.JAR_UNPACK_PATTERN, UNPACK_JAR_PATTERN_DEFAULT);
+  }
+
   
   /**
    * Set the job's jar file by finding an example class location.
@@ -430,9 +470,14 @@ public class JobConf extends Configuration {
   }
 
   public String[] getLocalDirs() throws IOException {
-    return getStrings(MAPRED_LOCAL_DIR_PROPERTY);
+    return getTrimmedStrings(MAPRED_LOCAL_DIR_PROPERTY);
   }
 
+  /**
+   * Use MRAsyncDiskService.moveAndDeleteAllVolumes instead.
+   * @see org.apache.hadoop.util.MRAsyncDiskService#cleanupAllVolumes()
+   */
+  @Deprecated
   public void deleteLocalFiles() throws IOException {
     String[] localDirs = getLocalDirs();
     for (int i = 0; i < localDirs.length; i++) {
@@ -1468,6 +1513,25 @@ public class JobConf extends Configuration {
   public void setProfileEnabled(boolean newValue) {
     setBoolean("mapred.task.profile", newValue);
   }
+  
+  /**
+   * Set the boolean property for specifying which classpath takes precedence -
+   * the user's one or the system one, when the tasks are launched
+   * @param value pass true if user's classes should take precedence
+   */
+  public void setUserClassesTakesPrecedence(boolean value) {
+    setBoolean(JobContext.MAPREDUCE_TASK_CLASSPATH_PRECEDENCE, value);
+  }
+  
+  /**
+   * Get the boolean value for the property that specifies which classpath
+   * takes precedence when tasks are launched. True - user's classes takes
+   * precedence. False - system's classes takes precedence.
+   * @return true if user's classes should take precedence
+   */
+  public boolean userClassesTakesPrecedence() {
+    return getBoolean(JobContext.MAPREDUCE_TASK_CLASSPATH_PRECEDENCE, false);
+  }
 
   /**
    * Get the profiler configuration arguments.
@@ -1797,6 +1861,13 @@ public class JobConf extends Configuration {
           if (toReturn.startsWith("file:")) {
             toReturn = toReturn.substring("file:".length());
           }
+          // URLDecoder is a misnamed class, since it actually decodes
+          // x-www-form-urlencoded MIME type rather than actual
+          // URL encoding (which the file path has). Therefore it would
+          // decode +s to ' 's which is incorrect (spaces are actually
+          // either unencoded or encoded as "%20"). Replace +s first, so
+          // that they are kept sacred during the decoding process.
+          toReturn = toReturn.replaceAll("\\+", "%2B");
           toReturn = URLDecoder.decode(toReturn, "UTF-8");
           return toReturn.replaceAll("!.*$", "");
         }

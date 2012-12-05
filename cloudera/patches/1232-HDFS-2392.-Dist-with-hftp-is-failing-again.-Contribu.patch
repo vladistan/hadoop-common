@@ -1,0 +1,189 @@
+From 720f9128ce63aea7e80af3845f846fc45870bbcd Mon Sep 17 00:00:00 2001
+From: Jitendra Nath Pandey <jitendra@apache.org>
+Date: Tue, 4 Oct 2011 06:44:32 +0000
+Subject: [PATCH 1232/1344] HDFS-2392. Dist with hftp is failing again. Contributed by Daryn Sharp.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1178698 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 2b681521bdd8eee1f6b2885697214449cd5a90a3)
+
+Author: Daryn Sharp
+Ref: CDH-4806
+---
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |   43 +++++++----
+ .../org/apache/hadoop/hdfs/TestHftpFileSystem.java |   77 +++++++++++++++++++-
+ 2 files changed, 103 insertions(+), 17 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index f16e5da..6f73272 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -156,31 +156,42 @@ public class HftpFileSystem extends FileSystem {
+     this.hftpURI = createUri(name.getScheme(), nnAddr);
+     
+     if (UserGroupInformation.isSecurityEnabled()) {
+-      Token<?> token = selectHftpDelegationToken();
+-      if (token == null) {
+-        token = selectHdfsDelegationToken();
+-      }   
+-      //since we don't already have a token, go get one over https
+-      if (token == null) {
+-        token = getDelegationToken(null);
+-        // security might be disabled
+-        if (token != null) {
+-          setDelegationToken(token);
+-          renewer.addTokenToRenew(this);
+-          LOG.debug("Created new DT for " + token.getService());
+-        }
++      initDelegationToken();
++    }
++  }
++  
++  protected void initDelegationToken() throws IOException {
++    // look for hftp token, then try hdfs
++    Token<?> token = selectHftpDelegationToken();
++    if (token == null) {
++      token = selectHdfsDelegationToken();
++    }   
++
++    //since we don't already have a token, go get one over https
++    boolean createdToken = false;
++    if (token == null) {
++      token = getDelegationToken(null);
++      createdToken = (token != null);
++    }
++
++    // security might be disabled
++    if (token != null) {
++      setDelegationToken(token);
++      if (createdToken) {
++        renewer.addTokenToRenew(this);
++        LOG.debug("Created new DT for " + token.getService());
+       } else {
+         LOG.debug("Found existing DT for " + token.getService());        
+       }
+     }
+   }
+ 
+-  private Token<DelegationTokenIdentifier> selectHftpDelegationToken() {
++  protected Token<DelegationTokenIdentifier> selectHftpDelegationToken() {
+     Text serviceName = SecurityUtil.buildTokenService(nnSecureAddr);
+     return hftpTokenSelector.selectToken(serviceName, ugi.getTokens());      
+   }
+   
+-  private Token<DelegationTokenIdentifier> selectHdfsDelegationToken() {
++  protected Token<DelegationTokenIdentifier> selectHdfsDelegationToken() {
+     // this guesses the remote cluster's rpc service port.
+     // the current token design assumes it's the same as the local cluster's
+     // rpc port unless a config key is set.  there should be a way to automatic
+@@ -213,7 +224,7 @@ public class HftpFileSystem extends FileSystem {
+     return uri;
+   }
+ 
+-  private <T extends TokenIdentifier> void setDelegationToken(Token<T> token) {
++  protected <T extends TokenIdentifier> void setDelegationToken(Token<T> token) {
+     renewToken = token;
+     // emulate the 203 usage of the tokens
+     // by setting the kind and service as if they were hdfs tokens
+diff --git a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+index b15cf4e..ad274e0 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
++++ b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+@@ -18,6 +18,7 @@
+ 
+ package org.apache.hadoop.hdfs;
+ 
++import static org.junit.Assert.*;
+ import static org.junit.Assert.assertEquals;
+ 
+ import java.io.IOException;
+@@ -25,6 +26,11 @@ import java.net.URI;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
++import org.apache.hadoop.io.Text;
++import org.apache.hadoop.security.SecurityUtil;
++import org.apache.hadoop.security.token.Token;
++import org.apache.hadoop.security.token.TokenIdentifier;
+ import org.junit.Before;
+ import org.junit.Test;
+ 
+@@ -206,5 +212,74 @@ public class TestHftpFileSystem {
+         fs.getCanonicalServiceName()
+     );
+   }
+-}
+ 
++  Token<DelegationTokenIdentifier> hftpToken;
++  Token<DelegationTokenIdentifier> hdfsToken;
++  Token<DelegationTokenIdentifier> gotToken;
++  
++  class StubbedHftpFileSystem extends HftpFileSystem {
++    @Override
++    protected Token<DelegationTokenIdentifier> selectHftpDelegationToken() {
++      return hftpToken;
++    }
++    
++    @Override
++    protected Token<DelegationTokenIdentifier> selectHdfsDelegationToken() {
++      return hdfsToken;
++    }
++    
++    @Override
++    public Token<DelegationTokenIdentifier> getDelegationToken(String renewer) {
++      return makeDummyToken("new");
++    }
++    
++    @SuppressWarnings("unchecked")
++    @Override
++    protected <T extends TokenIdentifier> void setDelegationToken(Token<T> token) {
++      gotToken = (Token<DelegationTokenIdentifier>) token;
++    }
++  }
++  
++  static Token<DelegationTokenIdentifier> makeDummyToken(String kind) {
++    Token<DelegationTokenIdentifier> token = new Token();
++    token.setKind(new Text(kind));
++    return token;
++  }
++  
++  @Before
++  public void resetTokens() {
++    hftpToken = hdfsToken = gotToken = null;
++  }
++  
++  @Test
++  public void testHftpWithNoTokens() throws IOException {
++    new StubbedHftpFileSystem().initDelegationToken();
++    assertNotNull(gotToken);
++    assertEquals(new Text("new"), gotToken.getKind());
++    
++  }
++  @Test
++  public void testHftpWithHftpToken() throws IOException {
++    hftpToken = makeDummyToken("hftp");
++    new StubbedHftpFileSystem().initDelegationToken();
++    assertNotNull(gotToken);
++    assertEquals(gotToken, hftpToken);
++  }
++  
++  @Test
++  public void testHftpWithHdfsToken() throws IOException {
++    hdfsToken = makeDummyToken("hdfs");
++    new StubbedHftpFileSystem().initDelegationToken();
++    assertNotNull(gotToken);
++    assertEquals(gotToken, hdfsToken);
++  }
++
++  @Test
++  public void testHftpWithHftpAndHdfsToken() throws IOException {
++    hftpToken = makeDummyToken("hftp");
++    hdfsToken = makeDummyToken("hdfs");
++    new StubbedHftpFileSystem().initDelegationToken();
++    assertNotNull(gotToken);
++    assertEquals(gotToken, hftpToken);
++  }
++}
+-- 
+1.7.0.4
+

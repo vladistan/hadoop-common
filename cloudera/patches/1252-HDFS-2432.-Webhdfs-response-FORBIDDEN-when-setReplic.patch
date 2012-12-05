@@ -1,0 +1,420 @@
+From da60731489f4dd397231f8ae5cce3f878819f30b Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Thu, 27 Oct 2011 23:15:07 +0000
+Subject: [PATCH 1252/1344] HDFS-2432. Webhdfs: response FORBIDDEN when setReplication on non-files; clear umask before creating a flie; throw IllegalArgumentException if setOwner with both owner and group empty; throw FileNotFoundException if getFileStatus on non-existing files; fix bugs in getBlockLocations; and changed getFileChecksum json response root to "FileChecksum".
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1190079 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit f48b9303ba676b93a13a5e9471c2bed7da5749db)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../web/resources/DatanodeWebHdfsMethods.java      |   15 ++++--
+ .../web/resources/NamenodeWebHdfsMethods.java      |   17 ++++++-
+ src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java  |    8 ++--
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |   46 ++++++++++---------
+ .../hdfs/web/TestWebHdfsFileSystemContract.java    |   49 ++++++++++++++++++++
+ 5 files changed, 100 insertions(+), 35 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+index cdd196d..f50e3e5 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -46,6 +46,7 @@ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
++import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSClient;
+ import org.apache.hadoop.hdfs.DFSClient.DFSDataInputStream;
+ import org.apache.hadoop.hdfs.server.datanode.DataNode;
+@@ -149,6 +150,8 @@ public class DatanodeWebHdfsMethods {
+     case CREATE:
+     {
+       final Configuration conf = new Configuration(datanode.getConf());
++      conf.set(FsPermission.UMASK_LABEL, "000");
++
+       final int b = bufferSize.getValue(conf);
+       DFSClient dfsclient = new DFSClient(conf);
+       FSDataOutputStream out = null;
+@@ -300,12 +303,12 @@ public class DatanodeWebHdfsMethods {
+     final DataNode datanode = (DataNode)context.getAttribute("datanode");
+     final Configuration conf = new Configuration(datanode.getConf());
+     final InetSocketAddress nnRpcAddr = NameNode.getAddress(conf);
+-    final DFSClient dfsclient = new DFSClient(nnRpcAddr, conf);
+ 
+     switch(op.getValue()) {
+     case OPEN:
+     {
+       final int b = bufferSize.getValue(conf);
++      final DFSClient dfsclient = new DFSClient(nnRpcAddr, conf);
+       DFSDataInputStream in = null;
+       try {
+         in = new DFSClient.DFSDataInputStream(
+@@ -348,13 +351,13 @@ public class DatanodeWebHdfsMethods {
+     case GETFILECHECKSUM:
+     {
+       MD5MD5CRC32FileChecksum checksum = null;
+-      DFSClient client = dfsclient;
++      DFSClient dfsclient = new DFSClient(nnRpcAddr, conf);
+       try {
+-        checksum = client.getFileChecksum(fullpath);
+-        client.close();
+-        client = null;
++        checksum = dfsclient.getFileChecksum(fullpath);
++        dfsclient.close();
++        dfsclient = null;
+       } finally {
+-        IOUtils.cleanup(LOG, client);
++        IOUtils.cleanup(LOG, dfsclient);
+       }
+       final String js = JsonUtil.toJsonString(checksum);
+       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index d9044c9..9992a6e 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -41,6 +41,8 @@ import javax.ws.rs.QueryParam;
+ import javax.ws.rs.core.Context;
+ import javax.ws.rs.core.MediaType;
+ import javax.ws.rs.core.Response;
++import javax.ws.rs.core.Response.ResponseBuilder;
++import javax.ws.rs.core.Response.Status;
+ import javax.ws.rs.core.StreamingOutput;
+ 
+ import org.apache.commons.logging.Log;
+@@ -62,7 +64,6 @@ import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
+ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+ import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
+ import org.apache.hadoop.hdfs.web.resources.DelegationParam;
+-import org.apache.hadoop.hdfs.web.resources.TokenArgumentParam;
+ import org.apache.hadoop.hdfs.web.resources.DeleteOpParam;
+ import org.apache.hadoop.hdfs.web.resources.DestinationParam;
+ import org.apache.hadoop.hdfs.web.resources.GetOpParam;
+@@ -80,6 +81,7 @@ import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+ import org.apache.hadoop.hdfs.web.resources.RecursiveParam;
+ import org.apache.hadoop.hdfs.web.resources.RenewerParam;
+ import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
++import org.apache.hadoop.hdfs.web.resources.TokenArgumentParam;
+ import org.apache.hadoop.hdfs.web.resources.UriFsPathParam;
+ import org.apache.hadoop.hdfs.web.resources.UserParam;
+ import org.apache.hadoop.security.Credentials;
+@@ -302,10 +304,15 @@ public class NamenodeWebHdfsMethods {
+     {
+       final boolean b = namenode.setReplication(fullpath, replication.getValue(conf));
+       final String js = JsonUtil.toJsonString("boolean", b);
+-      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++      final ResponseBuilder r = b? Response.ok(): Response.status(Status.FORBIDDEN);
++      return r.entity(js).type(MediaType.APPLICATION_JSON).build();
+     }
+     case SETOWNER:
+     {
++      if (owner.getValue() == null && group.getValue() == null) {
++        throw new IllegalArgumentException("Both owner and group are empty.");
++      }
++
+       namenode.setOwner(fullpath, owner.getValue(), group.getValue());
+       return Response.ok().type(MediaType.APPLICATION_JSON).build();
+     }
+@@ -485,13 +492,17 @@ public class NamenodeWebHdfsMethods {
+       final long offsetValue = offset.getValue();
+       final Long lengthValue = length.getValue();
+       final LocatedBlocks locatedblocks = namenode.getBlockLocations(fullpath,
+-          offsetValue, lengthValue != null? lengthValue: offsetValue + 1);
++          offsetValue, lengthValue != null? lengthValue: Long.MAX_VALUE);
+       final String js = JsonUtil.toJsonString(locatedblocks);
+       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
+     }
+     case GETFILESTATUS:
+     {
+       final HdfsFileStatus status = namenode.getFileInfo(fullpath);
++      if (status == null) {
++        throw new FileNotFoundException("File does not exist: " + fullpath);
++      }
++
+       final String js = JsonUtil.toJsonString(status, true);
+       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
+     }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+index 4710ee4..75e5fa5 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+@@ -27,6 +27,7 @@ import java.util.Map;
+ import java.util.TreeMap;
+ 
+ import org.apache.hadoop.fs.ContentSummary;
++import org.apache.hadoop.fs.FileChecksum;
+ import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSUtil;
+@@ -321,7 +322,7 @@ public class JsonUtil {
+     } else {
+       final Object[] a = new Object[array.size()];
+       for(int i = 0; i < array.size(); i++) {
+-        a[i] = toJsonMap(array.get(0));
++        a[i] = toJsonMap(array.get(i));
+       }
+       return a;
+     }
+@@ -417,7 +418,7 @@ public class JsonUtil {
+     m.put("algorithm", checksum.getAlgorithmName());
+     m.put("length", checksum.getLength());
+     m.put("bytes", StringUtils.byteToHexString(checksum.getBytes()));
+-    return toJsonString(MD5MD5CRC32FileChecksum.class, m);
++    return toJsonString(FileChecksum.class, m);
+   }
+ 
+   /** Convert a Json map to a MD5MD5CRC32FileChecksum. */
+@@ -427,8 +428,7 @@ public class JsonUtil {
+       return null;
+     }
+ 
+-    final Map<?, ?> m = (Map<?, ?>)json.get(
+-        MD5MD5CRC32FileChecksum.class.getSimpleName());
++    final Map<?, ?> m = (Map<?, ?>)json.get(FileChecksum.class.getSimpleName());
+     final String algorithm = (String)m.get("algorithm");
+     final int length = (int)(long)(Long)m.get("length");
+     final byte[] bytes = StringUtils.hexStringToByte((String)m.get("bytes"));
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 12c0994..3220217 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -211,19 +211,18 @@ public class WebHdfsFileSystem extends FileSystem
+     return f.isAbsolute()? f: new Path(workingDir, f);
+   }
+ 
+-  @SuppressWarnings("unchecked")
+-  private static <T> T jsonParse(final InputStream in) throws IOException {
++  private static Map<?, ?> jsonParse(final InputStream in) throws IOException {
+     if (in == null) {
+       throw new IOException("The input stream is null.");
+     }
+-    return (T)JSON.parse(new InputStreamReader(in));
++    return (Map<?, ?>)JSON.parse(new InputStreamReader(in));
+   }
+ 
+-  private static void validateResponse(final HttpOpParam.Op op,
++  private static Map<?, ?> validateResponse(final HttpOpParam.Op op,
+       final HttpURLConnection conn) throws IOException {
+     final int code = conn.getResponseCode();
+     if (code != op.getExpectedHttpResponseCode()) {
+-      final Map<String, Object> m;
++      final Map<?, ?> m;
+       try {
+         m = jsonParse(conn.getErrorStream());
+       } catch(IOException e) {
+@@ -232,6 +231,10 @@ public class WebHdfsFileSystem extends FileSystem
+             + ", message=" + conn.getResponseMessage(), e);
+       }
+ 
++      if (m.get(RemoteException.class.getSimpleName()) == null) {
++        return m;
++      }
++
+       final RemoteException re = JsonUtil.toRemoteException(m);
+       throw re.unwrapRemoteException(AccessControlException.class,
+           DSQuotaExceededException.class,
+@@ -239,6 +242,7 @@ public class WebHdfsFileSystem extends FileSystem
+           SafeModeException.class,
+           NSQuotaExceededException.class);
+     }
++    return null;
+   }
+ 
+   /**
+@@ -336,15 +340,15 @@ public class WebHdfsFileSystem extends FileSystem
+    * @param op http operation
+    * @param fspath file system path
+    * @param parameters parameters for the operation
+-   * @return a JSON object, e.g. Object[], Map<String, Object>, etc.
++   * @return a JSON object, e.g. Object[], Map<?, ?>, etc.
+    * @throws IOException
+    */
+-  private <T> T run(final HttpOpParam.Op op, final Path fspath,
++  private Map<?, ?> run(final HttpOpParam.Op op, final Path fspath,
+       final Param<?,?>... parameters) throws IOException {
+     final HttpURLConnection conn = httpConnect(op, fspath, parameters);
+-    validateResponse(op, conn);
+     try {
+-      return WebHdfsFileSystem.<T>jsonParse(conn.getInputStream());
++      final Map<?, ?> m = validateResponse(op, conn);
++      return m != null? m: jsonParse(conn.getInputStream());
+     } finally {
+       conn.disconnect();
+     }
+@@ -359,7 +363,7 @@ public class WebHdfsFileSystem extends FileSystem
+ 
+   private HdfsFileStatus getHdfsFileStatus(Path f) throws IOException {
+     final HttpOpParam.Op op = GetOpParam.Op.GETFILESTATUS;
+-    final Map<String, Object> json = run(op, f);
++    final Map<?, ?> json = run(op, f);
+     final HdfsFileStatus status = JsonUtil.toFileStatus(json, true);
+     if (status == null) {
+       throw new FileNotFoundException("File does not exist: " + f);
+@@ -385,7 +389,7 @@ public class WebHdfsFileSystem extends FileSystem
+   public boolean mkdirs(Path f, FsPermission permission) throws IOException {
+     statistics.incrementWriteOps(1);
+     final HttpOpParam.Op op = PutOpParam.Op.MKDIRS;
+-    final Map<String, Object> json = run(op, f,
++    final Map<?, ?> json = run(op, f,
+         new PermissionParam(applyUMask(permission)));
+     return (Boolean)json.get("boolean");
+   }
+@@ -394,7 +398,7 @@ public class WebHdfsFileSystem extends FileSystem
+   public boolean rename(final Path src, final Path dst) throws IOException {
+     statistics.incrementWriteOps(1);
+     final HttpOpParam.Op op = PutOpParam.Op.RENAME;
+-    final Map<String, Object> json = run(op, src,
++    final Map<?, ?> json = run(op, src,
+         new DestinationParam(makeQualified(dst).toUri().getPath()));
+     return (Boolean)json.get("boolean");
+   }
+@@ -424,8 +428,7 @@ public class WebHdfsFileSystem extends FileSystem
+      ) throws IOException {
+     statistics.incrementWriteOps(1);
+     final HttpOpParam.Op op = PutOpParam.Op.SETREPLICATION;
+-    final Map<String, Object> json = run(op, p,
+-        new ReplicationParam(replication));
++    final Map<?, ?> json = run(op, p, new ReplicationParam(replication));
+     return (Boolean)json.get("boolean");
+   }
+ 
+@@ -498,7 +501,7 @@ public class WebHdfsFileSystem extends FileSystem
+   @Override
+   public boolean delete(Path f, boolean recursive) throws IOException {
+     final HttpOpParam.Op op = DeleteOpParam.Op.DELETE;
+-    final Map<String, Object> json = run(op, f, new RecursiveParam(recursive));
++    final Map<?, ?> json = run(op, f, new RecursiveParam(recursive));
+     return (Boolean)json.get("boolean");
+   }
+ 
+@@ -540,8 +543,7 @@ public class WebHdfsFileSystem extends FileSystem
+     //convert FileStatus
+     final FileStatus[] statuses = new FileStatus[array.length];
+     for(int i = 0; i < array.length; i++) {
+-      @SuppressWarnings("unchecked")
+-      final Map<String, Object> m = (Map<String, Object>)array[i];
++      final Map<?, ?> m = (Map<?, ?>)array[i];
+       statuses[i] = makeQualified(JsonUtil.toFileStatus(m, false), f);
+     }
+     return statuses;
+@@ -551,7 +553,7 @@ public class WebHdfsFileSystem extends FileSystem
+   public Token<DelegationTokenIdentifier> getDelegationToken(final String renewer
+       ) throws IOException {
+     final HttpOpParam.Op op = GetOpParam.Op.GETDELEGATIONTOKEN;
+-    final Map<String, Object> m = run(op, null, new RenewerParam(renewer));
++    final Map<?, ?> m = run(op, null, new RenewerParam(renewer));
+     final Token<DelegationTokenIdentifier> token = JsonUtil.toDelegationToken(m); 
+     SecurityUtil.setTokenService(token, nnAddr);
+     return token;
+@@ -582,7 +584,7 @@ public class WebHdfsFileSystem extends FileSystem
+     final HttpOpParam.Op op = PutOpParam.Op.RENEWDELEGATIONTOKEN;
+     TokenArgumentParam dtargParam = new TokenArgumentParam(
+         token.encodeToUrlString());
+-    final Map<String, Object> m = run(op, null, dtargParam);
++    final Map<?, ?> m = run(op, null, dtargParam);
+     return (Long) m.get("long");
+   }
+ 
+@@ -604,7 +606,7 @@ public class WebHdfsFileSystem extends FileSystem
+ 
+     final Path p = status.getPath();
+     final HttpOpParam.Op op = GetOpParam.Op.GETFILEBLOCKLOCATIONS;
+-    final Map<String, Object> m = run(op, p, new OffsetParam(offset),
++    final Map<?, ?> m = run(op, p, new OffsetParam(offset),
+         new LengthParam(length));
+     return DFSUtil.locatedBlocks2Locations(JsonUtil.toLocatedBlocks(m));
+   }
+@@ -614,7 +616,7 @@ public class WebHdfsFileSystem extends FileSystem
+     statistics.incrementReadOps(1);
+ 
+     final HttpOpParam.Op op = GetOpParam.Op.GETCONTENTSUMMARY;
+-    final Map<String, Object> m = run(op, p);
++    final Map<?, ?> m = run(op, p);
+     return JsonUtil.toContentSummary(m);
+   }
+ 
+@@ -624,7 +626,7 @@ public class WebHdfsFileSystem extends FileSystem
+     statistics.incrementReadOps(1);
+   
+     final HttpOpParam.Op op = GetOpParam.Op.GETFILECHECKSUM;
+-    final Map<String, Object> m = run(op, p);
++    final Map<?, ?> m = run(op, p);
+     return JsonUtil.toMD5MD5CRC32FileChecksum(m);
+   }
+ 
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+index b52eb6c..881f9e0 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
++++ b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+@@ -27,6 +27,8 @@ import java.net.URI;
+ import java.net.URL;
+ import java.security.PrivilegedExceptionAction;
+ 
++import javax.servlet.http.HttpServletResponse;
++
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.BlockLocation;
+ import org.apache.hadoop.fs.FSDataInputStream;
+@@ -39,6 +41,7 @@ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.MiniDFSCluster;
+ import org.apache.hadoop.hdfs.web.resources.GetOpParam;
++import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
+ import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+ import org.apache.hadoop.security.AccessControlException;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -277,4 +280,50 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+       WebHdfsFileSystem.LOG.info("This is expected.", e);
+     }
+   }
++
++  public void testResponseCode() throws IOException {
++    final WebHdfsFileSystem webhdfs = (WebHdfsFileSystem)fs;
++    final Path dir = new Path("/test/testUrl");
++    assertTrue(webhdfs.mkdirs(dir));
++
++    {//test set owner with empty parameters
++      final URL url = webhdfs.toUrl(PutOpParam.Op.SETOWNER, dir);
++      final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
++      conn.connect();
++      assertEquals(HttpServletResponse.SC_BAD_REQUEST, conn.getResponseCode());
++      conn.disconnect();
++    }
++
++    {//test set replication on a directory
++      final HttpOpParam.Op op = PutOpParam.Op.SETREPLICATION;
++      final URL url = webhdfs.toUrl(op, dir);
++      final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
++      conn.setRequestMethod(op.getType().toString());
++      conn.connect();
++      assertEquals(HttpServletResponse.SC_FORBIDDEN, conn.getResponseCode());
++      
++      assertFalse(webhdfs.setReplication(dir, (short)1));
++      conn.disconnect();
++    }
++
++    {//test get file status for a non-exist file.
++      final Path p = new Path(dir, "non-exist");
++      final URL url = webhdfs.toUrl(GetOpParam.Op.GETFILESTATUS, p);
++      final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
++      conn.connect();
++      assertEquals(HttpServletResponse.SC_NOT_FOUND, conn.getResponseCode());
++      conn.disconnect();
++    }
++
++    {//test set permission with empty parameters
++      final HttpOpParam.Op op = PutOpParam.Op.SETPERMISSION;
++      final URL url = webhdfs.toUrl(op, dir);
++      final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
++      conn.setRequestMethod(op.getType().toString());
++      conn.connect();
++      assertEquals(HttpServletResponse.SC_OK, conn.getResponseCode());
++      assertEquals((short)0755, webhdfs.getFileStatus(dir).getPermission().toShort());
++      conn.disconnect();
++    }
++  }
+ }
+-- 
+1.7.0.4
+

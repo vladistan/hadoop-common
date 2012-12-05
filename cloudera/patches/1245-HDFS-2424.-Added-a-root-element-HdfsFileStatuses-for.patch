@@ -1,0 +1,57 @@
+From 11e6488f783bd4c3b3224e4eb7a51c5304b5d1a3 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Fri, 14 Oct 2011 00:32:33 +0000
+Subject: [PATCH 1245/1344] HDFS-2424. Added a root element "HdfsFileStatuses" for the response of webhdfs listStatus.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1183176 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit ffc547bdd5afdc3b0bacbbfe237ecc613ab2db65)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../web/resources/NamenodeWebHdfsMethods.java      |    6 ++++--
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |    4 ++--
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index 71c8996..dde847c 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -484,7 +484,8 @@ public class NamenodeWebHdfsMethods {
+       @Override
+       public void write(final OutputStream outstream) throws IOException {
+         final PrintStream out = new PrintStream(outstream);
+-        out.println("{\"" + HdfsFileStatus.class.getSimpleName() + "\":[");
++        out.println("{\"" + HdfsFileStatus.class.getSimpleName() + "es\":{\""
++            + HdfsFileStatus.class.getSimpleName() + "\":[");
+ 
+         final HdfsFileStatus[] partial = first.getPartialListing();
+         if (partial.length > 0) {
+@@ -503,7 +504,8 @@ public class NamenodeWebHdfsMethods {
+           }
+         }
+         
+-        out.println("]}");
++        out.println();
++        out.println("]}}");
+       }
+     };
+   }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 142e359..42e940e 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -482,8 +482,8 @@ public class WebHdfsFileSystem extends FileSystem
+ 
+     final HttpOpParam.Op op = GetOpParam.Op.LISTSTATUS;
+     final Map<?, ?> json  = run(op, f);
+-    final Object[] array = (Object[])json.get(
+-        HdfsFileStatus.class.getSimpleName());
++    final Map<?, ?> rootmap = (Map<?, ?>)json.get(HdfsFileStatus.class.getSimpleName() + "es");
++    final Object[] array = (Object[])rootmap.get(HdfsFileStatus.class.getSimpleName());
+ 
+     //convert FileStatus
+     final FileStatus[] statuses = new FileStatus[array.length];
+-- 
+1.7.0.4
+

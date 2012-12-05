@@ -456,7 +456,7 @@ public class DistCp implements Tool {
           throw new IOException(absdst + " is a directory");
         }
         if (!destFileSys.mkdirs(absdst.getParent())) {
-          throw new IOException("Failed to craete parent dir: " + absdst.getParent());
+          throw new IOException("Failed to create parent dir: " + absdst.getParent());
         }
         rename(tmpfile, absdst);
 
@@ -960,7 +960,10 @@ public class DistCp implements Tool {
   static void fullyDelete(String dir, Configuration conf) throws IOException {
     if (dir != null) {
       Path tmp = new Path(dir);
-      tmp.getFileSystem(conf).delete(tmp, true);
+      boolean success = tmp.getFileSystem(conf).delete(tmp, true);
+      if (!success) {
+        LOG.warn("Could not fully delete " + tmp);
+      }
     }
   }
 
@@ -1027,6 +1030,8 @@ public class DistCp implements Tool {
     FileSystem.mkdirs(FileSystem.get(jobDirectory.toUri(),conf), jobDirectory, mapredSysPerms);
     jobConf.set(JOB_DIR_LABEL, jobDirectory.toString());
 
+    long maxBytesPerMap = conf.getLong(BYTES_PER_MAP_LABEL, BYTES_PER_MAP);
+
     FileSystem dstfs = args.dst.getFileSystem(conf);
     
     // get tokens for all the required FileSystems..
@@ -1045,6 +1050,12 @@ public class DistCp implements Tool {
       String filename = "_distcp_logs_" + randomId;
       if (!dstExists || !dstIsDir) {
         Path parent = args.dst.getParent();
+        if (null == parent) {
+          // If dst is '/' on S3, it might not exist yet, but dst.getParent()
+          // will return null. In this case, use '/' as its own parent to prevent
+          // NPE errors below.
+          parent = args.dst;
+        }
         if (!dstfs.exists(parent)) {
           dstfs.mkdirs(parent);
         }
@@ -1124,7 +1135,7 @@ public class DistCp implements Tool {
 
                 ++cnsyncf;
                 cbsyncs += child.getLen();
-                if (cnsyncf > SYNC_FILE_MAX || cbsyncs > BYTES_PER_MAP) {
+                if (cnsyncf > SYNC_FILE_MAX || cbsyncs > maxBytesPerMap) {
                   src_writer.sync();
                   dst_writer.sync();
                   cnsyncf = 0;
@@ -1184,6 +1195,11 @@ public class DistCp implements Tool {
         (dstExists && !dstIsDir) || (!dstExists && srcCount == 1)?
         args.dst.getParent(): args.dst, "_distcp_tmp_" + randomId);
     jobConf.set(TMP_DIR_LABEL, tmpDir.toUri().toString());
+
+    // Explicitly create the tmpDir to ensure that it can be cleaned
+    // up by fullyDelete() later.
+    tmpDir.getFileSystem(conf).mkdirs(tmpDir);
+
     LOG.info("sourcePathsCount=" + srcCount);
     LOG.info("filesToCopyCount=" + fileCount);
     LOG.info("bytesToCopyCount=" + StringUtils.humanReadableInt(byteCount));
@@ -1266,7 +1282,7 @@ public class DistCp implements Tool {
     //write dst lsr results
     final Path dstlsr = new Path(jobdir, "_distcp_dst_lsr");
     final SequenceFile.Writer writer = SequenceFile.createWriter(jobfs, jobconf,
-        dstlsr, Text.class, FileStatus.class,
+        dstlsr, Text.class, dstroot.getClass(),
         SequenceFile.CompressionType.NONE);
     try {
       //do lsr to get all file statuses in dstroot

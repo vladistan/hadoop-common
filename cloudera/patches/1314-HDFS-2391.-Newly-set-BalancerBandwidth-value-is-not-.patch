@@ -1,0 +1,29 @@
+From 05d995d9d0483483367fa08ea45fde8eb068dbb9 Mon Sep 17 00:00:00 2001
+From: Harsh J <harsh@cloudera.com>
+Date: Wed, 11 Jul 2012 17:07:22 +0530
+Subject: [PATCH 1314/1344] HDFS-2391. Newly set BalancerBandwidth value is not displayed anywhere
+
+Reason: New feature
+Ref: CDH-5768
+Author: Harsh J
+---
+ .../hadoop/hdfs/server/datanode/DataNode.java      |    3 +++
+ 1 files changed, 3 insertions(+), 0 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+index a379182..d531222 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+@@ -1223,6 +1223,9 @@ public class DataNode extends Configured
+         if (bandwidth > 0) {
+           DataXceiverServer dxcs =
+                        (DataXceiverServer) this.dataXceiverServer.getRunnable();
++          LOG.info("Updating balance throttler bandwidth from "
++              + dxcs.balanceThrottler.getBandwidth() + " bytes/s "
++              + "to: " + bandwidth + " bytes/s.");
+           dxcs.balanceThrottler.setBandwidth(bandwidth);
+         }
+       }
+-- 
+1.7.0.4
+

@@ -1,0 +1,357 @@
+From b0e0cd629169f4d139256d1d394b62701f690f0c Mon Sep 17 00:00:00 2001
+From: Owen O'Malley <omalley@apache.org>
+Date: Thu, 15 Sep 2011 22:22:14 +0000
+Subject: [PATCH 1206/1344] HADOOP-7644. Fix TestDelegationTokenRenewal and TestDelegationTokenFetcher
+ to use and test the new style renewers. (omalley)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1171298 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 7142897eee9f7db0d7aa3785d6cb5e1701af7dcb)
+
+Author: Owen O'Malley
+Ref: CDH-4806
+---
+ .../security/token/TestDelegationTokenRenewal.java |  127 +++++++++++---------
+ .../hadoop/tools/TestDelegationTokenFetcher.java   |   54 +++++++--
+ 2 files changed, 114 insertions(+), 67 deletions(-)
+
+diff --git a/src/test/org/apache/hadoop/mapreduce/security/token/TestDelegationTokenRenewal.java b/src/test/org/apache/hadoop/mapreduce/security/token/TestDelegationTokenRenewal.java
+index ec689d1..cc86cee 100644
+--- a/src/test/org/apache/hadoop/mapreduce/security/token/TestDelegationTokenRenewal.java
++++ b/src/test/org/apache/hadoop/mapreduce/security/token/TestDelegationTokenRenewal.java
+@@ -42,6 +42,7 @@ import org.apache.hadoop.mapreduce.JobID;
+ import org.apache.hadoop.security.Credentials;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.SecretManager.InvalidToken;
++import org.apache.hadoop.security.token.TokenRenewer;
+ import org.apache.hadoop.util.StringUtils;
+ import org.junit.BeforeClass;
+ import org.junit.Test;
+@@ -54,6 +55,51 @@ import org.junit.Test;
+ public class TestDelegationTokenRenewal {
+   private static final Log LOG = 
+       LogFactory.getLog(TestDelegationTokenRenewal.class);
++  private static final Text KIND = new Text("TestDelegationTokenRenewal.Token");
++  
++  public static class Renewer extends TokenRenewer {
++    private static int counter = 0;
++    private static Token<?> lastRenewed = null;
++    private static Token<?> tokenToRenewIn2Sec = null;
++
++    @Override
++    public boolean handleKind(Text kind) {
++      return KIND.equals(kind);
++    }
++
++    @Override
++    public boolean isManaged(Token<?> token) throws IOException {
++      return true;
++    }
++
++    @Override
++    public long renew(Token<?> t, Configuration conf) throws IOException {
++      MyToken token = (MyToken)t;
++      if(token.isCanceled()) {
++        throw new InvalidToken("token has been canceled");
++      }
++      lastRenewed = token;
++      counter ++;
++      LOG.info("Called MYDFS.renewdelegationtoken " + token + 
++          ";this dfs=" + this.hashCode() + ";c=" + counter);
++      if(tokenToRenewIn2Sec == token) { 
++        // this token first renewal in 2 seconds
++        LOG.info("RENEW in 2 seconds");
++        tokenToRenewIn2Sec=null;
++        return 2*1000 + System.currentTimeMillis();
++      } else {
++        return 86400*1000 + System.currentTimeMillis();
++      }
++    }
++
++    @Override
++    public void cancel(Token<?> t, Configuration conf) {
++      MyToken token = (MyToken)t;
++      LOG.info("Cancel token " + token);
++      token.cancelToken();
++   }
++    
++  }
+ 
+   private static Configuration conf;
+  
+@@ -69,8 +115,7 @@ public class TestDelegationTokenRenewal {
+     System.out.println("scheme is : " + uri.getScheme());
+     conf.setClass("fs." + uri.getScheme() + ".impl", MyFS.class, DistributedFileSystem.class);
+     FileSystem.setDefaultUri(conf, uri);
+-    System.out.println("filesystem uri = " + FileSystem.getDefaultUri(conf).toString());
+-
++    LOG.info("filesystem uri = " + FileSystem.getDefaultUri(conf).toString());
+   }
+   
+   private static class MyDelegationTokenSecretManager extends DelegationTokenSecretManager {
+@@ -101,11 +146,14 @@ public class TestDelegationTokenRenewal {
+     public MyToken(DelegationTokenIdentifier dtId1,
+         MyDelegationTokenSecretManager sm) {
+       super(dtId1, sm);
++      setKind(KIND);
+       status = "GOOD";
+     }
+     
+     public boolean isCanceled() {return status.equals(CANCELED);}
++    
+     public void cancelToken() {this.status=CANCELED;}
++
+     public String toString() {
+       StringBuilder sb = new StringBuilder(1024);
+       
+@@ -131,51 +179,18 @@ public class TestDelegationTokenRenewal {
+    * exception
+    */
+   static class MyFS extends DistributedFileSystem {
+-    volatile int counter=0;
+-    MyToken token;
+-    MyToken tokenToRenewIn2Sec;
+     
+     public MyFS() {}
+     public void close() {}
+     @Override
+     public void initialize(URI uri, Configuration conf) throws IOException {}
+     
+-    @Override
+-    public long renewDelegationToken(Token<DelegationTokenIdentifier> t)
+-    throws InvalidToken, IOException {
+-      MyToken token = (MyToken)t;
+-      if(token.isCanceled()) {
+-        throw new InvalidToken("token has been canceled");
+-      }
+-      counter ++;
+-      this.token = (MyToken)token;
+-      System.out.println("Called MYDFS.renewdelegationtoken " + token + 
+-          ";this dfs=" + this.hashCode() + ";c=" + counter);
+-      if(tokenToRenewIn2Sec == token) { 
+-        // this token first renewal in 2 seconds
+-        System.out.println("RENEW in 2 seconds");
+-        tokenToRenewIn2Sec=null;
+-        return 2*1000 + System.currentTimeMillis();
+-      } else {
+-        return 86400*1000 + System.currentTimeMillis();
+-      }
+-    }
+     @Override 
+-    public MyToken getDelegationToken(Text renewer)
+-    throws IOException {
+-      System.out.println("Called MYDFS.getdelegationtoken");
+-      return createTokens(renewer);
++    public MyToken getDelegationToken(Text renewer) throws IOException {
++      MyToken result = createTokens(renewer);
++      LOG.info("Called MYDFS.getdelegationtoken " + result);
++      return result;
+     }
+-    @Override
+-    public void cancelDelegationToken(Token<DelegationTokenIdentifier> t)
+-    throws IOException {
+-      MyToken token = (MyToken)t;
+-      token.cancelToken();
+-    }
+-
+-    public void setTokenToRenewIn2Sec(MyToken t) {tokenToRenewIn2Sec=t;}
+-    public int getCounter() {return counter; }
+-    public MyToken getToken() {return token;}
+   }
+   
+   /**
+@@ -223,9 +238,9 @@ public class TestDelegationTokenRenewal {
+    * @throws URISyntaxException
+    */
+   @Test
+-  public void testDTRenewal () throws IOException, URISyntaxException {
++  public void testDTRenewal () throws Exception {
+     MyFS dfs = (MyFS)FileSystem.get(conf);
+-    System.out.println("dfs="+(Object)dfs.hashCode() + ";conf="+conf.hashCode());
++    LOG.info("dfs="+(Object)dfs.hashCode() + ";conf="+conf.hashCode());
+     // Test 1. - add three tokens - make sure exactly one get's renewed
+     
+     // get the delegation tokens
+@@ -235,8 +250,8 @@ public class TestDelegationTokenRenewal {
+     token3 = dfs.getDelegationToken(new Text("user3"));
+ 
+     //to cause this one to be set for renew in 2 secs
+-    dfs.setTokenToRenewIn2Sec(token1); 
+-    System.out.println("token="+token1+" should be renewed for 2 secs");
++    Renewer.tokenToRenewIn2Sec = token1;
++    LOG.info("token="+token1+" should be renewed for 2 secs");
+     
+     // three distinct Namenodes
+     String nn1 = DelegationTokenRenewal.SCHEME + "://host1:0";
+@@ -263,15 +278,15 @@ public class TestDelegationTokenRenewal {
+       } catch (InterruptedException e) {}
+       
+       // since we cannot guarantee timely execution - let's give few chances
+-      if(dfs.getCounter()==numberOfExpectedRenewals)
++      if(Renewer.counter==numberOfExpectedRenewals)
+         break;
+     }
+     
+-    System.out.println("dfs=" + dfs.hashCode() + 
+-        ";Counter = " + dfs.getCounter() + ";t="+  dfs.getToken());
++    LOG.info("dfs=" + dfs.hashCode() + 
++        ";Counter = " + Renewer.counter + ";t="+  Renewer.lastRenewed);
+     assertEquals("renew wasn't called as many times as expected(4):",
+-        numberOfExpectedRenewals, dfs.getCounter());
+-    assertEquals("most recently renewed token mismatch", dfs.getToken(), 
++        numberOfExpectedRenewals, Renewer.counter);
++    assertEquals("most recently renewed token mismatch", Renewer.lastRenewed, 
+         token1);
+     
+     // Test 2. 
+@@ -282,8 +297,8 @@ public class TestDelegationTokenRenewal {
+     MyToken token4 = dfs.getDelegationToken(new Text("user4"));
+     
+     //to cause this one to be set for renew in 2 secs
+-    dfs.setTokenToRenewIn2Sec(token4); 
+-    System.out.println("token="+token4+" should be renewed for 2 secs");
++    Renewer.tokenToRenewIn2Sec = token4; 
++    LOG.info("token="+token4+" should be renewed for 2 secs");
+     
+     String nn4 = DelegationTokenRenewal.SCHEME + "://host4:0";
+     ts.addToken(new Text(nn4), token4);
+@@ -292,24 +307,22 @@ public class TestDelegationTokenRenewal {
+     JobID jid2 = new JobID("job2",1);
+     DelegationTokenRenewal.registerDelegationTokensForRenewal(jid2, ts, conf);
+     DelegationTokenRenewal.removeDelegationTokenRenewalForJob(jid2);
+-    numberOfExpectedRenewals = dfs.getCounter(); // number of renewals so far
++    numberOfExpectedRenewals = Renewer.counter; // number of renewals so far
+     try {
+       Thread.sleep(6*1000); // sleep 6 seconds, so it has time to renew
+     } catch (InterruptedException e) {}
+-    System.out.println("Counter = " + dfs.getCounter() + ";t="+dfs.getToken());
++    LOG.info("Counter = " + Renewer.counter + ";t="+ Renewer.lastRenewed);
+     
+     // counter and the token should stil be the old ones
+     assertEquals("renew wasn't called as many times as expected",
+-        numberOfExpectedRenewals, dfs.getCounter());
++        numberOfExpectedRenewals, Renewer.counter);
+     
+     // also renewing of the cancelled token should fail
+-    boolean exception=false;
+     try {
+-      dfs.renewDelegationToken(token4);
++      token4.renew(conf);
++      assertTrue("Renewal of canceled token didn't fail", false);
+     } catch (InvalidToken ite) {
+       //expected
+-      exception = true;
+     }
+-    assertTrue("Renew of canceled token didn't fail", exception);
+   }
+ }
+diff --git a/src/test/org/apache/hadoop/tools/TestDelegationTokenFetcher.java b/src/test/org/apache/hadoop/tools/TestDelegationTokenFetcher.java
+index aff0dfd..0f22be7 100644
+--- a/src/test/org/apache/hadoop/tools/TestDelegationTokenFetcher.java
++++ b/src/test/org/apache/hadoop/tools/TestDelegationTokenFetcher.java
+@@ -20,7 +20,6 @@ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertTrue;
+ import static org.mockito.Matchers.eq;
+ import static org.mockito.Mockito.mock;
+-import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+ import java.io.IOException;
+@@ -36,7 +35,9 @@ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifie
+ import org.apache.hadoop.hdfs.tools.DelegationTokenFetcher;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.security.Credentials;
++import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.token.Token;
++import org.apache.hadoop.security.token.TokenRenewer;
+ import org.junit.Before;
+ import org.junit.Test;
+ 
+@@ -45,6 +46,7 @@ public class TestDelegationTokenFetcher {
+   private Configuration conf;
+   private URI uri;
+   private static final String SERVICE_VALUE = "localhost:2005";
++  private static final Text KIND = new Text("TESTING-TOKEN-KIND");
+ 
+   @Before 
+   public void init() throws URISyntaxException, IOException {
+@@ -54,6 +56,37 @@ public class TestDelegationTokenFetcher {
+     FileSystem.addFileSystemForTesting(uri, conf, dfs);
+   }
+   
++  public static class FakeRenewer extends TokenRenewer {
++    static Token<?> lastRenewed = null;
++    static Token<?> lastCanceled = null;
++
++    @Override
++    public boolean handleKind(Text kind) {
++      return KIND.equals(kind);
++    }
++
++    @Override
++    public boolean isManaged(Token<?> token) throws IOException {
++      return true;
++    }
++
++    @Override
++    public long renew(Token<?> token, Configuration conf) {
++      lastRenewed = token;
++      return 0;
++    }
++
++    @Override
++    public void cancel(Token<?> token, Configuration conf) {
++      lastCanceled = token;
++    }
++    
++    public static void reset() {
++      lastRenewed = null;
++      lastCanceled = null;
++    }
++  }
++
+   /**
+    * Verify that when the DelegationTokenFetcher runs, it talks to the Namenode,
+    * pulls out the correct user's token and successfully serializes it to disk.
+@@ -62,15 +95,17 @@ public class TestDelegationTokenFetcher {
+   public void expectedTokenIsRetrievedFromDFS() throws Exception {
+     final byte[] ident = new byte[]{1,2,3,4};
+     final byte[] pw = new byte[]{42};
+-    final Text kind = new Text("MY-KIND");
+     final Text service = new Text(uri.toString());
++    final String user = 
++        UserGroupInformation.getCurrentUser().getShortUserName();
+ 
+     // Create a token for the fetcher to fetch, wire NN to return it when asked
+     // for this particular user.
+     Token<DelegationTokenIdentifier> t = 
+-      new Token<DelegationTokenIdentifier>(ident, pw, kind, service);
+-    when(dfs.getDelegationToken((String) null)).thenReturn(t);
++      new Token<DelegationTokenIdentifier>(ident, pw, KIND, service);
++    when(dfs.getDelegationToken(eq(user))).thenReturn(t);
+     when(dfs.renewDelegationToken(eq(t))).thenReturn(1000L);
++    FakeRenewer.reset();
+     
+     DelegationTokenFetcher.main(new String[]{"-fs", uri.toString(), 
+                                              "file.dta"});
+@@ -83,13 +118,12 @@ public class TestDelegationTokenFetcher {
+     assertEquals(t, itr.next());
+     assertTrue(!itr.hasNext());
+ 
+-    DelegationTokenFetcher.main(new String[]{"-fs", uri.toString(), 
+-                                             "--renew", "file.dta"});
++    DelegationTokenFetcher.main(new String[]{"--renew", "file.dta"});
++    assertEquals(t, FakeRenewer.lastRenewed);
++    FakeRenewer.reset();
+ 
+-    DelegationTokenFetcher.main(new String[]{"-fs", uri.toString(), 
+-                                             "--cancel", "file.dta"});
+-    verify(dfs).renewDelegationToken(eq(t));
+-    verify(dfs).cancelDelegationToken(eq(t));
++    DelegationTokenFetcher.main(new String[]{"--cancel", "file.dta"});
++    assertEquals(t, FakeRenewer.lastCanceled);
+   }
+ 
+ }
+-- 
+1.7.0.4
+

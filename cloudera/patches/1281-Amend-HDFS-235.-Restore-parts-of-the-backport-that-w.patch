@@ -1,0 +1,714 @@
+From bfc787b92dc015e789c6254cec945478373a42f6 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Sat, 30 Jun 2012 18:23:18 -0700
+Subject: [PATCH 1281/1344] Amend HDFS-235. Restore parts of the backport that were removed
+ earlier. Brings HftpFileSystem back in line by resolving HDFS-2527
+ changes against HDFS-2235.
+
+Author: Eli Collins
+Ref: CDH-4806
+---
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |  149 +++++++-------
+ .../org/apache/hadoop/hdfs/HsftpFileSystem.java    |    2 +-
+ .../hadoop/hdfs/TestByteRangeInputStream.java      |  128 +++++++++++-
+ .../org/apache/hadoop/hdfs/TestHftpFileSystem.java |  218 +++++++++++++++++++-
+ 4 files changed, 409 insertions(+), 88 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index 22efa64..518be0b 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -246,13 +246,30 @@ public class HftpFileSystem extends FileSystem
+   public URI getUri() {
+     return hftpURI;
+   }
+-  
++
++  /**
++   * Return a URL pointing to given path on the namenode.
++   *
++   * @param path to obtain the URL for
++   * @param query string to append to the path
++   * @return namenode URL referring to the given path
++   * @throws IOException on error constructing the URL
++   */
++  private URL getNamenodeURL(String path, String query) throws IOException {
++    final URL url = new URL("http", nnAddr.getHostName(),
++        nnAddr.getPort(), path + '?' + query);
++    if (LOG.isTraceEnabled()) {
++      LOG.trace("url=" + url);
++    }
++    return url;
++  }
++
+   /**
+    * ugi parameter for http connection
+    * 
+    * @return user_shortname,group1,group2...
+    */
+-  private String getUgiParameter() {
++  private String getEncodedUgiParameter() {
+     StringBuilder ugiParamenter = new StringBuilder(
+       ServletUtil.encodeQueryValue(ugi.getShortUserName()));
+     for(String g: ugi.getGroupNames()) {
+@@ -278,20 +295,12 @@ public class HftpFileSystem extends FileSystem
+    */
+   protected HttpURLConnection openConnection(String path, String query)
+       throws IOException {
+-    try {
+-      query = updateQuery(query);
+-      final URL url = new URI("http", null, nnAddr.getHostName(),
+-          nnAddr.getPort(), path, query, null).toURL();
+-      if (LOG.isTraceEnabled()) {
+-        LOG.trace("url=" + url);
+-      }
+-      return (HttpURLConnection)url.openConnection();
+-    } catch (URISyntaxException e) {
+-      throw (IOException)new IOException().initCause(e);
+-    }
++    query = addDelegationTokenParam(query);
++    final URL url = getNamenodeURL(path, query);
++    return (HttpURLConnection)url.openConnection();
+   }
+   
+-  protected String updateQuery(String query) throws IOException {
++  protected String addDelegationTokenParam(String query) throws IOException {
+     String tokenString = null;
+     if (UserGroupInformation.isSecurityEnabled()) {
+       synchronized (this) {
+@@ -307,66 +316,66 @@ public class HftpFileSystem extends FileSystem
+     return query;
+   }
+ 
+-  @Override
+-  public FSDataInputStream open(Path f, int buffersize) throws IOException {
+-    final HttpURLConnection connection = openConnection(
+-        "/data" + ServletUtil.encodePath(f.makeQualified(this).toUri().getPath()),
+-        "ugi=" + getUgiParameter());
+-    final InputStream in;
+-    try {
+-      connection.setRequestMethod("GET");
+-      connection.connect();
+-      in = connection.getInputStream();
+-    } catch(IOException ioe) {
+-      final int code = connection.getResponseCode();
+-      final String s = connection.getResponseMessage();
+-      throw s == null? ioe:
+-          new IOException(s + " (error code=" + code + ")", ioe);
++  static class RangeHeaderUrlOpener extends ByteRangeInputStream.URLOpener {
++    RangeHeaderUrlOpener(final URL url) {
++      super(url);
+     }
+ 
+-    final String cl = connection.getHeaderField(StreamFile.CONTENT_LENGTH);
+-    final long filelength = cl == null? -1: Long.parseLong(cl);
+-    if (LOG.isDebugEnabled()) {
+-      LOG.debug("filelength = " + filelength);
++    @Override
++    protected HttpURLConnection openConnection() throws IOException {
++      return (HttpURLConnection)url.openConnection();
++      }
++
++    /** Use HTTP Range header for specifying offset. */
++    @Override
++    protected HttpURLConnection openConnection(final long offset) throws IOException {
++      final HttpURLConnection conn = openConnection();
++      conn.setRequestMethod("GET");
++      if (offset != 0L) {
++        conn.setRequestProperty("Range", "bytes=" + offset + "-");
++      }
++      return conn;
++    }  
++  }
++
++  static class RangeHeaderInputStream extends ByteRangeInputStream {
++    RangeHeaderInputStream(RangeHeaderUrlOpener o, RangeHeaderUrlOpener r) {
++      super(o, r);
+     }
+ 
+-    return new FSDataInputStream(new FSInputStream() {
+-        long currentPos = 0;
++    RangeHeaderInputStream(final URL url) {
++      this(new RangeHeaderUrlOpener(url), new RangeHeaderUrlOpener(null));
++    }
+ 
+-        private void update(final boolean isEOF, final int n
+-            ) throws IOException {
+-          if (!isEOF) {
+-            currentPos += n;
+-          } else if (currentPos < filelength) {
+-            throw new IOException("Got EOF but byteread = " + currentPos
+-                + " < filelength = " + filelength);
+-          }
+-        }
+-        public int read() throws IOException {
+-          final int b = in.read();
+-          update(b == -1, 1);
+-          return b;
+-        }
+-        public int read(byte[] b, int off, int len) throws IOException {
+-          final int n = in.read(b, off, len);
+-          update(n == -1, n);
+-          return n;
+-        }
++    /** Expects HTTP_OK and HTTP_PARTIAL response codes. */
++    @Override
++    protected void checkResponseCode(final HttpURLConnection connection
++        ) throws IOException {
++      final int code = connection.getResponseCode();
++      if (startPos != 0 && code != HttpURLConnection.HTTP_PARTIAL) {
++        // We asked for a byte range but did not receive a partial content
++        // response...
++        throw new IOException("HTTP_PARTIAL expected, received " + code);
++      } else if (startPos == 0 && code != HttpURLConnection.HTTP_OK) {
++        // We asked for all bytes from the beginning but didn't receive a 200
++        // response (none of the other 2xx codes are valid here)
++        throw new IOException("HTTP_OK expected, received " + code);
++      }
++    }
+ 
+-        public void close() throws IOException {
+-          in.close();
+-        }
++    @Override
++    protected URL getResolvedUrl(final HttpURLConnection connection) {
++      return connection.getURL();
++    }
++  }
+ 
+-        public void seek(long pos) throws IOException {
+-          throw new IOException("Can't seek!");
+-        }
+-        public long getPos() throws IOException {
+-          throw new IOException("Position unknown!");
+-        }
+-        public boolean seekToNewSource(long targetPos) throws IOException {
+-          return false;
+-        }
+-      });
++  @Override
++  public FSDataInputStream open(Path f, int buffersize) throws IOException {
++    f = f.makeQualified(getUri(), getWorkingDirectory());
++    String path = "/data" + ServletUtil.encodePath(f.toUri().getPath());
++    String query = addDelegationTokenParam("ugi=" + getEncodedUgiParameter());
++    URL u = getNamenodeURL(path, query);    
++    return new FSDataInputStream(new RangeHeaderInputStream(u));
+   }
+ 
+   /** Class to parse and store a listing reply from the server. */
+@@ -415,7 +424,7 @@ public class HftpFileSystem extends FileSystem
+         XMLReader xr = XMLReaderFactory.createXMLReader();
+         xr.setContentHandler(this);
+         HttpURLConnection connection = openConnection("/listPaths" + ServletUtil.encodePath(path),
+-            "ugi=" + getUgiParameter() + (recur? "&recursive=yes" : ""));
++            "ugi=" + getEncodedUgiParameter() + (recur? "&recursive=yes" : ""));
+         connection.setRequestMethod("GET");
+         connection.connect();
+ 
+@@ -481,7 +490,7 @@ public class HftpFileSystem extends FileSystem
+ 
+     private FileChecksum getFileChecksum(String f) throws IOException {
+       final HttpURLConnection connection = openConnection(
+-          "/fileChecksum" + ServletUtil.encodePath(f), "ugi=" + getUgiParameter());
++          "/fileChecksum" + ServletUtil.encodePath(f), "ugi=" + getEncodedUgiParameter());
+       try {
+         final XMLReader xr = XMLReaderFactory.createXMLReader();
+         xr.setContentHandler(this);
+@@ -582,7 +591,7 @@ public class HftpFileSystem extends FileSystem
+      */
+     private ContentSummary getContentSummary(String path) throws IOException {
+       final HttpURLConnection connection = openConnection(
+-          "/contentSummary" + ServletUtil.encodePath(path), "ugi=" + getUgiParameter());
++          "/contentSummary" + ServletUtil.encodePath(path), "ugi=" + getEncodedUgiParameter());
+       InputStream in = null;
+       try {
+         in = connection.getInputStream();        
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
+index 6b413fa..b3b9c32 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
+@@ -79,7 +79,7 @@ public class HsftpFileSystem extends HftpFileSystem {
+   protected HttpURLConnection openConnection(String path, String query)
+       throws IOException {
+     try {
+-      query = updateQuery(query);
++      query = addDelegationTokenParam(query);
+       final URL url = new URI("https", null, nnAddr.getHostName(),
+           nnAddr.getPort(), path, query, null).toURL();
+       HttpsURLConnection conn = (HttpsURLConnection)url.openConnection();
+diff --git a/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java b/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java
+index ea68761..04f23dd 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java
++++ b/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java
+@@ -21,35 +21,42 @@ import java.io.ByteArrayInputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.net.HttpURLConnection;
++import java.net.MalformedURLException;
+ import java.net.URL;
+ 
++import org.apache.hadoop.hdfs.ByteRangeInputStream;
++
+ import org.junit.Test;
++import static org.junit.Assert.*;
+ 
+ public class TestByteRangeInputStream {
+ public static class MockHttpURLConnection extends HttpURLConnection {
++  MockURL m;
++  
++  public MockHttpURLConnection(URL u, MockURL m) {
++    super(u); 
++    this.m = m;
++  }
++
+   public MockHttpURLConnection(URL u) {
+-    super(u);
++    super(u); 
+   }
+-  
+-  @Override
++
+   public boolean usingProxy(){
+     return false;
+   }
+   
+-  @Override
+   public void disconnect() {
+   }
+   
+-  @Override
+-  public void connect() {
++  public void connect() throws IOException {
++    m.setMsg("Connect: "+url+", Range: "+getRequestProperty("Range"));
+   }
+   
+-  @Override
+   public InputStream getInputStream() throws IOException {
+     return new ByteArrayInputStream("asdf".getBytes());
+   } 
+ 
+-  @Override
+   public URL getURL() {
+     URL u = null;
+     try {
+@@ -60,10 +67,9 @@ public static class MockHttpURLConnection extends HttpURLConnection {
+     return u;
+   }
+   
+-  @Override
+   public int getResponseCode() {
+-    if (responseCode != -1) {
+-      return responseCode;
++    if (m.responseCode != -1) {
++      return m.responseCode;
+     } else {
+       if (getRequestProperty("Range") == null) {
+         return 200;
+@@ -78,7 +84,105 @@ public static class MockHttpURLConnection extends HttpURLConnection {
+   }
+ }
+ 
++class MockURL extends HftpFileSystem.RangeHeaderUrlOpener {
++  String msg;
++  public int responseCode = -1;
++  
++  public MockURL(URL u) {
++    super(u);
++  }
++
++  public MockURL(String s) throws MalformedURLException {
++    this(new URL(s));
++  }
++
++  public HttpURLConnection openConnection() throws IOException {
++    return new MockHttpURLConnection(url, this);
++  }    
++
++  public void setMsg(String s) {
++    msg = s;
++  }
++  
++  public String getMsg() {
++    return msg;
++  }
++}
++
+   @Test
+-  public void testByteRange() throws IOException {
++  public void testByteRange() throws IOException, InterruptedException {
++    MockURL o = new MockURL("http://test/");
++    MockURL r =  new MockURL((URL)null);
++    ByteRangeInputStream is = new HftpFileSystem.RangeHeaderInputStream(o, r);
++
++    assertEquals("getPos wrong", 0, is.getPos());
++
++    is.read();
++
++    assertEquals("Initial call made incorrectly", 
++                 "Connect: http://test/, Range: null",
++                 o.getMsg());
++
++    assertEquals("getPos should be 1 after reading one byte", 1, is.getPos());
++
++    o.setMsg(null);
++
++    is.read();
++
++    assertEquals("getPos should be 2 after reading two bytes", 2, is.getPos());
++
++    assertNull("No additional connections should have been made (no seek)",
++               o.getMsg());
++
++    r.setMsg(null);
++    r.setURL(new URL("http://resolvedurl/"));
++    
++    is.seek(100);
++    is.read();
++
++    assertEquals("Seek to 100 bytes made incorrectly", 
++                 "Connect: http://resolvedurl/, Range: bytes=100-",
++                 r.getMsg());
++
++    assertEquals("getPos should be 101 after reading one byte", 101, is.getPos());
++
++    r.setMsg(null);
++
++    is.seek(101);
++    is.read();
++
++    assertNull("Seek to 101 should not result in another request", r.getMsg());
++
++    r.setMsg(null);
++    is.seek(2500);
++    is.read();
++
++    assertEquals("Seek to 2500 bytes made incorrectly", 
++                 "Connect: http://resolvedurl/, Range: bytes=2500-",
++                 r.getMsg());
++
++    r.responseCode = 200;
++    is.seek(500);
++    
++    try {
++      is.read();
++      fail("Exception should be thrown when 200 response is given "
++           + "but 206 is expected");
++    } catch (IOException e) {
++      assertEquals("Should fail because incorrect response code was sent",
++                   "HTTP_PARTIAL expected, received 200", e.getMessage());
++    }
++
++    r.responseCode = 206;
++    is.seek(0);
++
++    try {
++      is.read();
++      fail("Exception should be thrown when 206 response is given "
++           + "but 200 is expected");
++    } catch (IOException e) {
++      assertEquals("Should fail because incorrect response code was sent",
++                   "HTTP_OK expected, received 206", e.getMessage());
++    }
+   }
+ }
+diff --git a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+index ac4fcce..a3622a2 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
++++ b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+@@ -18,24 +18,224 @@
+ 
+ package org.apache.hadoop.hdfs;
+ 
+-import static org.junit.Assert.assertEquals;
+-import static org.junit.Assert.assertNotNull;
+-
+ import java.io.IOException;
++import java.net.HttpURLConnection;
+ import java.net.URI;
++import java.net.URISyntaxException;
++import java.util.Random;
+ 
++import org.apache.commons.logging.impl.Log4JLogger;
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.BlockLocation;
++import org.apache.hadoop.fs.FSDataInputStream;
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
++import org.apache.hadoop.hdfs.server.datanode.DataNode;
++import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+-import org.junit.Before;
++import org.apache.hadoop.util.ServletUtil;
++import org.apache.log4j.Level;
++
+ import org.junit.Test;
++import org.junit.Before;
++import org.junit.BeforeClass;
++import org.junit.After;
++import org.junit.AfterClass;
++import static org.junit.Assert.*;
+ 
+ public class TestHftpFileSystem {
+   
+-  @Before
++  private static final Random RAN = new Random();
++  
++  private static Configuration config = null;
++  private static MiniDFSCluster cluster = null;
++  private static FileSystem hdfs = null;
++  private static HftpFileSystem hftpFs = null;
++
++  private static Path[] TEST_PATHS = new Path[] {
++      // URI does not encode, Request#getPathInfo returns /foo
++      new Path("/foo;bar"),
++
++      // URI does not encode, Request#getPathInfo returns verbatim
++      new Path("/foo+"),
++      new Path("/foo+bar/foo+bar"),
++      new Path("/foo=bar/foo=bar"),
++      new Path("/foo,bar/foo,bar"),
++      new Path("/foo@bar/foo@bar"),
++      new Path("/foo&bar/foo&bar"),
++      new Path("/foo$bar/foo$bar"),
++      new Path("/foo_bar/foo_bar"),
++      new Path("/foo~bar/foo~bar"),
++      new Path("/foo.bar/foo.bar"),
++      new Path("/foo../bar/foo../bar"),
++      new Path("/foo.../bar/foo.../bar"),
++      new Path("/foo'bar/foo'bar"),
++      new Path("/foo#bar/foo#bar"),
++      new Path("/foo!bar/foo!bar"),
++      // HDFS file names may not contain ":"
++
++      // URI percent encodes, Request#getPathInfo decodes
++      new Path("/foo bar/foo bar"),
++      new Path("/foo?bar/foo?bar"),
++      new Path("/foo\">bar/foo\">bar"),
++    };
++
++  @BeforeClass
++  public static void setUp() throws IOException {
++    ((Log4JLogger)HftpFileSystem.LOG).getLogger().setLevel(Level.ALL);
++
++    final long seed = RAN.nextLong();
++    System.out.println("seed=" + seed);
++    RAN.setSeed(seed);
++
++    config = new Configuration();
++    config.set("slave.host.name", "localhost");
++
++    cluster = new MiniDFSCluster(config, 2, true, null);
++    hdfs = cluster.getFileSystem();
++    final String hftpuri = "hftp://" + config.get("dfs.http.address"); 
++    hftpFs = (HftpFileSystem) new Path(hftpuri).getFileSystem(config);
++  }
++  
++  @AfterClass
++  public static void tearDown() throws IOException {
++    hdfs.close();
++    hftpFs.close();
++    cluster.shutdown();
++  }
++
++  /**
++   * Test file creation and access with file names that need encoding. 
++   */
++  @Test
++  public void testFileNameEncoding() throws IOException, URISyntaxException {
++    for (Path p : TEST_PATHS) {
++      // Create and access the path (data and streamFile servlets)
++      FSDataOutputStream out = hdfs.create(p, true);
++      out.writeBytes("0123456789");
++      out.close();
++      FSDataInputStream in = hftpFs.open(p);
++      assertEquals('0', in.read());
++
++      // Check the file status matches the path. Hftp returns a FileStatus
++      // with the entire URI, extract the path part.
++      assertEquals(p, new Path(hftpFs.getFileStatus(p).getPath().toUri().getPath()));
++
++      // Test list status (listPath servlet)
++      assertEquals(1, hftpFs.listStatus(p).length);
++
++      // Test content summary (contentSummary servlet)
++      assertNotNull("No content summary", hftpFs.getContentSummary(p));
++
++      // Test checksums (fileChecksum and getFileChecksum servlets)
++      assertNotNull("No file checksum", hftpFs.getFileChecksum(p));
++    }
++  }
++
++  private void testDataNodeRedirect(Path path) throws IOException {
++    // Create the file
++    if (hdfs.exists(path)) {
++      hdfs.delete(path, true);
++    }
++    FSDataOutputStream out = hdfs.create(path, (short)1);
++    out.writeBytes("0123456789");
++    out.close();
++
++    // Get the path's block location so we can determine
++    // if we were redirected to the right DN.
++    FileStatus status = hdfs.getFileStatus(path);
++    BlockLocation[] locations =
++        hdfs.getFileBlockLocations(status, 0, 10);
++    String locationName = locations[0].getNames()[0];
++
++    // Connect to the NN to get redirected
++    HttpURLConnection conn = hftpFs.openConnection(
++        "/data" + ServletUtil.encodePath(path.toUri().getPath()), 
++        "ugi=userx,groupy");
++    HttpURLConnection.setFollowRedirects(true);
++    conn.connect();
++    conn.getInputStream();
++
++    boolean checked = false;
++    // Find the datanode that has the block according to locations
++    // and check that the URL was redirected to this DN's info port
++    for (DataNode node : cluster.getDataNodes()) {
++      DatanodeRegistration dnR = node.dnRegistration;
++      if (dnR.getName().equals(locationName)) {
++        checked = true;
++        assertEquals(dnR.getInfoPort(), conn.getURL().getPort());
++      }
++    }
++    assertTrue("The test never checked that location of " +
++               "the block and hftp desitnation are the same", checked);
++  }
++
++  /**
++   * Test that clients are redirected to the appropriate DN.
++   */
++  @Test
++  public void testDataNodeRedirect() throws IOException {
++    for (Path p : TEST_PATHS) {
++      testDataNodeRedirect(p);
++    }
++  }
++
++  /**
++   * Tests getPos() functionality.
++   */
++  @Test
++  public void testGetPos() throws IOException {
++    final Path testFile = new Path("/testfile+1");
++    // Write a test file.
++    FSDataOutputStream out = hdfs.create(testFile, true);
++    out.writeBytes("0123456789");
++    out.close();
++    
++    FSDataInputStream in = hftpFs.open(testFile);
++    
++    // Test read().
++    for (int i = 0; i < 5; ++i) {
++      assertEquals(i, in.getPos());
++      in.read();
++    }
++    
++    // Test read(b, off, len).
++    assertEquals(5, in.getPos());
++    byte[] buffer = new byte[10];
++    assertEquals(2, in.read(buffer, 0, 2));
++    assertEquals(7, in.getPos());
++    
++    // Test read(b).
++    int bytesRead = in.read(buffer);
++    assertEquals(7 + bytesRead, in.getPos());
++    
++    // Test EOF.
++    for (int i = 0; i < 100; ++i) {
++      in.read();
++    }
++    assertEquals(10, in.getPos());
++    in.close();
++  }
++
++  /**
++   * Tests seek().
++   */
++  @Test
++  public void testSeek() throws IOException {
++    final Path testFile = new Path("/testfile+1");
++    FSDataOutputStream out = hdfs.create(testFile, true);
++    out.writeBytes("0123456789");
++    out.close();
++    FSDataInputStream in = hftpFs.open(testFile);
++    in.seek(7);
++    assertEquals('7', in.read());
++  }
++  
+   public void resetFileSystem() throws IOException {
+     // filesystem caching has a quirk/bug that it caches based on the user's
+     // given uri.  the result is if a filesystem is instantiated with no port,
+@@ -48,6 +248,7 @@ public class TestHftpFileSystem {
+   
+   @Test
+   public void testHftpDefaultPorts() throws IOException {
++    resetFileSystem();
+     Configuration conf = new Configuration();
+     URI uri = URI.create("hftp://localhost");
+     HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
+@@ -67,6 +268,7 @@ public class TestHftpFileSystem {
+   
+   @Test
+   public void testHftpCustomDefaultPorts() throws IOException {
++    resetFileSystem();
+     Configuration conf = new Configuration();
+     conf.setInt("dfs.http.port", 123);
+     conf.setInt("dfs.https.port", 456);
+@@ -89,6 +291,7 @@ public class TestHftpFileSystem {
+ 
+   @Test
+   public void testHftpCustomUriPortWithDefaultPorts() throws IOException {
++    resetFileSystem();
+     Configuration conf = new Configuration();
+     URI uri = URI.create("hftp://localhost:123");
+     HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
+@@ -108,6 +311,7 @@ public class TestHftpFileSystem {
+ 
+   @Test
+   public void testHftpCustomUriPortWithCustomDefaultPorts() throws IOException {
++    resetFileSystem();
+     Configuration conf = new Configuration();
+     conf.setInt("dfs.http.port", 123);
+     conf.setInt("dfs.https.port", 456);
+@@ -132,6 +336,7 @@ public class TestHftpFileSystem {
+ 
+   @Test
+   public void testHsftpDefaultPorts() throws IOException {
++    resetFileSystem();
+     Configuration conf = new Configuration();
+     URI uri = URI.create("hsftp://localhost");
+     HsftpFileSystem fs = (HsftpFileSystem) FileSystem.get(uri, conf);
+@@ -151,6 +356,7 @@ public class TestHftpFileSystem {
+ 
+   @Test
+   public void testHsftpCustomDefaultPorts() throws IOException {
++    resetFileSystem();
+     Configuration conf = new Configuration();
+     conf.setInt("dfs.http.port", 123);
+     conf.setInt("dfs.https.port", 456);
+@@ -173,6 +379,7 @@ public class TestHftpFileSystem {
+ 
+   @Test
+   public void testHsftpCustomUriPortWithDefaultPorts() throws IOException {
++    resetFileSystem();
+     Configuration conf = new Configuration();
+     URI uri = URI.create("hsftp://localhost:123");
+     HsftpFileSystem fs = (HsftpFileSystem) FileSystem.get(uri, conf);
+@@ -192,6 +399,7 @@ public class TestHftpFileSystem {
+ 
+   @Test
+   public void testHsftpCustomUriPortWithCustomDefaultPorts() throws IOException {
++    resetFileSystem();
+     Configuration conf = new Configuration();
+     conf.setInt("dfs.http.port", 123);
+     conf.setInt("dfs.https.port", 456);
+-- 
+1.7.0.4
+

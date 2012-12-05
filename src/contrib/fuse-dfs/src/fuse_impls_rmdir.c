@@ -25,47 +25,58 @@ extern const char *const TrashPrefixDir;
 
 int dfs_rmdir(const char *path)
 {
+  struct hdfsConn *conn = NULL;
+  hdfsFS fs;
+  int ret;
+  dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
+  int numEntries = 0;
+  hdfsFileInfo *info = NULL;
+
   TRACE1("rmdir", path)
 
-  // retrieve dfs specific data
-  dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
-
-  // check params and the context var
   assert(path);
   assert(dfs);
   assert('/' == *path);
 
   if (is_protected(path)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to delete a protected directory: %s ",path);
-    return -EACCES;
+    ERROR("Trying to delete protected directory %s", path);
+    ret = -EACCES;
+    goto cleanup;
   }
 
   if (dfs->read_only) {
-    syslog(LOG_ERR,"ERROR: hdfs is configured as read-only, cannot delete the directory %s\n",path);
-    return -EACCES;
+    ERROR("HDFS configured read-only, cannot delete directory %s", path);
+    ret = -EACCES;
+    goto cleanup;
   }
 
-  hdfsFS userFS;
-  // if not connected, try to connect and fail out if we can't.
-  if ((userFS = doConnectAsUser(dfs->nn_hostname,dfs->nn_port))== NULL) {
-    syslog(LOG_ERR, "ERROR: could not connect to dfs %s:%d\n", __FILE__, __LINE__);
-    return -EIO;
+  ret = fuseConnectAsThreadUid(&conn);
+  if (ret) {
+    fprintf(stderr, "fuseConnectAsThreadUid: failed to open a libhdfs "
+            "connection!  error %d.\n", ret);
+    ret = -EIO;
+    goto cleanup;
   }
-
-  int numEntries = 0;
-  hdfsFileInfo *info = hdfsListDirectory(userFS,path,&numEntries);
-
-  // free the info pointers
-  hdfsFreeFileInfo(info,numEntries);
-
+  fs = hdfsConnGetFs(conn);
+  info = hdfsListDirectory(fs, path, &numEntries);
   if (numEntries) {
-    return -ENOTEMPTY;
+    ret = -ENOTEMPTY;
+    goto cleanup;
   }
 
-  if (hdfsDeleteWithTrash(userFS, path, dfs->usetrash)) {
-    syslog(LOG_ERR,"ERROR: hdfs error trying to delete the directory %s\n",path);
-    return -EIO;
+  if (hdfsDeleteWithTrash(fs, path, dfs->usetrash)) {
+    ERROR("Error trying to delete directory %s", path);
+    ret = -EIO;
+    goto cleanup;
   }
+  ret = 0;
 
-  return 0;
+cleanup:
+  if (info) {
+    hdfsFreeFileInfo(info, numEntries);
+  }
+  if (conn) {
+    hdfsConnRelease(conn);
+  }
+  return ret;
 }

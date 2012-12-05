@@ -58,12 +58,10 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
-import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.mapreduce.JobACL;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.util.StringUtils;
-import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 
 /**
  * Provides methods for writing to and reading from job history. 
@@ -94,14 +92,6 @@ import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 public class JobHistory {
   
   static final long VERSION = 1L;
-
-  static final int DONE_DIRECTORY_FORMAT_VERSION = 1;
-
-  static final String DONE_DIRECTORY_FORMAT_DIRNAME
-    = "version-" + DONE_DIRECTORY_FORMAT_VERSION;
-
-  static final String UNDERSCORE_ESCAPE = "%5F";
-
   public static final Log LOG = LogFactory.getLog(JobHistory.class);
   private static final char DELIMITER = ' ';
   static final char LINE_DELIMITER_CHAR = '.';
@@ -114,13 +104,13 @@ public class JobHistory {
   static final String VALUE = "[^\"\\\\]*+(?:\\\\.[^\"\\\\]*+)*+";
   
   static final Pattern pattern = Pattern.compile(KEY + "=" + "\"" + VALUE + "\"");
+ 
 
   static final int MAXIMUM_DATESTRING_COUNT = 200000;
-  
+ 
   public static final int JOB_NAME_TRIM_LENGTH = 50;
   private static String JOBTRACKER_UNIQUE_STRING = null;
-  private static final String JOBHISTORY_DEBUG_MODE =
-    "mapreduce.jobhistory.debug.mode";
+  private static final String JOBHISTORY_DEBUG_MODE = "mapreduce.jobhistory.debug.mode";
   private static String LOG_DIR = null;
   private static final String SECONDARY_FILE_SUFFIX = ".recover";
   private static long jobHistoryBlockSize = 0;
@@ -142,10 +132,14 @@ public class JobHistory {
 
   // XXXXX debug mode -- set this to false for production
   private static boolean DEBUG_MODE;
-  private static final int SERIAL_NUMBER_DIRECTORY_DIGITS = 6;
-  private static int SERIAL_NUMBER_LOW_DIGITS;
 
-  private static String SERIAL_NUMBER_FORMAT;
+  private static final int SERIAL_NUMBER_DIRECTORY_DIGITS = 6;
+  private static final int SERIAL_NUMBER_LOW_DIGITS = DEBUG_MODE ? 1 : 3;
+
+  private static final String SERIAL_NUMBER_FORMAT
+    = ("%0"
+       + (SERIAL_NUMBER_DIRECTORY_DIGITS + SERIAL_NUMBER_LOW_DIGITS)
+       + "d");
 
   private static final Set<Path> existingDoneSubdirs = new HashSet<Path>();
 
@@ -168,13 +162,6 @@ public class JobHistory {
   private static final SortedMap<Long, String>jobToDirectoryMap
     = new TreeMap<Long, String>();
 
-  // JobHistory filename regex
-  public static final Pattern JOBHISTORY_FILENAME_REGEX = 
-    Pattern.compile("(" + JobID.JOBID_REGEX + ")_.+");
-  // JobHistory conf-filename regex
-  public static final Pattern CONF_FILENAME_REGEX =
-    Pattern.compile("(" + JobID.JOBID_REGEX + ")_conf.xml");
-  
   private static class MovedFileInfo {
     private final String historyFile;
     private final long timestamp;
@@ -343,7 +330,7 @@ public class JobHistory {
 
   private static String serialNumberDirectoryComponent(JobID id) {
     return String.format(SERIAL_NUMBER_FORMAT,
-                         Integer.valueOf(jobSerialNumber(id)))
+                         new Integer(jobSerialNumber(id)))
               .substring(0, SERIAL_NUMBER_DIRECTORY_DIGITS);
   }
 
@@ -366,9 +353,7 @@ public class JobHistory {
         dateString = String.format
           ("%04d/%02d/%02d",
            timestamp.get(Calendar.YEAR),
-           // months are 0-based in Calendar, but people will expect January
-           // to be month #1.
-           timestamp.get(DEBUG_MODE ? Calendar.HOUR : Calendar.MONTH) + 1,
+           timestamp.get(DEBUG_MODE ? Calendar.HOUR : Calendar.MONTH),
            timestamp.get(DEBUG_MODE ? Calendar.MINUTE : Calendar.DAY_OF_MONTH));
 
         dateString = dateString.intern();
@@ -402,7 +387,7 @@ public class JobHistory {
       if (!DONEDIR_FS.exists(dir)) {
         LOG.info("Creating DONE subfolder at "+ dir);
 
-        if (!FileSystem.mkdirs(DONEDIR_FS, dir,
+        if (!DONEDIR_FS.mkdirs(dir,
                                new FsPermission(HISTORY_DIR_PERMISSION))) {
           throw new IOException("Mkdirs failed to create " + dir.toString());
         }
@@ -426,9 +411,7 @@ public class JobHistory {
   }
 
   private static String historyLogSubdirectory(JobID id, long millisecondTime) {
-    String result
-      = (DONE_DIRECTORY_FORMAT_DIRNAME
-         + "/" + jobtrackerDirectoryComponent(id));
+    String result = jobtrackerDirectoryComponent(id);
 
     String serialNumberDirectory = serialNumberDirectoryComponent(id);
 
@@ -446,9 +429,7 @@ public class JobHistory {
 
   private static String doneSubdirsBeforeSerialTail() {
     // job tracker ID
-    String result
-      = ("/" + DONE_DIRECTORY_FORMAT_DIRNAME
-         + "/*");   // job tracker instance ID
+    String result = "/*";   // job tracker instance ID
 
     // date
     result = result + "/*/*/*";  // YYYY/MM/DD ;
@@ -493,25 +474,25 @@ public class JobHistory {
    * @param conf Jobconf of the job tracker.
    * @param hostname jobtracker's hostname
    * @param jobTrackerStartTime jobtracker's start time
+   * @return true if intialized properly
+   *         false otherwise
    */
   public static void init(JobTracker jobTracker, JobConf conf,
              String hostname, long jobTrackerStartTime) throws IOException {
-    initLogDir(conf);
     DEBUG_MODE = conf.getBoolean(JOBHISTORY_DEBUG_MODE, false);
-    SERIAL_NUMBER_LOW_DIGITS = DEBUG_MODE ? 1 : 3;
-    SERIAL_NUMBER_FORMAT = ("%0"
-       + (SERIAL_NUMBER_DIRECTORY_DIGITS + SERIAL_NUMBER_LOW_DIGITS)
-       + "d");
+    LOG_DIR = conf.get("hadoop.job.history.location" ,
+      "file:///" + new File(
+      System.getProperty("hadoop.log.dir")).getAbsolutePath()
+      + File.separator + "history");
     JOBTRACKER_UNIQUE_STRING = hostname + "_" + 
                                   String.valueOf(jobTrackerStartTime) + "_";
     jobtrackerHostname = hostname;
     Path logDir = new Path(LOG_DIR);
+    LOGDIR_FS = logDir.getFileSystem(conf);
     if (!LOGDIR_FS.exists(logDir)){
       if (!LOGDIR_FS.mkdirs(logDir, new FsPermission(HISTORY_DIR_PERMISSION))) {
         throw new IOException("Mkdirs failed to create " + logDir.toString());
       }
-    } else { // directory exists
-      checkDirectoryPermissions(LOGDIR_FS, logDir, "hadoop.job.history.location");
     }
     conf.set("hadoop.job.history.location", LOG_DIR);
     // set the job history block size (default is 3MB)
@@ -527,89 +508,44 @@ public class JobHistory {
     fileManager = new JobHistoryFilesManager(conf, jobTracker);
   }
 
-  private static void initLogDir(JobConf conf) throws IOException {
-    LOG_DIR = conf.get("hadoop.job.history.location" ,
-      "file:///" + new File(
-      System.getProperty("hadoop.log.dir")).getAbsolutePath()
-      + File.separator + "history");
-    Path logDir = new Path(LOG_DIR);
-    LOGDIR_FS = logDir.getFileSystem(conf);
-  }
-
   static void initDone(JobConf conf, FileSystem fs) throws IOException {
-    initDone(conf, fs, true);
-  }
-
-  static void initDone(JobConf conf, FileSystem fs,
-                                     boolean setup)
-      throws IOException {
     //if completed job history location is set, use that
     String doneLocation = conf.
                      get("mapred.job.tracker.history.completed.location");
     if (doneLocation != null) {
-      DONE = fs.makeQualified(new Path(doneLocation));
-      DONEDIR_FS = fs;
+      Path donePath = new Path(doneLocation);
+      DONEDIR_FS = donePath.getFileSystem(conf);
+      DONE = DONEDIR_FS.makeQualified(donePath);
     } else {
-      if (!setup) {
-        initLogDir(conf);
-      }
       DONE = new Path(LOG_DIR, "done");
       DONEDIR_FS = LOGDIR_FS;
     }
-    Path versionSubdir = new Path(DONE, DONE_DIRECTORY_FORMAT_DIRNAME);
+
     //If not already present create the done folder with appropriate 
     //permission
     if (!DONEDIR_FS.exists(DONE)) {
       LOG.info("Creating DONE folder at "+ DONE);
-      if (!DONEDIR_FS.mkdirs(DONE, 
+      if (! DONEDIR_FS.mkdirs(DONE, 
           new FsPermission(HISTORY_DIR_PERMISSION))) {
         throw new IOException("Mkdirs failed to create " + DONE.toString());
       }
-
-      if (!DONEDIR_FS.exists(versionSubdir)) {
-        if (!DONEDIR_FS.mkdirs(versionSubdir,
-                               new FsPermission(HISTORY_DIR_PERMISSION))) {
-          throw new IOException("Mkdirs failed to create " + versionSubdir);
-        }
-      }
-    } else { // directory exists. Checks version subdirectory permissions as
-      // well.
-      checkDirectoryPermissions(DONEDIR_FS, DONE,
-          "mapred.job.tracker.history.completed.location");
-      if (DONEDIR_FS.exists(versionSubdir))
-        checkDirectoryPermissions(DONEDIR_FS, versionSubdir,
-            "mapred.job.tracker.history.completed.location-versionsubdir");
     }
-
-    if (!setup) {
-      return;
-    }
-
     fileManager.start();
+    
+    HistoryCleaner.cleanupFrequency =
+      conf.getLong("mapreduce.jobhistory.cleaner.interval-ms",
+          HistoryCleaner.DEFAULT_CLEANUP_FREQUENCY);
+    HistoryCleaner.maxAgeOfHistoryFiles =
+      conf.getLong("mapreduce.jobhistory.max-age-ms",
+          HistoryCleaner.DEFAULT_HISTORY_MAX_AGE);
+    LOG.info(String.format("Job History MaxAge is %d ms (%.2f days), " +
+          "Cleanup Frequency is %d ms (%.2f days)",
+          HistoryCleaner.maxAgeOfHistoryFiles,
+          ((float) HistoryCleaner.maxAgeOfHistoryFiles)/(HistoryCleaner.ONE_DAY_IN_MS),
+          HistoryCleaner.cleanupFrequency,
+          ((float) HistoryCleaner.cleanupFrequency)/HistoryCleaner.ONE_DAY_IN_MS));
   }
 
-  /**
-   * @param FileSystem
-   * @param Path
-   * @param configKey 
-   * @throws IOException
-   * @throws DiskErrorException
-   */
-  static void checkDirectoryPermissions(FileSystem fs, Path path,
-      String configKey) throws IOException, DiskErrorException {
-    FileStatus stat = fs.getFileStatus(path);
-    FsPermission actual = stat.getPermission();
-    if (!stat.isDir())
-      throw new DiskErrorException(configKey + " - not a directory: "
-          + path.toString());
-    FsAction user = actual.getUserAction();
-    if (!user.implies(FsAction.READ))
-      throw new DiskErrorException("bad " + configKey
-          + "- directory is not readable: " + path.toString());
-    if (!user.implies(FsAction.WRITE))
-      throw new DiskErrorException("bad " + configKey
-          + "- directory is not writable " + path.toString());
-  }
 
   /**
    * Manages job-history's meta information such as version etc.
@@ -856,10 +792,6 @@ public class JobHistory {
   }
 
   /**
-   * Get the 
-   */
-  
-  /**
    * Base class contais utility stuff to manage types key value pairs with enums. 
    */
   static class KeyValuePair{
@@ -929,7 +861,7 @@ public class JobHistory {
       return values; 
     }
   }
-
+ 
   // hasMismatches is just used to return a second value if you want
   // one.  I would have used MutableBoxedBoolean if such had been provided.
   static Path[] filteredStat2Paths
@@ -969,137 +901,66 @@ public class JobHistory {
     return localGlobber(fs, root, tail, filter, null);
   }
   
-  private static FileStatus[] nullToEmpty(FileStatus[] result) {
-    return result == null ? new FileStatus[0] : result;
-  }
-      
-  private static FileStatus[] listFilteredStatus
-        (FileSystem fs, Path root, PathFilter filter)
-     throws IOException {
-    return filter == null ? fs.listStatus(root) : fs.listStatus(root, filter);
-  }
 
   // hasMismatches is just used to return a second value if you want
   // one.  I would have used MutableBoxedBoolean if such had been provided.
   static FileStatus[] localGlobber
-    (FileSystem fs, Path root, String tail, PathFilter filter,
-     AtomicBoolean hasFlatFiles)
+    (FileSystem fs, Path root, String tail, PathFilter filter, AtomicBoolean hasFlatFiles)
       throws IOException {
     if (tail.equals("")) {
-      return nullToEmpty(listFilteredStatus(fs, root, filter));
+      return filter == null ? fs.listStatus(root) : fs.listStatus(root, filter);
     }
 
-    if (tail.startsWith("/*")) {
-      Path[] subdirs = filteredStat2Paths(nullToEmpty(fs.listStatus(root)),
-                                          true, hasFlatFiles);
+      if (tail.startsWith("/*")) {
+        Path[] subdirs = filteredStat2Paths(fs.listStatus(root), true, hasFlatFiles);
 
-      FileStatus[][] subsubdirs = new FileStatus[subdirs.length][];
+        FileStatus[][] subsubdirs = new FileStatus[subdirs.length][];
 
-      int subsubdirCount = 0;
+        int subsubdirCount = 0;
 
-      if (subsubdirs.length == 0) {
-        return new FileStatus[0];
+        if (subsubdirs.length == 0) {
+          return new FileStatus[0];
+        }
+
+        String newTail = tail.substring(2);
+
+        for (int i = 0; i < subdirs.length; ++i) {
+          subsubdirs[i] = localGlobber(fs, subdirs[i], newTail, filter, null);
+          subsubdirCount += subsubdirs[i].length;
+        }
+
+        FileStatus[] result = new FileStatus[subsubdirCount];
+
+        int segmentStart = 0;
+
+        for (int i = 0; i < subsubdirs.length; ++i) {
+          System.arraycopy(subsubdirs[i], 0, result, segmentStart, subsubdirs[i].length);
+          segmentStart += subsubdirs[i].length;
+        }
+
+        return result;
       }
 
-      String newTail = tail.substring(2);
+      if (tail.startsWith("/")) {
+        int split = tail.indexOf('/', 1);
 
-      for (int i = 0; i < subdirs.length; ++i) {
-        subsubdirs[i] = localGlobber(fs, subdirs[i], newTail, filter, null);
-        subsubdirCount += subsubdirs[i].length;
+        if (split < 0) {
+          return (filter == null
+                  ? fs.listStatus(new Path(root, tail.substring(1)))
+                  : fs.listStatus(new Path(root, tail.substring(1)), filter));
+        } else {
+          String thisSegment = tail.substring(1, split);
+          String newTail = tail.substring(split);
+          return localGlobber
+            (fs, new Path(root, thisSegment), newTail, filter, hasFlatFiles);
+        }
       }
 
-      FileStatus[] result = new FileStatus[subsubdirCount];
+      IOException e = new IOException("localGlobber: bad tail");
 
-      int segmentStart = 0;
-
-      for (int i = 0; i < subsubdirs.length; ++i) {
-        System.arraycopy(subsubdirs[i], 0, result, segmentStart, subsubdirs[i].length);
-        segmentStart += subsubdirs[i].length;
-      }
-
-      return result;
+      throw e;
     }
-
-    if (tail.startsWith("/")) {
-      int split = tail.indexOf('/', 1);
-
-      if (split < 0) {
-        return nullToEmpty
-          (listFilteredStatus(fs, new Path(root, tail.substring(1)), filter));
-      } else {
-        String thisSegment = tail.substring(1, split);
-        String newTail = tail.substring(split);
-        return localGlobber
-          (fs, new Path(root, thisSegment), newTail, filter, hasFlatFiles);
-      }
-    }
-
-    IOException e = new IOException("localGlobber: bad tail");
-
-    throw e;
-  }
-
-  static Path confPathFromLogFilePath(Path logFile) {
-    String jobId = jobIdNameFromLogFileName(logFile.getName());
-      
-    Path logDir = logFile.getParent();
-
-    return new Path(logDir, jobId + CONF_FILE_NAME_SUFFIX);
-  }
-
-  static String jobIdNameFromLogFileName(String logFileName) {
-    String[] jobDetails = logFileName.split("_");
-    return jobDetails[0] + "_" + jobDetails[1] + "_" + jobDetails[2];
-  }
-
-  static String userNameFromLogFileName(String logFileName) {
-    String[] jobDetails = logFileName.split("_");
-    return jobDetails[3];
-  }
-
-  static String jobNameFromLogFileName(String logFileName) {
-    String[] jobDetails = logFileName.split("_");
-    return jobDetails[4];
-  }
-
-
-  // This code will be inefficient if the subject contains dozens of underscores
-  static String escapeUnderscores(String escapee) {
-    return replaceStringInstances(escapee, "_", UNDERSCORE_ESCAPE);
-  }
-
-  static String nonOccursString(String logFileName) {
-    int adHocIndex = 0;
-
-    String unfoundString = "q" + adHocIndex;
-
-    while (logFileName.contains(unfoundString)) {
-      unfoundString = "q" + ++adHocIndex;
-    }
-
-    return unfoundString + "q";
-  }
-
-  // I tolerate this code because I expect a low number of
-  // occurrences in a relatively short string
-  static String replaceStringInstances
-      (String logFileName, String old, String replacement) {
-    int index = logFileName.indexOf(old);
-
-    while (index > 0) {
-      logFileName = (logFileName.substring(0, index)
-                     + replacement
-                     + replaceStringInstances
-                         (logFileName.substring(index + old.length()),
-                          old, replacement));
-
-      index = logFileName.indexOf(old);
-    }
-
-    return logFileName;
-  }      
-
-  
+ 
   /**
    * Helper class for logging or reading back events related to job start, finish or failure. 
    */
@@ -1160,7 +1021,6 @@ public class JobHistory {
       return System.getProperty("hadoop.log.dir") + File.separator +
                jobId + CONF_FILE_NAME_SUFFIX;
     }
-                      
     
     /**
      * Helper function to encode the URL of the path of the job-history
@@ -1197,15 +1057,6 @@ public class JobHistory {
      */
     public static String encodeJobHistoryFileName(String logFileName)
     throws IOException {
-      String replacementUnderscoreEscape = null;
-
-      if (logFileName.contains(UNDERSCORE_ESCAPE)) {
-        replacementUnderscoreEscape = nonOccursString(logFileName);
-
-        logFileName = replaceStringInstances
-          (logFileName, UNDERSCORE_ESCAPE, replacementUnderscoreEscape);
-      }
-
       String encodedFileName = null;
       try {
         encodedFileName = URLEncoder.encode(logFileName, "UTF-8");
@@ -1215,12 +1066,6 @@ public class JobHistory {
         ioe.setStackTrace(uee.getStackTrace());
         throw ioe;
       }
-      
-      if (replacementUnderscoreEscape != null) {
-        encodedFileName = replaceStringInstances
-          (encodedFileName, replacementUnderscoreEscape, UNDERSCORE_ESCAPE);
-      }
-
       return encodedFileName;
     }
     
@@ -1244,6 +1089,19 @@ public class JobHistory {
         throw ioe;
       }
       return decodedFileName;
+    }
+    
+    public static String[] getJobHistoryFileNameParts(String logFileName)
+    throws IOException {
+      String decodedJobFileName = decodeJobHistoryFileName(logFileName);
+      String[] jobDetails = decodedJobFileName.split("_", 7);
+      return new String[] {
+          jobDetails[0],
+          jobDetails[1],
+          jobDetails[2] + "_" +jobDetails[3] + "_" + jobDetails[4],
+          jobDetails[5],
+          jobDetails[6]
+      };
     }
     
     /**
@@ -1306,8 +1164,8 @@ public class JobHistory {
       return
         id.toString() + "_"
         + submitTime + "_"
-        + escapeUnderscores(getUserName(jobConf)) + "_" 
-        + escapeUnderscores(trimJobName(getJobName(jobConf)));
+        + getUserName(jobConf) + "_" 
+        + trimJobName(getJobName(jobConf));
     }
     
     /**
@@ -1345,7 +1203,7 @@ public class JobHistory {
       }
       return getJobHistoryFileName(jobConf, id, DONE, DONEDIR_FS);
     }
-    
+
     /**
      * @param dir The directory where to search.
      */
@@ -1359,13 +1217,9 @@ public class JobHistory {
       }
 
       // Make the pattern matching the job's history file
-
-      final String regexp
-        = id.toString() + "_" + DIGITS + "_" + user + "_"
-             + escapeRegexChars(jobName) + "+";
-      
-      final Pattern historyFilePattern = Pattern.compile(regexp);
-
+      final Pattern historyFilePattern = 
+        Pattern.compile(id.toString() + "_" + DIGITS + "_" + user + "_" 
+                        + escapeRegexChars(jobName) + "+");
       // a path filter that matches 4 parts of the filenames namely
       //  - jt-hostname
       //  - job-id
@@ -1373,16 +1227,14 @@ public class JobHistory {
       //  - jobname
       PathFilter filter = new PathFilter() {
         public boolean accept(Path path) {
-          String unescapedFileName = path.getName();
-          String fileName = null;
+          String fileName = path.getName();
           try {
-            fileName = decodeJobHistoryFileName(unescapedFileName);
+            fileName = decodeJobHistoryFileName(fileName);
           } catch (IOException ioe) {
             LOG.info("Error while decoding history file " + fileName + "."
                      + " Ignoring file.", ioe);
             return false;
           }
-
           return historyFilePattern.matcher(fileName).find();
         }
       };
@@ -1407,7 +1259,7 @@ public class JobHistory {
       } else {
         statuses = fs.listStatus(dir, filter);
       }
-      
+ 
       String filename = null;
       if (statuses == null || statuses.length == 0) {
         if (DEBUG_MODE) {
@@ -1618,9 +1470,9 @@ public class JobHistory {
      * jobhistory file is complete.
      * This *should* be the last call to jobhistory for a given job.
      */
-    static void markCompleted(JobID id) throws IOException {
-      fileManager.moveToDone(id);
-    }
+     static void markCompleted(JobID id) throws IOException {
+       fileManager.moveToDone(id);
+     }
 
      /**
      * Log job submitted event to history. Creates a new file in history 
@@ -1647,7 +1499,7 @@ public class JobHistory {
     throws IOException {
       FileSystem fs = null;
       String userLogDir = null;
-      String jobUniqueString = jobId.toString();
+      String jobUniqueString = JOBTRACKER_UNIQUE_STRING + jobId;
 
       // Get the username and job name to be used in the actual log filename;
       // sanity check them too        
@@ -1667,7 +1519,7 @@ public class JobHistory {
           //TODO this is a hack :(
           // jobtracker-hostname_jobtracker-identifier_
           String jtUniqueString = parts[0] + "_" + parts[1] + "_";
-          jobUniqueString = jobId.toString();
+          jobUniqueString = jtUniqueString + jobId.toString();
         }
       } else {
         logFileName = 
@@ -1917,6 +1769,7 @@ public class JobHistory {
         }
       }
       Thread historyCleaner  = new Thread(new HistoryCleaner());
+      historyCleaner.setName("Thread for cleaning up History files");
       historyCleaner.start(); 
     }
     /**
@@ -2521,7 +2374,7 @@ public class JobHistory {
      */
     public void handle(RecordTypes recType, Map<Keys, String> values) throws IOException; 
   }
-
+ 
   static long directoryTime(String year, String seg2, String seg3) {
     // set to current time.  In debug mode, this is where the month
     // and day get set.
@@ -2531,30 +2384,31 @@ public class JobHistory {
 
     result.set(Calendar.YEAR, Integer.parseInt(year));
 
-    // months are 0-based in Calendar, but people will expect January
-    // to be month #1 .  Therefore the number is bumped before we make the 
-    // directory name and must be debumped to seek the time.
     result.set(DEBUG_MODE ? Calendar.HOUR : Calendar.MONTH,
-               Integer.parseInt(seg2) - 1);
-
+               Integer.parseInt(seg2));
     result.set(DEBUG_MODE ? Calendar.MINUTE : Calendar.DAY_OF_MONTH,
                Integer.parseInt(seg3));
 
     return result.getTimeInMillis();
   }
-  
+ 
   /**
-   * Delete history files older than one month. Update master index and remove all 
+   * Delete history files older than one month (or a configurable age).
+   * Update master index and remove all 
    * jobs older than one month. Also if a job tracker has no jobs in last one month
    * remove reference to the job tracker. 
    *
    */
   public static class HistoryCleaner implements Runnable {
     static final long ONE_DAY_IN_MS = 24 * 60 * 60 * 1000L;
+    static final long DEFAULT_CLEANUP_FREQUENCY = ONE_DAY_IN_MS;
+    static final long DEFAULT_HISTORY_MAX_AGE = 30 * ONE_DAY_IN_MS;
     static final long DIRECTORY_LIFE_IN_MS
       = DEBUG_MODE ? 20 * 60 * 1000L : 30 * ONE_DAY_IN_MS;
     static final long RUN_INTERVAL
       = DEBUG_MODE ? 10L * 60L * 1000L : ONE_DAY_IN_MS;
+    static long cleanupFrequency = DEFAULT_CLEANUP_FREQUENCY;
+    static long maxAgeOfHistoryFiles = DEFAULT_HISTORY_MAX_AGE;
     private long now; 
     private static final AtomicBoolean isRunning = new AtomicBoolean(false); 
     private static long lastRan = 0; 
@@ -2570,7 +2424,6 @@ public class JobHistory {
         return; 
       }
       now = System.currentTimeMillis();
-      // clean history only once a day at max
       if (lastRan != 0 && (now - lastRan) < RUN_INTERVAL) {
         isRunning.set(false);
         return; 

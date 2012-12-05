@@ -1,0 +1,26 @@
+From cae4a647c19317af375c4bb4bea0d47486ec15c0 Mon Sep 17 00:00:00 2001
+From: Aaron T. Myers <atm@cloudera.com>
+Date: Tue, 24 Jul 2012 10:53:17 -0700
+Subject: [PATCH 1330/1344] CLOUDERA-BUILD. TestSecondaryWebUi is failing
+
+Author: Aaron T. Myers
+Ref: CDH-6947
+---
+ .../hdfs/server/namenode/SecondaryNameNode.java    |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/SecondaryNameNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/SecondaryNameNode.java
+index ddc6b4f..3e80491 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/SecondaryNameNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/SecondaryNameNode.java
+@@ -258,6 +258,7 @@ public class SecondaryNameNode implements Runnable {
+         }
+       };
+ 
++    infoServer.setAttribute("secondary.name.node", this);
+     infoServer.setAttribute("name.system.image", checkpointImage);
+     infoServer.setAttribute(JspHelper.CURRENT_CONF, conf);
+     infoServer.addInternalServlet("getimage", "/getimage",
+-- 
+1.7.0.4
+

@@ -20,7 +20,11 @@
 #include "fuse_options.h"
 #include "fuse_impls.h"
 #include "fuse_init.h"
+#include "fuse_connect.h"
 
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 int is_protected(const char *path) {
 
@@ -38,33 +42,33 @@ int is_protected(const char *path) {
 }
 
 static struct fuse_operations dfs_oper = {
-  .getattr	= dfs_getattr,
-  .access	= dfs_access,
-  .readdir	= dfs_readdir,
-  .destroy       = dfs_destroy,
-  .init         = dfs_init,
-  .open	        = dfs_open,
-  .read	        = dfs_read,
-  .symlink	= dfs_symlink,
-  .statfs	= dfs_statfs,
-  .mkdir	= dfs_mkdir,
-  .rmdir	= dfs_rmdir,
-  .rename	= dfs_rename,
-  .unlink       = dfs_unlink,
-  .release      = dfs_release,
-  .create       = dfs_create,
-  .write	= dfs_write,
-  .flush        = dfs_flush,
-  .mknod        = dfs_mknod,
-	.utimens	= dfs_utimens,
-  .chmod	= dfs_chmod,
-  .chown	= dfs_chown,
-  .truncate	= dfs_truncate,
+  .getattr  = dfs_getattr,
+  .access   = dfs_access,
+  .readdir  = dfs_readdir,
+  .destroy  = dfs_destroy,
+  .init     = dfs_init,
+  .open     = dfs_open,
+  .read     = dfs_read,
+  .symlink  = dfs_symlink,
+  .statfs   = dfs_statfs,
+  .mkdir    = dfs_mkdir,
+  .rmdir    = dfs_rmdir,
+  .rename   = dfs_rename,
+  .unlink   = dfs_unlink,
+  .release  = dfs_release,
+  .create   = dfs_create,
+  .write    = dfs_write,
+  .flush    = dfs_flush,
+  .mknod    = dfs_mknod,
+  .utimens  = dfs_utimens,
+  .chmod    = dfs_chmod,
+  .chown    = dfs_chown,
+  .truncate = dfs_truncate,
 };
-
 
 int main(int argc, char *argv[])
 {
+  int ret;
 
   umask(0);
 
@@ -72,21 +76,17 @@ int main(int argc, char *argv[])
   program = argv[0];
   struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 
-  /* clear structure that holds our options */
   memset(&options, 0, sizeof(struct options));
 
-  // some defaults
   options.rdbuffer_size = 10*1024*1024; 
   options.attribute_timeout = 60; 
   options.entry_timeout = 60;
 
-  if (fuse_opt_parse(&args, &options, dfs_opts, dfs_options) == -1)
-    /** error parsing options */
+  if (-1 == fuse_opt_parse(&args, &options, dfs_opts, dfs_options)) {
     return -1;
+  }
 
-
-  // Some fuse options we set
-  if (! options.private) {
+  if (!options.private) {
     fuse_opt_add_arg(&args, "-oallow_other");
   }
 
@@ -95,7 +95,7 @@ int main(int argc, char *argv[])
   }
 
   {
-    char buf[1024];
+    char buf[80];
 
     snprintf(buf, sizeof buf, "-oattr_timeout=%d",options.attribute_timeout);
     fuse_opt_add_arg(&args, buf);
@@ -104,37 +104,21 @@ int main(int argc, char *argv[])
     fuse_opt_add_arg(&args, buf);
   }
 
-  if (options.server == NULL || options.port == 0) {
+  if (options.nn_uri == NULL) {
     print_usage(argv[0]);
-    exit(0);
+    exit(EXIT_SUCCESS);
   }
 
-
-  // 
-  // Check we can connect to hdfs
-  // 
-  if (options.initchecks == 1) {
-    hdfsFS temp;
-    if ((temp = hdfsConnect(options.server, options.port)) == NULL) {
-      const char *cp = getenv("CLASSPATH");
-      const char *ld = getenv("LD_LIBRARY_PATH");
-      fprintf(stderr, "FATAL: misconfiguration problem, cannot connect to hdfs - here's your environment\n");
-      fprintf(stderr, "LD_LIBRARY_PATH=%s\n",ld == NULL ? "NULL" : ld);
-      fprintf(stderr, "CLASSPATH=%s\n",cp == NULL ? "NULL" : cp);
-      syslog(LOG_ERR, "FATAL: misconfiguration problem, cannot connect to hdfs - here's your environment\n");
-      syslog(LOG_ERR, "LD_LIBRARY_PATH=%s\n",ld == NULL ? "NULL" : ld);
-      syslog(LOG_ERR, "CLASSPATH=%s\n",cp == NULL ? "NULL" : cp);
-      exit(0);
-    }  
-    temp = NULL;
-  }
-
-  int ret = fuse_main(args.argc, args.argv, &dfs_oper, NULL);
-
-  if (ret) printf("\n");
-
-  /** free arguments */
+  /* Note: do not call any libhdfs functions until fuse_main has been invoked.
+   *
+   * fuse_main will daemonize this process, by calling fork().  This will cause
+   * any extant threads to be destroyed, which could cause problems if 
+   * libhdfs has started some Java threads.
+   *
+   * Most initialization code should go in dfs_init, which is invoked after the
+   * fork.  See HDFS-3808 for details.
+   */
+  ret = fuse_main(args.argc, args.argv, &dfs_oper, NULL);
   fuse_opt_free_args(&args);
-
   return ret;
 }

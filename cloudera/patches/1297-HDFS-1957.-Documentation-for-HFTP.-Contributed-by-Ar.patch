@@ -1,0 +1,106 @@
+From 05fffd07331f98728f1f479c048cb146d1689629 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@apache.org>
+Date: Wed, 11 Jul 2012 18:59:53 +0000
+Subject: [PATCH 1297/1344] HDFS-1957. Documentation for HFTP. Contributed by Ari Rabkin.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1360349 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 20f7ceb0362e5fbefbb713b3163fe0f4cb446310)
+
+Author: Eli Collins
+Ref: CDH-4806
+---
+ src/docs/src/documentation/content/xdocs/hftp.xml |   69 +++++++++++++++++++++
+ src/docs/src/documentation/content/xdocs/site.xml |    1 +
+ 2 files changed, 70 insertions(+), 0 deletions(-)
+ create mode 100644 src/docs/src/documentation/content/xdocs/hftp.xml
+
+diff --git a/src/docs/src/documentation/content/xdocs/hftp.xml b/src/docs/src/documentation/content/xdocs/hftp.xml
+new file mode 100644
+index 0000000..d474926
+--- /dev/null
++++ b/src/docs/src/documentation/content/xdocs/hftp.xml
+@@ -0,0 +1,69 @@
++<?xml version="1.0"?>
++<!--
++  Licensed to the Apache Software Foundation (ASF) under one or more
++  contributor license agreements.  See the NOTICE file distributed with
++  this work for additional information regarding copyright ownership.
++  The ASF licenses this file to You under the Apache License, Version 2.0
++  (the "License"); you may not use this file except in compliance with
++  the License.  You may obtain a copy of the License at
++
++      http://www.apache.org/licenses/LICENSE-2.0
++
++  Unless required by applicable law or agreed to in writing, software
++  distributed under the License is distributed on an "AS IS" BASIS,
++  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  See the License for the specific language governing permissions and
++  limitations under the License.
++-->
++
++<!DOCTYPE document PUBLIC "-//APACHE//DTD Documentation V2.0//EN" "http://forrest.apache.org/dtd/document-v20.dtd">
++
++
++<document>
++
++  <header>
++    <title> HFTP Guide</title>
++  </header>
++
++  <body>
++    <section>
++      <title> Introduction </title>
++      <p> HFTP is a Hadoop filesystem implementation that lets you read data from a remote Hadoop HDFS cluster. 
++      The reads are done via HTTP, and data is sourced from DataNodes. 
++      HFTP is a read-only filesystem, and will throw exceptions if you try to use it to write data or modify
++      the filesystem state.</p>     
++
++      <p>HFTP is primarily useful if you have multiple HDFS clusters with different versions and you need to move data from one to another. HFTP is wire-compatible even between different versions of HDFS. For example, you can do things like:
++      <code>hadoop distcp -i hftp://sourceFS:50070/src hdfs://destFS:50070/dest</code>. Note that HFTP is read-only so the destination must be an HDFS filesystem. (Also, in this example, the <code>distcp</code> should be run using the configuraton of the new filesystem.)</p>
++      
++      <p>An extension, HSFTP, uses HTTPS by default. This means that data will be encrypted in transit.</p>
++    </section>
++    
++    <section>
++      <title>Implementation</title>
++      <p>The code for HFTP lives in the Java class <code>org.apache.hadoop.hdfs.HftpFileSystem</code>. Likewise, 
++      HSFTP is implemented in <code>org.apache.hadoop.hdfs.HsftpFileSystem</code>.
++      </p>
++    </section>
++    
++    <section>
++      <title> Configuration Options </title>
++      <table>
++        <tr>
++          <th>Name</th>
++          <th>Description</th>
++        </tr>
++        <tr>
++          <td>dfs.hftp.https.port</td>
++          <td>the HTTPS port on the remote cluster. If not set, HFTP will fall back on
++          <code>dfs.https.port</code>.</td>
++        </tr>
++        <tr>
++          <td>hdfs.service.host_<strong>ip:port</strong></td>
++          <td>Specifies the service name (for the security subsystem) associated with the HFTP filesystem
++          running at <strong>ip:port.</strong></td>
++        </tr>
++      </table>     
++    </section>
++  </body>
++</document>
+diff --git a/src/docs/src/documentation/content/xdocs/site.xml b/src/docs/src/documentation/content/xdocs/site.xml
+index 7fcf6ec..4c86bd4 100644
+--- a/src/docs/src/documentation/content/xdocs/site.xml
++++ b/src/docs/src/documentation/content/xdocs/site.xml
+@@ -61,6 +61,7 @@ See http://forrest.apache.org/docs/linking.html for more info.
+     <hdfs_quotas      label="Quotas" href="hdfs_quota_admin_guide.html" />
+ 		<hdfs_imageviewer	label="Offline Image Viewer Guide"	href="hdfs_imageviewer.html" />
+     <hdfs_SLG         label="Synthetic Load Generator"  href="SLG_user_guide.html" />
++    <hftp label="HFTP" href="hftp.html"/>
+     <webhdfs label="WebHDFS REST API" href="webhdfs.html" />
+     <hdfs_libhdfs       label="C API libhdfs" href="libhdfs.html" />
+   </docs>
+-- 
+1.7.0.4
+

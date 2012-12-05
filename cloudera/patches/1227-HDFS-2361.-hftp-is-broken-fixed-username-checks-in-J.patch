@@ -1,0 +1,75 @@
+From becac4c46e79b6ed9caac6022aa859b4f8b6c5b5 Mon Sep 17 00:00:00 2001
+From: Jitendra Nath Pandey <jitendra@apache.org>
+Date: Tue, 27 Sep 2011 02:53:00 +0000
+Subject: [PATCH 1227/1344] HDFS-2361. hftp is broken, fixed username checks in JspHelper.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1176182 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 14378ef62c30c676810ebde5ac74d47d0210cff6)
+
+Author: Jitendra Pandey
+Ref: CDH-4806
+---
+ .../hadoop/hdfs/server/namenode/JspHelper.java     |   20 ++++++++++++++------
+ 1 files changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
+index 05717d1..ac4a237 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
+@@ -58,6 +58,7 @@ import org.apache.hadoop.hdfs.web.resources.UserParam;
+ import org.apache.hadoop.http.HtmlQuoting;
+ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.AccessControlException;
++import org.apache.hadoop.security.KerberosName;
+ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
+@@ -467,7 +468,8 @@ public class JspHelper {
+         DelegationTokenIdentifier id = new DelegationTokenIdentifier();
+         id.readFields(in);
+         ugi = id.getUser();
+-        checkUsername(ugi.getUserName(), user);
++        checkUsername(ugi.getShortUserName(), usernameFromQuery);
++        checkUsername(ugi.getShortUserName(), user);
+         ugi.addToken(token);        
+         ugi.setAuthenticationMethod(AuthenticationMethod.TOKEN);
+       } else {
+@@ -476,13 +478,11 @@ public class JspHelper {
+                                 "authenticated by filter");
+         }
+         ugi = UserGroupInformation.createRemoteUser(user);
++        checkUsername(ugi.getShortUserName(), usernameFromQuery);
+         // This is not necessarily true, could have been auth'ed by user-facing
+         // filter
+         ugi.setAuthenticationMethod(secureAuthMethod);
+       }
+-
+-      checkUsername(user, usernameFromQuery);
+-
+     } else { // Security's not on, pull from url
+       ugi = usernameFromQuery == null?
+           getDefaultWebUser(conf) // not specified in request
+@@ -495,10 +495,18 @@ public class JspHelper {
+     return ugi;
+   }
+ 
++  /**
++   * Expected user name should be a short name.
++   */
+   private static void checkUsername(final String expected, final String name
+       ) throws IOException {
+-    if (name != null && !name.equals(expected)) {
+-      throw new IOException("Usernames not matched: name=" + name
++    if (name == null) {
++      return;
++    }
++    KerberosName u = new KerberosName(name);
++    String shortName = u.getShortName();
++    if (!shortName.equals(expected)) {
++      throw new IOException("Usernames not matched: name=" + shortName
+           + " != expected=" + expected);
+     }
+   }
+-- 
+1.7.0.4
+

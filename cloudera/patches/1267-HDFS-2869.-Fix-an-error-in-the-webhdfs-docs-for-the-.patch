@@ -1,0 +1,30 @@
+From 7de7f975cd63be9e4c8607837b51b8f729974da7 Mon Sep 17 00:00:00 2001
+From: Harsh J <harsh@apache.org>
+Date: Sat, 11 Feb 2012 16:52:44 +0000
+Subject: [PATCH 1267/1344] HDFS-2869. Fix an error in the webhdfs docs for the mkdir op (harsh)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1243093 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit d9278ebd7075b7acb5f21d28f0b5ae213ce64ec4)
+
+Author: Harsh J
+Ref: CDH-4806
+---
+ .../src/documentation/content/xdocs/webhdfs.xml    |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/docs/src/documentation/content/xdocs/webhdfs.xml b/src/docs/src/documentation/content/xdocs/webhdfs.xml
+index c1d79a0..da75bbf 100644
+--- a/src/docs/src/documentation/content/xdocs/webhdfs.xml
++++ b/src/docs/src/documentation/content/xdocs/webhdfs.xml
+@@ -327,7 +327,7 @@ Hello, webhdfs user!
+ <ul>
+   <li>Submit a HTTP PUT request.
+     <source>
+-curl -i -X PUT "http://&lt;HOST&gt;:&lt;PORT&gt;/&lt;PATH&gt;?op=MKDIRS[&amp;permission=&lt;OCTAL&gt;]"
++        curl -i -X PUT "http://&lt;HOST&gt;:&lt;PORT&gt;/webhdfs/v1/&lt;PATH&gt;?op=MKDIRS[&amp;permission=&lt;OCTAL&gt;]"
+     </source>
+ The client receives a response with a <a href="#boolean"><code>boolean</code> JSON object</a>:
+     <source>
+-- 
+1.7.0.4
+

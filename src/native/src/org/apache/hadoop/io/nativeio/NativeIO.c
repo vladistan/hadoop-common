@@ -15,8 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-// get the autoconf settings
 #include "config.h"
 
 #include <assert.h>
@@ -29,6 +27,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "org_apache_hadoop.h"
@@ -36,32 +35,52 @@
 #include "file_descriptor.h"
 #include "errno_enum.h"
 
-// the NativeIO$Stat inner class and its constructor
-static jclass stat_clazz;
-static jmethodID stat_ctor;
-
 // the NativeIOException class and its constructor
 static jclass nioe_clazz;
 static jmethodID nioe_ctor;
+
+// the monitor used for working around a bug on RHEL 6:
+// HADOOP-7156
+static jobject pw_lock_object;
 
 // Internal functions
 static void throw_ioe(JNIEnv* env, int errnum);
 static ssize_t get_pw_buflen();
 
+/**
+ * Returns non-zero if the user has specified that the system
+ * has non-threadsafe implementations of getpwuid_r or getgrgid_r.
+ **/
+static int workaround_non_threadsafe_calls(JNIEnv *env, jclass clazz) {
+  jfieldID needs_workaround_field = (*env)->GetStaticFieldID(env, clazz,
+    "workaroundNonThreadSafePasswdCalls", "Z");
+  PASS_EXCEPTIONS_RET(env, 0);
+  assert(needs_workaround_field);
 
-static void stat_init(JNIEnv *env) {
-  // Init Stat
-  jclass clazz = (*env)->FindClass(env, "org/apache/hadoop/io/nativeio/NativeIO$Stat");
-  PASS_EXCEPTIONS(env);
-  stat_clazz = (*env)->NewGlobalRef(env, clazz);
-  stat_ctor = (*env)->GetMethodID(env, stat_clazz, "<init>",
-    "(Ljava/lang/String;I)V");
+  jboolean result = (*env)->GetStaticBooleanField(
+    env, clazz, needs_workaround_field);
+  return result;
 }
 
-static void stat_deinit(JNIEnv *env) {
-  if (stat_clazz != NULL) {  
-    (*env)->DeleteGlobalRef(env, stat_clazz);
-    stat_clazz = NULL;
+static void threadsafe_workaround_init(JNIEnv *env, jclass nativeio_class) {
+  jclass obj_class = (*env)->FindClass(env, "java/lang/Object");
+  assert(obj_class != NULL);
+  jmethodID  obj_ctor = (*env)->GetMethodID(env, obj_class,
+    "<init>", "()V");
+  assert(obj_ctor != NULL);
+
+  if (workaround_non_threadsafe_calls(env, nativeio_class)) {
+    pw_lock_object = (*env)->NewObject(env, obj_class, obj_ctor);
+    PASS_EXCEPTIONS(env);
+    pw_lock_object = (*env)->NewGlobalRef(env, pw_lock_object);
+    PASS_EXCEPTIONS(env);
+  }
+}
+
+static void threadsafe_workaround_deinit(JNIEnv *env) {
+  if (pw_lock_object != NULL) {
+    (*env)->DeleteGlobalRef(env, pw_lock_object);
+    pw_lock_object = NULL;
   }
 }
 
@@ -95,79 +114,22 @@ JNIEXPORT void JNICALL
 Java_org_apache_hadoop_io_nativeio_NativeIO_initNative(
 	JNIEnv *env, jclass clazz) {
 
-  stat_init(env);
-  PASS_EXCEPTIONS_GOTO(env, error);
   nioe_init(env);
   PASS_EXCEPTIONS_GOTO(env, error);
   fd_init(env);
   PASS_EXCEPTIONS_GOTO(env, error);
   errno_enum_init(env);
   PASS_EXCEPTIONS_GOTO(env, error);
+  threadsafe_workaround_init(env, clazz);
+  PASS_EXCEPTIONS_GOTO(env, error);
   return;
 error:
   // these are all idempodent and safe to call even if the
   // class wasn't initted yet
-  stat_deinit(env);
   nioe_deinit(env);
   fd_deinit(env);
   errno_enum_deinit(env);
-}
-
-/*
- * public static native Stat fstat(FileDescriptor fd);
- */
-JNIEXPORT jobject JNICALL
-Java_org_apache_hadoop_io_nativeio_NativeIO_fstat(
-  JNIEnv *env, jclass clazz, jobject fd_object)
-{
-  jobject ret = NULL;
-  char *pw_buf = NULL;
-
-  int fd = fd_get(env, fd_object);
-  PASS_EXCEPTIONS_GOTO(env, cleanup);
-
-  struct stat s;
-  int rc = fstat(fd, &s);
-  if (rc != 0) {
-    throw_ioe(env, errno);
-    goto cleanup;
-  }
-
-  size_t pw_buflen = get_pw_buflen();
-  if ((pw_buf = malloc(pw_buflen)) == NULL) {
-    THROW(env, "java/lang/OutOfMemoryError", "Couldn't allocate memory for pw buffer");
-    goto cleanup;
-  }
-
-  // Grab username
-  struct passwd pwd, *pwdp;
-  while ((rc = getpwuid_r(s.st_uid, &pwd, pw_buf, pw_buflen, &pwdp)) != 0) {
-    if (rc != ERANGE) {
-      throw_ioe(env, rc);
-      goto cleanup;
-    }
-    free(pw_buf);
-    pw_buflen *= 2;
-    if ((pw_buf = malloc(pw_buflen)) == NULL) {
-      THROW(env, "java/lang/OutOfMemoryError", "Couldn't allocate memory for pw buffer");
-      goto cleanup;
-    }
-  }
-  if (rc == 0 && pwdp == NULL) {
-    throw_ioe(env, ENOENT);
-    goto cleanup;
-  }
-
-  jstring jstr_username = (*env)->NewStringUTF(env, pwd.pw_name);
-  if (jstr_username == NULL) goto cleanup;
-
-  // Construct result
-  ret = (*env)->NewObject(env, stat_clazz, stat_ctor,
-    jstr_username, s.st_mode);
-
-cleanup:
-  if (pw_buf != NULL) free(pw_buf);
-  return ret;
+  threadsafe_workaround_deinit(env);
 }
 
 
@@ -205,11 +167,104 @@ cleanup:
   return ret;
 }
 
+/**
+ * public static native void chmod(String path, int mode) throws IOException;
+ */
+JNIEXPORT void JNICALL
+Java_org_apache_hadoop_io_nativeio_NativeIO_chmod(
+  JNIEnv *env, jclass clazz, jstring j_path,
+  jint mode)
+{
+  const char *path = (*env)->GetStringUTFChars(env, j_path, NULL);
+  if (path == NULL) return; // JVM throws Exception for us
+
+  if (chmod(path, mode) != 0) {
+    throw_ioe(env, errno);
+  }
+
+  (*env)->ReleaseStringUTFChars(env, j_path, path);
+}
+
+/**
+ * public static native void posix_fadvise(
+ *   FileDescriptor fd, long offset, long len, int flags);
+ */
+JNIEXPORT void JNICALL
+Java_org_apache_hadoop_io_nativeio_NativeIO_posix_1fadvise(
+  JNIEnv *env, jclass clazz,
+  jobject fd_object, jlong offset, jlong len, jint flags)
+{
+#ifndef HAVE_POSIX_FADVISE
+  THROW(env, "java/lang/UnsupportedOperationException",
+        "fadvise support not available");
+#else
+  int fd = fd_get(env, fd_object);
+  PASS_EXCEPTIONS(env);
+
+  int err = 0;
+  if ((err = posix_fadvise(fd, (off_t)offset, (off_t)len, flags))) {
+    throw_ioe(env, err);
+  }
+#endif
+}
+
+#if defined(HAVE_SYNC_FILE_RANGE)
+#  define my_sync_file_range sync_file_range
+#elif defined(SYS_sync_file_range)
+// RHEL 5 kernels have sync_file_range support, but the glibc
+// included does not have the library function. We can
+// still call it directly, and if it's not supported by the
+// kernel, we'd get ENOSYS. See RedHat Bugzilla #518581
+static int manual_sync_file_range (int fd, __off64_t from, __off64_t to, unsigned int flags)
+{
+#ifdef __x86_64__
+  return syscall( SYS_sync_file_range, fd, from, to, flags);
+#else
+  return syscall (SYS_sync_file_range, fd,
+    __LONG_LONG_PAIR ((long) (from >> 32), (long) from),
+    __LONG_LONG_PAIR ((long) (to >> 32), (long) to),
+    flags);
+#endif
+}
+#define my_sync_file_range manual_sync_file_range
+#endif
+
+/**
+ * public static native void sync_file_range(
+ *   FileDescriptor fd, long offset, long len, int flags);
+ */
+JNIEXPORT void JNICALL
+Java_org_apache_hadoop_io_nativeio_NativeIO_sync_1file_1range(
+  JNIEnv *env, jclass clazz,
+  jobject fd_object, jlong offset, jlong len, jint flags)
+{
+#ifndef my_sync_file_range
+  THROW(env, "java/lang/UnsupportedOperationException",
+        "sync_file_range support not available");
+#else
+  int fd = fd_get(env, fd_object);
+  PASS_EXCEPTIONS(env);
+
+  if (my_sync_file_range(fd, (off_t)offset, (off_t)len, flags)) {
+    if (errno == ENOSYS) {
+      // we know the syscall number, but it's not compiled
+      // into the running kernel
+      THROW(env, "java/lang/UnsupportedOperationException",
+            "sync_file_range kernel support not available");
+      return;
+    } else {
+      throw_ioe(env, errno);
+    }
+  }
+#endif
+}
+
+
 /*
- * private static native long getUIDforFDOwnerforOwner(FileDescriptor fd);
+ * private static native long getUIDForFDOwner(FileDescriptor fd);
  */
 JNIEXPORT jlong JNICALL 
-Java_org_apache_hadoop_io_nativeio_NativeIO_getUIDforFDOwnerforOwner(JNIEnv *env, jclass clazz,
+Java_org_apache_hadoop_io_nativeio_NativeIO_getUIDForFDOwner(JNIEnv *env, jclass clazz,
  jobject fd_object) {
   int fd = fd_get(env, fd_object);
   PASS_EXCEPTIONS_GOTO(env, cleanup);
@@ -233,11 +288,19 @@ Java_org_apache_hadoop_io_nativeio_NativeIO_getUserName(JNIEnv *env,
 jclass clazz, jlong uid) {
    
   char *pw_buf = NULL;
+  int pw_lock_locked = 0;
   int rc;
   size_t pw_buflen = get_pw_buflen();
   if ((pw_buf = malloc(pw_buflen)) == NULL) {
     THROW(env, "java/lang/OutOfMemoryError", "Couldn't allocate memory for pw buffer");
     goto cleanup;
+  }
+
+  if (pw_lock_object != NULL) {
+    if ((*env)->MonitorEnter(env, pw_lock_object) != JNI_OK) {
+      goto cleanup;
+    }
+    pw_lock_locked = 1;
   }
 
   // Grab username
@@ -263,6 +326,9 @@ jclass clazz, jlong uid) {
 
 cleanup:
   if (pw_buf != NULL) free(pw_buf);
+  if (pw_lock_locked) {
+    (*env)->MonitorExit(env, pw_lock_object);
+  }
   return jstr_username;
 }
 

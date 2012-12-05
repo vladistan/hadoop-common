@@ -35,9 +35,6 @@ import org.apache.hadoop.hdfs.protocol.FSConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsConstants.StartupOption;
 import org.apache.hadoop.fs.FileUtil;
-import org.apache.hadoop.util.VersionInfo;
-
-
 
 /**
  * Storage information file.
@@ -78,7 +75,7 @@ public abstract class Storage extends StorageInfo {
   
   private   static final String STORAGE_FILE_LOCK     = "in_use.lock";
   protected static final String STORAGE_FILE_VERSION  = "VERSION";
-  public static final String STORAGE_DIR_CURRENT   = "current";
+  public    static final String STORAGE_DIR_CURRENT   = "current";
   private   static final String STORAGE_DIR_PREVIOUS  = "previous";
   private   static final String STORAGE_TMP_REMOVED   = "removed.tmp";
   private   static final String STORAGE_TMP_PREVIOUS  = "previous.tmp";
@@ -175,7 +172,7 @@ public abstract class Storage extends StorageInfo {
   public Iterator<StorageDirectory> dirIterator(StorageDirType dirType) {
     return new DirIterator(dirType);
   }
-  
+
   /**
    * One of the storage directories.
    */
@@ -611,8 +608,12 @@ public abstract class Storage extends StorageInfo {
      * @throws IOException if locking fails.
      */
     FileLock tryLock() throws IOException {
+      boolean deletionHookAdded = false;
       File lockF = new File(root, STORAGE_FILE_LOCK);
-      lockF.deleteOnExit();
+      if (!lockF.exists()) {
+        lockF.deleteOnExit();
+        deletionHookAdded = true;
+      }
       RandomAccessFile file = new RandomAccessFile(lockF, "rws");
       FileLock res = null;
       try {
@@ -624,6 +625,12 @@ public abstract class Storage extends StorageInfo {
         LOG.error("Cannot create lock on " + lockF, e);
         file.close();
         throw e;
+      }
+      if (res != null && !deletionHookAdded) {
+        // If the file existed prior to our startup, we didn't
+        // call deleteOnExit above. But since we successfully locked
+        // the dir, we can take care of cleaning it up.
+        lockF.deleteOnExit();
       }
       return res;
     }
@@ -825,10 +832,6 @@ public abstract class Storage extends StorageInfo {
       }
     }
     return false;
-  }
-
-  public static String getBuildVersion() {
-    return VersionInfo.getRevision();
   }
 
   public static String getRegistrationID(StorageInfo storage) {

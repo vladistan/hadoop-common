@@ -1,0 +1,48 @@
+From 1a1e9f8ee87dcfc29ba4bbec20ea1c1e01db4827 Mon Sep 17 00:00:00 2001
+From: Robert Joseph Evans <bobby@apache.org>
+Date: Fri, 1 Jun 2012 18:21:18 +0000
+Subject: [PATCH 1275/1344] HADOOP-8460. Document proper setting of HADOOP_PID_DIR and HADOOP_SECURE_DN_PID_DIR (bobby)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1345308 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit a6be056254c9b62d4cef2a807c854114bf7fe4ff)
+
+Author: Robert Evans
+Ref: CDH-4806
+---
+ conf/hadoop-env.sh.template                        |    3 +++
+ .../documentation/content/xdocs/cluster_setup.xml  |    5 +++++
+ 2 files changed, 8 insertions(+), 0 deletions(-)
+
+diff --git a/conf/hadoop-env.sh.template b/conf/hadoop-env.sh.template
+index ce7ccc8..c5f5593 100644
+--- a/conf/hadoop-env.sh.template
++++ b/conf/hadoop-env.sh.template
+@@ -45,6 +45,9 @@ export HADOOP_JOBTRACKER_OPTS="-Dcom.sun.management.jmxremote $HADOOP_JOBTRACKER
+ # export HADOOP_SLAVE_SLEEP=0.1
+ 
+ # The directory where pid files are stored. /tmp by default.
++# NOTE: this should be set to a directory that can only be written to by 
++#       the users that are going to run the hadoop daemons.  Otherwise there is
++#       the potential for a symlink attack.
+ # export HADOOP_PID_DIR=/var/hadoop/pids
+ 
+ # A string representing this instance of hadoop. $USER by default.
+diff --git a/src/docs/src/documentation/content/xdocs/cluster_setup.xml b/src/docs/src/documentation/content/xdocs/cluster_setup.xml
+index b4fe76b..37bf5e4 100644
+--- a/src/docs/src/documentation/content/xdocs/cluster_setup.xml
++++ b/src/docs/src/documentation/content/xdocs/cluster_setup.xml
+@@ -122,6 +122,11 @@
+           <p>At the very least you should specify the
+           <code>JAVA_HOME</code> so that it is correctly defined on each
+           remote node.</p>
++
++          <p>In most cases you should also specify <code>HADOOP_PID_DIR</code>
++          to point a directory that can only be written to by the users that
++          are going to run the hadoop daemons.  Otherwise there is the
++          potential for a symlink attack.</p>
+           
+           <p>Administrators can configure individual daemons using the
+           configuration options <code>HADOOP_*_OPTS</code>. Various options 
+-- 
+1.7.0.4
+

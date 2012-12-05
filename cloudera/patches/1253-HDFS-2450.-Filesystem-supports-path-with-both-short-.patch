@@ -1,0 +1,811 @@
+From a3170c8b250394bd8f1c731ecd63b3e1f438dbb8 Mon Sep 17 00:00:00 2001
+From: Suresh Srinivas <suresh@apache.org>
+Date: Thu, 27 Oct 2011 23:27:04 +0000
+Subject: [PATCH 1253/1344] HDFS-2450. Filesystem supports path with both short names and FQDN. Contributed by Daryn Sharp.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1190089 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 88cc96004720c6d325d4cbe1f80369f4b9fd4084)
+
+Author: Daryn Sharp
+Ref: CDH-4806
+---
+ src/core/org/apache/hadoop/fs/FileSystem.java      |   49 ++-
+ src/core/org/apache/hadoop/net/NetUtils.java       |   55 +++-
+ .../apache/hadoop/hdfs/DistributedFileSystem.java  |   35 +--
+ src/test/org/apache/hadoop/fs/TestFileSystem.java  |  369 +++++++++++++++++++-
+ src/test/org/apache/hadoop/net/TestNetUtils.java   |  121 +++++--
+ 5 files changed, 526 insertions(+), 103 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/fs/FileSystem.java b/src/core/org/apache/hadoop/fs/FileSystem.java
+index ed0c4e1..64212b1 100644
+--- a/src/core/org/apache/hadoop/fs/FileSystem.java
++++ b/src/core/org/apache/hadoop/fs/FileSystem.java
+@@ -42,6 +42,7 @@ import org.apache.hadoop.conf.*;
+ import org.apache.hadoop.util.*;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.io.MultipleIOException;
++import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.token.Token;
+@@ -161,6 +162,15 @@ public abstract class FileSystem extends Configured implements Closeable {
+   public abstract URI getUri();
+   
+   /**
++   * Resolve the uri's hostname and add the default port if not in the uri
++   * @return URI
++   * @see NetUtils#getCanonicalUri(URI, int)
++   */
++  protected URI getCanonicalUri() {
++    return NetUtils.getCanonicalUri(getUri(), getDefaultPort());
++  }
++  
++  /**
+    * Get the default port for this file system.
+    * @return the default port or 0 if there isn't one
+    */
+@@ -396,32 +406,31 @@ public abstract class FileSystem extends Configured implements Closeable {
+   /** Check that a Path belongs to this FileSystem. */
+   protected void checkPath(Path path) {
+     URI uri = path.toUri();
+-    if (uri.getScheme() == null)                // fs is relative 
+-      return;
+-    String thisScheme = this.getUri().getScheme();
+     String thatScheme = uri.getScheme();
+-    String thisAuthority = this.getUri().getAuthority();
+-    String thatAuthority = uri.getAuthority();
++    if (thatScheme == null)                // fs is relative 
++      return;
++    URI thisUri = getCanonicalUri();
++    String thisScheme = thisUri.getScheme();
+     //authority and scheme are not case sensitive
+     if (thisScheme.equalsIgnoreCase(thatScheme)) {// schemes match
+-      if (thisAuthority == thatAuthority ||       // & authorities match
+-          (thisAuthority != null && 
+-           thisAuthority.equalsIgnoreCase(thatAuthority)))
+-        return;
+-
++      String thisAuthority = thisUri.getAuthority();
++      String thatAuthority = uri.getAuthority();
+       if (thatAuthority == null &&                // path's authority is null
+           thisAuthority != null) {                // fs has an authority
+-        URI defaultUri = getDefaultUri(getConf()); // & is the conf default 
+-        if (thisScheme.equalsIgnoreCase(defaultUri.getScheme()) &&
+-            thisAuthority.equalsIgnoreCase(defaultUri.getAuthority()))
+-          return;
+-        try {                                     // or the default fs's uri
+-          defaultUri = get(getConf()).getUri();
+-        } catch (IOException e) {
+-          throw new RuntimeException(e);
++        URI defaultUri = getDefaultUri(getConf());
++        if (thisScheme.equalsIgnoreCase(defaultUri.getScheme())) {
++          uri = defaultUri; // schemes match, so use this uri instead
++        } else {
++          uri = null; // can't determine auth of the path
+         }
+-        if (thisScheme.equalsIgnoreCase(defaultUri.getScheme()) &&
+-            thisAuthority.equalsIgnoreCase(defaultUri.getAuthority()))
++      }
++      if (uri != null) {
++        // canonicalize uri before comparing with this fs
++        uri = NetUtils.getCanonicalUri(uri, getDefaultPort());
++        thatAuthority = uri.getAuthority();
++        if (thisAuthority == thatAuthority ||       // authorities match
++            (thisAuthority != null && 
++             thisAuthority.equalsIgnoreCase(thatAuthority)))
+           return;
+       }
+     }
+diff --git a/src/core/org/apache/hadoop/net/NetUtils.java b/src/core/org/apache/hadoop/net/NetUtils.java
+index 2ee91ed..84405e3 100644
+--- a/src/core/org/apache/hadoop/net/NetUtils.java
++++ b/src/core/org/apache/hadoop/net/NetUtils.java
+@@ -27,11 +27,13 @@ import java.net.Socket;
+ import java.net.SocketAddress;
+ import java.net.SocketException;
+ import java.net.URI;
++import java.net.URISyntaxException;
+ import java.net.UnknownHostException;
+ import java.net.ConnectException;
+ import java.nio.channels.SocketChannel;
+ import java.util.Map.Entry;
+ import java.util.*;
++import java.util.concurrent.ConcurrentHashMap;
+ 
+ import javax.net.SocketFactory;
+ 
+@@ -360,9 +362,60 @@ public class NetUtils {
+   /**
+    * This is for testing only!
+    */
+-  static void setHostResolver(QualifiedHostResolver newResolver) {
++  static void setHostResolver(HostResolver newResolver) {
+     hostResolver = newResolver;
+   }
++  
++  /**
++   * Resolve the uri's hostname and add the default port if not in the uri
++   * @param uri to resolve
++   * @param defaultPort if none is given
++   * @return URI
++   * @throws UnknownHostException 
++   */
++  public static URI getCanonicalUri(URI uri, int defaultPort) {
++    // skip if there is no authority, ie. "file" scheme or relative uri
++    String host = uri.getHost();
++    if (host == null) {
++      return uri;
++    }
++    String fqHost = canonicalizeHost(host);
++    int port = uri.getPort();
++    // short out if already canonical with a port
++    if (host.equals(fqHost) && port != -1) {
++      return uri;
++    }
++    // reconstruct the uri with the canonical host and port
++    try {
++      uri = new URI(uri.getScheme(), uri.getUserInfo(),
++          fqHost, (port == -1) ? defaultPort : port,
++          uri.getPath(), uri.getQuery(), uri.getFragment());
++    } catch (URISyntaxException e) {
++      throw new IllegalArgumentException(e);
++    }
++    return uri;
++  }  
++
++  // cache the canonicalized hostnames;  the cache currently isn't expired,
++  // but the canonicals will only change if the host's resolver configuration
++  // changes
++  private static ConcurrentHashMap<String, String> canonicalizedHostCache =
++      new ConcurrentHashMap<String, String>();
++
++  private static String canonicalizeHost(String host) {
++    // check if the host has already been canonicalized
++    String fqHost = canonicalizedHostCache.get(host);
++    if (fqHost == null) {
++      try {
++        fqHost = hostResolver.getByName(host).getHostName();
++        // slight race condition, but won't hurt 
++        canonicalizedHostCache.put(host, fqHost);
++      } catch (UnknownHostException e) {
++        fqHost = host;
++      }
++    }
++    return fqHost;
++  }
+     
+   /**
+    * Handle the transition from pairs of attributes specifying a host and port
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+index 5afc102..593c141 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+@@ -87,43 +87,10 @@ public class DistributedFileSystem extends FileSystem {
+ 
+     InetSocketAddress namenode = NameNode.getAddress(uri.getAuthority());
+     this.dfs = new DFSClient(namenode, conf, statistics);
+-    this.uri = NameNode.getUri(namenode);
++    this.uri = URI.create(uri.getScheme()+"://"+uri.getAuthority());
+     this.workingDir = getHomeDirectory();
+   }
+ 
+-  /** Permit paths which explicitly specify the default port. */
+-  protected void checkPath(Path path) {
+-    URI thisUri = this.getUri();
+-    URI thatUri = path.toUri();
+-    String thatAuthority = thatUri.getAuthority();
+-    if (thatUri.getScheme() != null
+-        && thatUri.getScheme().equalsIgnoreCase(thisUri.getScheme())
+-        && thatUri.getPort() == NameNode.DEFAULT_PORT
+-        && thisUri.getPort() == -1
+-        && thatAuthority.substring(0,thatAuthority.indexOf(":"))
+-        .equalsIgnoreCase(thisUri.getAuthority()))
+-      return;
+-    super.checkPath(path);
+-  }
+-
+-  /** Normalize paths that explicitly specify the default port. */
+-  public Path makeQualified(Path path) {
+-    URI thisUri = this.getUri();
+-    URI thatUri = path.toUri();
+-    String thatAuthority = thatUri.getAuthority();
+-    if (thatUri.getScheme() != null
+-        && thatUri.getScheme().equalsIgnoreCase(thisUri.getScheme())
+-        && thatUri.getPort() == NameNode.DEFAULT_PORT
+-        && thisUri.getPort() == -1
+-        && thatAuthority.substring(0,thatAuthority.indexOf(":"))
+-        .equalsIgnoreCase(thisUri.getAuthority())) {
+-      path = new Path(thisUri.getScheme(), thisUri.getAuthority(),
+-                      thatUri.getPath());
+-    }
+-    return super.makeQualified(path);
+-  }
+-
+-
+   public Path getWorkingDirectory() {
+     return workingDir;
+   }
+diff --git a/src/test/org/apache/hadoop/fs/TestFileSystem.java b/src/test/org/apache/hadoop/fs/TestFileSystem.java
+index a7fcba7..6adfe67 100644
+--- a/src/test/org/apache/hadoop/fs/TestFileSystem.java
++++ b/src/test/org/apache/hadoop/fs/TestFileSystem.java
+@@ -18,35 +18,39 @@
+ 
+ package org.apache.hadoop.fs;
+ 
++import static org.mockito.Mockito.mock;
++
+ import java.io.DataInputStream;
+ import java.io.IOException;
+ import java.io.OutputStream;
++import java.net.InetSocketAddress;
++import java.net.URI;
+ import java.security.PrivilegedExceptionAction;
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collections;
+-import java.util.Random;
+-import java.util.List;
+-import java.util.ArrayList;
+-import java.util.Set;
++import java.util.HashMap;
+ import java.util.HashSet;
++import java.util.List;
+ import java.util.Map;
+-import java.util.HashMap;
+-import java.net.InetSocketAddress;
+-import java.net.URI;
++import java.util.Random;
++import java.util.Set;
+ 
+ import junit.framework.TestCase;
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.conf.Configured;
++import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.fs.shell.CommandFormat;
++import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.MiniDFSCluster;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+-import org.apache.hadoop.fs.shell.CommandFormat;
+ import org.apache.hadoop.io.LongWritable;
+ import org.apache.hadoop.io.SequenceFile;
++import org.apache.hadoop.io.SequenceFile.CompressionType;
+ import org.apache.hadoop.io.UTF8;
+ import org.apache.hadoop.io.WritableComparable;
+-import org.apache.hadoop.io.SequenceFile.CompressionType;
+ import org.apache.hadoop.mapred.FileInputFormat;
+ import org.apache.hadoop.mapred.FileOutputFormat;
+ import org.apache.hadoop.mapred.JobClient;
+@@ -56,13 +60,13 @@ import org.apache.hadoop.mapred.OutputCollector;
+ import org.apache.hadoop.mapred.Reporter;
+ import org.apache.hadoop.mapred.SequenceFileInputFormat;
+ import org.apache.hadoop.mapred.lib.LongSumReducer;
++import org.apache.hadoop.net.NetUtils;
++import org.apache.hadoop.net.NetUtilsTestResolver;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+-import java.security.PrivilegedAction;
+-import java.security.PrivilegedActionException;
+-import java.security.PrivilegedExceptionAction;
+-import static org.mockito.Mockito.mock;
++import org.apache.hadoop.util.Progressable;
++import org.junit.Test;
+ 
+ public class TestFileSystem extends TestCase {
+   private static final Log LOG = FileSystem.LOG;
+@@ -759,4 +763,343 @@ public class TestFileSystem extends TestCase {
+     });
+     assertNotSame(fsA, fsA1);
+   }
++  
++  // canonicalizing!
++
++  static String[] authorities = {
++    "myfs://host",
++    "myfs://host.a",
++    "myfs://host.a.b",
++  };
++
++  static String[] ips = {
++    "myfs://127.0.0.1"
++  };
++
++
++  @Test
++  public void testSetupResolver() throws Exception {
++    NetUtilsTestResolver.install();
++  }
++
++  // no ports
++
++  @Test
++  public void testShortAuthority() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://host", "myfs://host.a.b:123");
++    verifyPaths(fs, authorities, -1, true);
++    verifyPaths(fs, authorities, 123, true);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testPartialAuthority() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://host.a", "myfs://host.a.b:123");
++    verifyPaths(fs, authorities, -1, true);
++    verifyPaths(fs, authorities, 123, true);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testFullAuthority() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://host.a.b", "myfs://host.a.b:123");
++    verifyPaths(fs, authorities, -1, true);
++    verifyPaths(fs, authorities, 123, true);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  // with default ports
++  
++  @Test
++  public void testShortAuthorityWithDefaultPort() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://host:123", "myfs://host.a.b:123");
++    verifyPaths(fs, authorities, -1, true);
++    verifyPaths(fs, authorities, 123, true);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testPartialAuthorityWithDefaultPort() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://host.a:123", "myfs://host.a.b:123");
++    verifyPaths(fs, authorities, -1, true);
++    verifyPaths(fs, authorities, 123, true);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testFullAuthorityWithDefaultPort() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://host.a.b:123", "myfs://host.a.b:123");
++    verifyPaths(fs, authorities, -1, true);
++    verifyPaths(fs, authorities, 123, true);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  // with non-standard ports
++  
++  @Test
++  public void testShortAuthorityWithOtherPort() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://host:456", "myfs://host.a.b:456");
++    verifyPaths(fs, authorities, -1, false);
++    verifyPaths(fs, authorities, 123, false);
++    verifyPaths(fs, authorities, 456, true);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testPartialAuthorityWithOtherPort() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://host.a:456", "myfs://host.a.b:456");
++    verifyPaths(fs, authorities, -1, false);
++    verifyPaths(fs, authorities, 123, false);
++    verifyPaths(fs, authorities, 456, true);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testFullAuthorityWithOtherPort() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://host.a.b:456", "myfs://host.a.b:456");
++    verifyPaths(fs, authorities, -1, false);
++    verifyPaths(fs, authorities, 123, false);
++    verifyPaths(fs, authorities, 456, true);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  // ips
++  
++  @Test
++  public void testIpAuthority() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://127.0.0.1", "myfs://127.0.0.1:123");
++    verifyPaths(fs, authorities, -1, false);
++    verifyPaths(fs, authorities, 123, false);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, true);
++    verifyPaths(fs, ips, 123, true);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testIpAuthorityWithDefaultPort() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://127.0.0.1:123", "myfs://127.0.0.1:123");
++    verifyPaths(fs, authorities, -1, false);
++    verifyPaths(fs, authorities, 123, false);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, true);
++    verifyPaths(fs, ips, 123, true);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testIpAuthorityWithOtherPort() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://127.0.0.1:456", "myfs://127.0.0.1:456");
++    verifyPaths(fs, authorities, -1, false);
++    verifyPaths(fs, authorities, 123, false);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, true);
++  }
++
++  // bad stuff
++
++  @Test
++  public void testMismatchedSchemes() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs2://simple", "myfs2://simple:123");
++    verifyPaths(fs, authorities, -1, false);
++    verifyPaths(fs, authorities, 123, false);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testMismatchedHosts() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs://simple", "myfs://simple:123");
++    verifyPaths(fs, authorities, -1, false);
++    verifyPaths(fs, authorities, 123, false);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testNullAuthority() throws Exception {
++    FileSystem fs = getVerifiedFS("myfs:///", "myfs:///");
++    verifyPaths(fs, new String[]{ "myfs://" }, -1, true);
++    verifyPaths(fs, authorities, -1, false);
++    verifyPaths(fs, authorities, 123, false);
++    verifyPaths(fs, authorities, 456, false);
++    verifyPaths(fs, ips, -1, false);
++    verifyPaths(fs, ips, 123, false);
++    verifyPaths(fs, ips, 456, false);
++  }
++
++  @Test
++  public void testAuthorityFromDefaultFS() throws Exception {
++    Configuration config = new Configuration();
++    
++    FileSystem fs = getVerifiedFS("myfs://host", "myfs://host.a.b:123", config);
++    verifyPaths(fs, new String[]{ "myfs://" }, -1, false);
++
++    config.set(DFSConfigKeys.FS_DEFAULT_NAME_KEY, "myfs://host");
++    verifyPaths(fs, new String[]{ "myfs://" }, -1, true);
++
++    config.set(DFSConfigKeys.FS_DEFAULT_NAME_KEY, "myfs2://host");
++    verifyPaths(fs, new String[]{ "myfs://" }, -1, false);
++
++    config.set(DFSConfigKeys.FS_DEFAULT_NAME_KEY, "myfs://host:123");
++    verifyPaths(fs, new String[]{ "myfs://" }, -1, true);
++
++    config.set(DFSConfigKeys.FS_DEFAULT_NAME_KEY, "myfs://host:456");
++    verifyPaths(fs, new String[]{ "myfs://" }, -1, false);
++  }
++
++  FileSystem getVerifiedFS(String authority, String canonical) throws Exception {
++    return getVerifiedFS(authority, canonical, new Configuration());
++  }
++
++  // create a fs from the authority, then check its uri against the given uri
++  // and the canonical.  then try to fetch paths using the canonical
++  FileSystem getVerifiedFS(String authority, String canonical, Configuration conf)
++  throws Exception {
++    URI uri = URI.create(authority);
++    URI canonicalUri = URI.create(canonical);
++
++    FileSystem fs = new DummyFileSystem(uri, conf);
++    assertEquals(uri, fs.getUri());
++    assertEquals(canonicalUri, fs.getCanonicalUri());
++    verifyCheckPath(fs, "/file", true);
++    return fs;
++  }  
++  
++  void verifyPaths(FileSystem fs, String[] uris, int port, boolean shouldPass) {
++    for (String uri : uris) {
++      if (port != -1) uri += ":"+port;
++      verifyCheckPath(fs, uri+"/file", shouldPass);
++    }
++  }
++
++  void verifyCheckPath(FileSystem fs, String path, boolean shouldPass) {
++    Path rawPath = new Path(path);
++    Path fqPath = null;
++    Exception e = null;
++    try {
++      fqPath = fs.makeQualified(rawPath);
++    } catch (IllegalArgumentException iae) {
++      e = iae;
++    }
++    if (shouldPass) {
++      assertEquals(null, e);
++      String pathAuthority = rawPath.toUri().getAuthority();
++      if (pathAuthority == null) {
++        pathAuthority = fs.getUri().getAuthority();
++      }
++      assertEquals(pathAuthority, fqPath.toUri().getAuthority());
++    } else {
++      assertNotNull("did not fail", e);
++      assertEquals("Wrong FS: "+rawPath+", expected: "+fs.getUri(),
++          e.getMessage());
++    }
++  }
++    
++  static class DummyFileSystem extends FileSystem {
++    URI uri;
++    static int defaultPort = 123;
++
++    DummyFileSystem(URI uri, Configuration conf) throws IOException {
++      this.uri = uri;
++      setConf(conf);
++    }
++    
++    @Override
++    public URI getUri() {
++      return uri;
++    }
++
++    @Override
++    protected int getDefaultPort() {
++      return defaultPort;
++    }
++    
++    @Override
++    public FSDataInputStream open(Path f, int bufferSize) throws IOException {
++      throw new IOException("not supposed to be here");
++    }
++
++    @Override
++    public FSDataOutputStream create(Path f, FsPermission permission,
++        boolean overwrite, int bufferSize, short replication, long blockSize,
++        Progressable progress) throws IOException {
++      throw new IOException("not supposed to be here");
++    }
++
++    @Override
++    public FSDataOutputStream append(Path f, int bufferSize,
++        Progressable progress) throws IOException {
++      throw new IOException("not supposed to be here");
++    }
++
++    @Override
++    public boolean rename(Path src, Path dst) throws IOException {
++      throw new IOException("not supposed to be here");
++    }
++
++    @Override
++    public boolean delete(Path f) throws IOException {
++      throw new IOException("not supposed to be here");
++    }
++
++    @Override
++    public boolean delete(Path f, boolean recursive) throws IOException {
++      throw new IOException("not supposed to be here");
++    }
++
++    @Override
++    public FileStatus[] listStatus(Path f) throws IOException {
++      throw new IOException("not supposed to be here");
++    }
++
++    @Override
++    public void setWorkingDirectory(Path new_dir) {
++    }
++
++    @Override
++    public Path getWorkingDirectory() {
++      return new Path("/");
++    }
++
++    @Override
++    public boolean mkdirs(Path f, FsPermission permission) throws IOException {
++      throw new IOException("not supposed to be here");
++    }
++
++    @Override
++    public FileStatus getFileStatus(Path f) throws IOException {
++      throw new IOException("not supposed to be here");
++    }
++  }
+ }
+diff --git a/src/test/org/apache/hadoop/net/TestNetUtils.java b/src/test/org/apache/hadoop/net/TestNetUtils.java
+index 15f6b32..806fe9f 100644
+--- a/src/test/org/apache/hadoop/net/TestNetUtils.java
++++ b/src/test/org/apache/hadoop/net/TestNetUtils.java
+@@ -24,8 +24,8 @@ import org.junit.Test;
+ import static org.junit.Assert.*;
+ 
+ import java.io.IOException;
+-import java.net.InetAddress;
+ import java.net.ConnectException;
++import java.net.InetAddress;
+ import java.net.InetSocketAddress;
+ import java.net.ServerSocket;
+ import java.net.Socket;
+@@ -43,6 +43,18 @@ import org.apache.hadoop.conf.Configuration;
+ 
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.net.NetUtils.QualifiedHostResolver;
++=======
++import java.net.Socket;
++import java.net.SocketException;
++import java.net.URI;
++import java.net.UnknownHostException;
++
++import org.apache.commons.lang.StringUtils;
++import org.apache.hadoop.conf.Configuration;
++import org.junit.Before;
++import org.junit.BeforeClass;
++import org.junit.Test;
++>>>>>>> 88cc960... HDFS-2450. Filesystem supports path with both short names and FQDN. Contributed by Daryn Sharp.
+ 
+ 
+ public class TestNetUtils {
+@@ -153,21 +165,18 @@ public class TestNetUtils {
+         Math.abs(millis - expectedMillis) < TIME_FUDGE_MILLIS);
+   }
+ 
+-  static TestNetUtilsResolver resolver;
++  static NetUtilsTestResolver resolver;
++  static Configuration config;
+   
+   @BeforeClass
+   public static void setupResolver() {
+-    resolver = new TestNetUtilsResolver();
+-    resolver.setSearchDomains("a.b", "b", "c");
+-    resolver.addResolvedHost("host.a.b.", "1.1.1.1");
+-    resolver.addResolvedHost("b-host.b.", "2.2.2.2");
+-    resolver.addResolvedHost("simple.", "3.3.3.3");    
+-    NetUtils.setHostResolver(resolver);
++    resolver = NetUtilsTestResolver.install();
+   }
+   
+   @Before
+   public void resetResolver() {
+     resolver.reset();
++    config = new Configuration();
+   }
+ 
+   // getByExactName
+@@ -326,37 +335,79 @@ public class TestNetUtils {
+   }
+ 
+   //
+-
+-  static class TestNetUtilsResolver extends QualifiedHostResolver {
+-    Map<String, InetAddress> resolvedHosts = new HashMap<String, InetAddress>();
+-    List<String> hostSearches = new LinkedList<String>();
+     
+-    void addResolvedHost(String host, String ip) {
+-      InetAddress addr;
+-      try {
+-        addr = InetAddress.getByName(ip);
+-        addr = InetAddress.getByAddress(host, addr.getAddress());
+-      } catch (UnknownHostException e) {
+-        throw new IllegalArgumentException("not an ip:"+ip);
+-      }
+-      resolvedHosts.put(host, addr);
+-    }
++  @Test
++  public void testCanonicalUriWithPort() {
++    URI uri;
++
++    uri = NetUtils.getCanonicalUri(URI.create("scheme://host:123"), 456);
++    assertEquals("scheme://host.a.b:123", uri.toString());
++
++    uri = NetUtils.getCanonicalUri(URI.create("scheme://host:123/"), 456);
++    assertEquals("scheme://host.a.b:123/", uri.toString());
++
++    uri = NetUtils.getCanonicalUri(URI.create("scheme://host:123/path"), 456);
++    assertEquals("scheme://host.a.b:123/path", uri.toString());
++
++    uri = NetUtils.getCanonicalUri(URI.create("scheme://host:123/path?q#frag"), 456);
++    assertEquals("scheme://host.a.b:123/path?q#frag", uri.toString());
++  }
++
++  @Test
++  public void testCanonicalUriWithDefaultPort() {
++    URI uri;
+     
+-    InetAddress getInetAddressByName(String host) throws UnknownHostException {
+-      hostSearches.add(host);
+-      if (!resolvedHosts.containsKey(host)) {
+-        throw new UnknownHostException(host);
+-      }
+-      return resolvedHosts.get(host);
+-    }
++    uri = NetUtils.getCanonicalUri(URI.create("scheme://host"), 123);
++    assertEquals("scheme://host.a.b:123", uri.toString());
+ 
+-    String[] getHostSearches() {
+-      return hostSearches.toArray(new String[0]);
+-    }
++    uri = NetUtils.getCanonicalUri(URI.create("scheme://host/"), 123);
++    assertEquals("scheme://host.a.b:123/", uri.toString());
+ 
+-    void reset() {
+-      hostSearches.clear();
+-    }
++    uri = NetUtils.getCanonicalUri(URI.create("scheme://host/path"), 123);
++    assertEquals("scheme://host.a.b:123/path", uri.toString());
++
++    uri = NetUtils.getCanonicalUri(URI.create("scheme://host/path?q#frag"), 123);
++    assertEquals("scheme://host.a.b:123/path?q#frag", uri.toString());
++  }
++
++  @Test
++  public void testCanonicalUriWithPath() {
++    URI uri;
++
++    uri = NetUtils.getCanonicalUri(URI.create("path"), 2);
++    assertEquals("path", uri.toString());
++
++    uri = NetUtils.getCanonicalUri(URI.create("/path"), 2);
++    assertEquals("/path", uri.toString());
++  }
++
++  @Test
++  public void testCanonicalUriWithNoAuthority() {
++    URI uri;
++
++    uri = NetUtils.getCanonicalUri(URI.create("scheme:/"), 2);
++    assertEquals("scheme:/", uri.toString());
++
++    uri = NetUtils.getCanonicalUri(URI.create("scheme:/path"), 2);
++    assertEquals("scheme:/path", uri.toString());
++
++    uri = NetUtils.getCanonicalUri(URI.create("scheme:///"), 2);
++    assertEquals("scheme:///", uri.toString());
++
++    uri = NetUtils.getCanonicalUri(URI.create("scheme:///path"), 2);
++    assertEquals("scheme:///path", uri.toString());
++  }
++
++  @Test
++  public void testCanonicalUriWithNoHost() {
++    URI uri = NetUtils.getCanonicalUri(URI.create("scheme://:123/path"), 2);
++    assertEquals("scheme://:123/path", uri.toString());
++  }
++
++  @Test
++  public void testCanonicalUriWithNoPortNoDefaultPort() {
++    URI uri = NetUtils.getCanonicalUri(URI.create("scheme://host/path"), -1);
++    assertEquals("scheme://host.a.b/path", uri.toString());
+   }
+   
+   private <T> void assertBetterArrayEquals(T[] expect, T[]got) {
+-- 
+1.7.0.4
+

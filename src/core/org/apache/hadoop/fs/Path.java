@@ -318,8 +318,9 @@ public class Path implements Comparable {
     }
     return new Path(newUri);
   }
-  
+
   /** Returns a qualified path object. */
+  // TODO(todd) do we need this one?
   public Path makeQualified(URI defaultUri, Path workingDir ) {
     Path path = this;
     if (!isAbsolute()) {
@@ -355,5 +356,5 @@ public class Path implements Comparable {
       throw new IllegalArgumentException(e);
     }
     return new Path(newUri);
-  }
+   }
 }

@@ -26,6 +26,7 @@ typedef struct errno_mapping {
   char *errno_str;
 } errno_mapping_t;
 
+// Macro to define structs like {FOO, "FOO"} for each errno value
 #define MAPPING(x) {x, #x}
 static errno_mapping_t ERRNO_MAPPINGS[] = {
   MAPPING(EPERM),

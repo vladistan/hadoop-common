@@ -18,15 +18,21 @@
 
 package org.apache.hadoop.ipc;
 
-import org.apache.hadoop.metrics2.MetricsSource;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Method;
 
 import junit.framework.TestCase;
 
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.*;
 
@@ -34,15 +40,15 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.UTF8;
 import org.apache.hadoop.io.Writable;
-import org.apache.hadoop.ipc.metrics.RpcInstrumentation;
-import org.apache.hadoop.metrics2.MetricsRecordBuilder;
+
+import org.apache.hadoop.metrics.MetricsRecord;
+import org.apache.hadoop.metrics.spi.NullContext;
+import org.apache.hadoop.metrics.util.MetricsTimeVaryingRate;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.authorize.AuthorizationException;
 import org.apache.hadoop.security.authorize.PolicyProvider;
 import org.apache.hadoop.security.authorize.Service;
-import org.apache.hadoop.security.authorize.ServiceAuthorizationManager;
 import org.apache.hadoop.security.AccessControlException;
-import static org.apache.hadoop.test.MetricsAsserts.*;
 
 /** Unit tests for RPC. */
 public class TestRPC extends TestCase {
@@ -71,6 +77,7 @@ public class TestRPC extends TestCase {
     int error() throws IOException;
     void testServerGet() throws IOException;
     int[] exchange(int[] values) throws IOException;
+    String toString();
   }
 
   public static class TestImpl implements TestProtocol {
@@ -251,22 +258,24 @@ public class TestRPC extends TestCase {
     stringResult = proxy.echo((String)null);
     assertEquals(stringResult, null);
     
-    // Check rpcMetrics
-    RpcInstrumentation rpcMetrics = server.rpcMetrics;
-    MetricsRecordBuilder rb = getMetrics(rpcMetrics);
-
+    // Check rpcMetrics 
+    server.rpcMetrics.doUpdates(new NullContext());
+    
     // Number 4 includes getProtocolVersion()
-    assertCounter("RpcProcessingTime_num_ops", 4L, rb);
-    assertCounterGt("SentBytes", 0L, rb);
-    assertCounterGt("ReceivedBytes", 0L, rb);
-
-    MetricsSource detailed = rpcMetrics.detailed();
-    rb = getMetrics(detailed);
-    assertCounter("getProtocolVersion_num_ops", 1L, rb);
-    // Number of calls to ping method should be 1
-    assertCounter("ping_num_ops", 1L, rb);
+    assertEquals(4, server.rpcMetrics.rpcProcessingTime.getPreviousIntervalNumOps());
+    assertTrue(server.rpcMetrics.sentBytes.getPreviousIntervalValue() > 0);
+    assertTrue(server.rpcMetrics.receivedBytes.getPreviousIntervalValue() > 0);
+    
     // Number of calls to echo method should be 2
-    assertCounter("echo_num_ops", 2L, rb);
+    server.rpcDetailedMetrics.doUpdates(new NullContext());
+    MetricsTimeVaryingRate metrics = 
+      (MetricsTimeVaryingRate)server.rpcDetailedMetrics.registry.get("echo");
+    assertEquals(2, metrics.getPreviousIntervalNumOps());
+    
+    // Number of calls to ping method should be 1
+    metrics = 
+      (MetricsTimeVaryingRate)server.rpcDetailedMetrics.registry.get("ping");
+    assertEquals(1, metrics.getPreviousIntervalNumOps());
     
     String[] stringResults = proxy.echo(new String[]{"foo","bar"});
     assertTrue(Arrays.equals(stringResults, new String[]{"foo","bar"}));
@@ -356,16 +365,15 @@ public class TestRPC extends TestCase {
   }
   
   private void doRPCs(Configuration conf, boolean expectFailure) throws Exception {
-    ServiceAuthorizationManager.refresh(conf, new TestPolicyProvider());
-    
     Server server = RPC.getServer(new TestImpl(), ADDRESS, 0, 5, true, conf);
+
+    server.refreshServiceAcl(conf, new TestPolicyProvider());
 
     TestProtocol proxy = null;
 
     server.start();
 
     InetSocketAddress addr = NetUtils.getConnectAddress(server);
-    RpcInstrumentation rpcMetrics = server.getRpcMetrics();
     
     try {
       proxy = (TestProtocol)RPC.getProxy(
@@ -386,16 +394,23 @@ public class TestRPC extends TestCase {
       if (proxy != null) {
         RPC.stopProxy(proxy);
       }
-      MetricsRecordBuilder rb = getMetrics(rpcMetrics);
       if (expectFailure) {
-        assertCounter("rpcAuthorizationFailures", 1, rb);
+        assertEquals("Wrong number of authorizationFailures ", 1,  
+            server.getRpcMetrics().authorizationFailures
+            .getCurrentIntervalValue());
       } else {
-        assertCounter("rpcAuthorizationSuccesses", 1, rb);
+        assertEquals("Wrong number of authorizationSuccesses ", 1, 
+            server.getRpcMetrics().authorizationSuccesses
+            .getCurrentIntervalValue());
       }
       //since we don't have authentication turned ON, we should see 
       // 0 for the authentication successes and 0 for failure
-      assertCounter("rpcAuthenticationFailures", 0, rb);
-      assertCounter("rpcAuthenticationSuccesses", 0, rb);
+      assertEquals("Wrong number of authenticationFailures ", 0, 
+          server.getRpcMetrics().authenticationFailures
+          .getCurrentIntervalValue());
+      assertEquals("Wrong number of authenticationSuccesses ", 0, 
+          server.getRpcMetrics().authenticationSuccesses
+          .getCurrentIntervalValue());
     }
   }
   
@@ -411,27 +426,129 @@ public class TestRPC extends TestCase {
     // Reset authorization to expect failure
     conf.set(ACL_CONFIG, "invalid invalid");
     doRPCs(conf, true);
-
-    conf.setInt(CommonConfigurationKeys.IPC_SERVER_RPC_READ_THREADS_KEY, 2);
-    // Expect to succeed
-    conf.set(ACL_CONFIG, "*");
-    doRPCs(conf, false);
-    
-    // Reset authorization to expect failure
-    conf.set(ACL_CONFIG, "invalid invalid");
-    doRPCs(conf, true);
   }
- 
-   public void testNoPings() throws Exception {
-     Configuration conf = new Configuration();
+
+  public void testRPCInterrupted3() throws IOException, InterruptedException {
+    final Configuration conf = new Configuration();
+    Server server = RPC.getServer(
+      new TestImpl(), ADDRESS, 0, 5, true, conf);
+
+    server.start();
+
+    try {
+
+    int numConcurrentRPC = 200;
+    InetSocketAddress addr = NetUtils.getConnectAddress(server);
+    final CyclicBarrier barrier = new CyclicBarrier(numConcurrentRPC);
+    final CountDownLatch latch = new CountDownLatch(numConcurrentRPC);
+    final AtomicBoolean leaderRunning = new AtomicBoolean(true);
+    final AtomicReference<Throwable> error = new AtomicReference<Throwable>(null);
+    Thread leaderThread = null;
     
-     conf.setBoolean("ipc.client.ping", false);
-     new TestRPC("testnoPings").testCalls(conf);
+    for (int i = 0; i < numConcurrentRPC; i++) {
+      final int num = i;
+      final TestProtocol proxy = (TestProtocol) RPC.getProxy(
+      TestProtocol.class, TestProtocol.versionID, addr, conf);
+      Thread rpcThread = new Thread(new Runnable() {
+        @Override
+        public void run() {
+          try {
+            barrier.await();
+            while (num == 0 || leaderRunning.get()) {
+              proxy.slowPing(false);
+            }
+            
+            proxy.slowPing(false);
+          } catch (Exception e) {
+            if (num == 0) {
+              leaderRunning.set(false);
+            } else {
+              error.set(e);
+            }
+
+            LOG.error(e);
+          } finally {
+            latch.countDown();
+          }
+        }
+      });
+      rpcThread.start();
+
+      if (leaderThread == null) {
+       leaderThread = rpcThread;
+      }
+    }
+    // let threads get past the barrier
+    Thread.sleep(1000);
+
+    // stop a single thread
+    while (leaderRunning.get()) {
+      leaderThread.interrupt();
+    }
+
+    latch.await();
     
-     conf.setInt(CommonConfigurationKeys.IPC_SERVER_RPC_READ_THREADS_KEY, 2);
-     new TestRPC("testnoPings").testCalls(conf);
-   }
- 
+    // should not cause any other thread to get an error
+    assertNull("rpc got ClosedChannelException", error.get());
+
+    } finally {
+      server.stop();
+    }
+  }
+
+  public void testNoPings() throws Exception {
+    Configuration conf = new Configuration();
+   
+    conf.setBoolean("ipc.client.ping", false);
+    new TestRPC("testnoPings").testCalls(conf);
+   
+    conf.setInt(CommonConfigurationKeys.IPC_SERVER_RPC_READ_THREADS_KEY, 2);
+    new TestRPC("testnoPings").testCalls(conf);
+  }
+
+  /**
+   * Count the number of threads that have a stack frame containing
+   * the given string
+   */
+  private static int countThreads(String search) {
+    ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
+
+    int count = 0;
+    ThreadInfo[] infos = threadBean.getThreadInfo(threadBean.getAllThreadIds(), 20);
+    for (ThreadInfo info : infos) {
+      if (info == null) continue;
+      for (StackTraceElement elem : info.getStackTrace()) {
+        if (elem.getClassName().contains(search)) {
+          count++;
+          break;
+        }
+      }
+    }
+    return count;
+  }
+
+
+  /**
+   * Test that server.stop() properly stops all threads
+   */
+  public void testStopsAllThreads() throws Exception {
+    int threadsBefore = countThreads("Server$Listener$Reader");
+    assertEquals("Expect no Reader threads running before test",
+      0, threadsBefore);
+
+    final Server server = RPC.getServer(new TestImpl(), ADDRESS, 0, 2, false, conf);
+    server.start();
+    try {
+      int threadsRunning = countThreads("Server$Listener$Reader");
+      assertTrue(threadsRunning > 0);
+    } finally {
+      server.stop();
+    }
+    int threadsAfter = countThreads("Server$Listener$Reader");
+    assertEquals("Expect no Reader threads left running after test",
+      0, threadsAfter);
+  }
+  
   public void testErrorMsgForInsecureClient() throws Exception {
     final Server server = RPC.getServer(
         new TestImpl(), ADDRESS, 0, 5, true, conf, null);

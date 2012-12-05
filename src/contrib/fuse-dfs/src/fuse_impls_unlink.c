@@ -20,43 +20,51 @@
 #include "fuse_impls.h"
 #include "fuse_connect.h"
 #include "fuse_trash.h"
-extern const char *const TrashPrefixDir;
 
 int dfs_unlink(const char *path)
 {
-  TRACE1("unlink", path)
-
-  // retrieve dfs specific data
+  struct hdfsConn *conn = NULL;
+  hdfsFS fs;
+  int ret = 0;
   dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
 
-  // check params and the context var
+  TRACE1("unlink", path)
+
   assert(path);
   assert(dfs);
   assert('/' == *path);
 
   if (is_protected(path)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to delete a protected directory: %s ",path);
-    return -EACCES;
+    ERROR("Trying to delete protected directory %s", path);
+    ret = -EACCES;
+    goto cleanup;
   }
 
   if (dfs->read_only) {
-    syslog(LOG_ERR,"ERROR: hdfs is configured as read-only, cannot create the directory %s\n",path);
-    return -EACCES;
+    ERROR("HDFS configured read-only, cannot create directory %s", path);
+    ret = -EACCES;
+    goto cleanup;
   }
 
-  hdfsFS userFS;
-  // if not connected, try to connect and fail out if we can't.
-  if ((userFS = doConnectAsUser(dfs->nn_hostname,dfs->nn_port))== NULL) {
-    syslog(LOG_ERR, "ERROR: could not connect to dfs %s:%d\n", __FILE__, __LINE__);
-    return -EIO;
+  ret = fuseConnectAsThreadUid(&conn);
+  if (ret) {
+    fprintf(stderr, "fuseConnectAsThreadUid: failed to open a libhdfs "
+            "connection!  error %d.\n", ret);
+    ret = -EIO;
+    goto cleanup;
   }
+  fs = hdfsConnGetFs(conn);
 
-
-  if (hdfsDeleteWithTrash(userFS, path, dfs->usetrash)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to delete the file %s",path);
-    return -EIO;
+  if (hdfsDeleteWithTrash(fs, path, dfs->usetrash)) {
+    ERROR("Could not delete file %s", path);
+    ret = (errno > 0) ? -errno : -EIO;
+    goto cleanup;
   }
+  ret = 0;
 
-  return 0;
-
+cleanup:
+  if (conn) {
+    hdfsConnRelease(conn);
+  }
+  return ret;
 }

@@ -1,0 +1,33 @@
+From e62efb3ea519bc168706eeddef75deef9f8bde17 Mon Sep 17 00:00:00 2001
+From: Patrick Taylor Ramsey <ptr@cloudera.com>
+Date: Mon, 16 Jul 2012 11:33:52 -0700
+Subject: [PATCH 1310/1344] BIGTOP-675. fuse_dfs wrapper script(s) don't put configuration directory into CLASSPATH for fuse_dfs.
+
+The fuse_dfs wrapper script(s) don't seem to put the Hadoop
+configuration directory into the CLASSPATH for fuse_dfs. This results in
+fuse_dfs not having access to the configuration .xml files. This can
+result in bad scenarios like ignoring the default replication settings
+that the user has configured, or failure to set up security properly.
+
+Reason: Bug
+Author: Patrick Taylor Ramsey
+Ref: CDH-6769
+---
+ cloudera/install_hadoop.sh |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/cloudera/install_hadoop.sh b/cloudera/install_hadoop.sh
+index 54adfd8..7492e2d 100755
+--- a/cloudera/install_hadoop.sh
++++ b/cloudera/install_hadoop.sh
+@@ -243,6 +243,7 @@ fi
+ for i in \${HADOOP_HOME}/*.jar \${HADOOP_HOME}/lib/*.jar
+   do CLASSPATH+=\$i:
+ done
++CLASSPATH="\${HADOOP_HOME}/conf/:\${CLASSPATH}"
+ 
+ export PATH=\$PATH:\${HADOOP_HOME}/bin/
+ 
+-- 
+1.7.0.4
+

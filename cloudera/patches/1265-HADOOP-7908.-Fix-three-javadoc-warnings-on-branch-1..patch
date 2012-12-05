@@ -1,0 +1,57 @@
+From 6ade1c398b166358b894601d8199b2e444a1f00a Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@apache.org>
+Date: Sat, 10 Dec 2011 18:32:16 +0000
+Subject: [PATCH 1265/1344] HADOOP-7908. Fix three javadoc warnings on branch-1. Contributed by Eli Collins
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1212839 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 30284a3da74e7ee9e2f8e8aa713dfe0b09540566)
+
+Author: Eli Collins
+Ref: CDH-4806
+---
+ src/core/org/apache/hadoop/io/SequenceFile.java    |    1 -
+ src/core/org/apache/hadoop/util/ChecksumUtil.java  |    2 +-
+ .../org/apache/hadoop/mapred/QueueAclsInfo.java    |    2 +-
+ 3 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/io/SequenceFile.java b/src/core/org/apache/hadoop/io/SequenceFile.java
+index 7e0c485..9f95d12 100644
+--- a/src/core/org/apache/hadoop/io/SequenceFile.java
++++ b/src/core/org/apache/hadoop/io/SequenceFile.java
+@@ -419,7 +419,6 @@ public class SequenceFile {
+    * @param createParent create parent directory if non-existent
+    * @param compressionType The compression type.
+    * @param codec The compression codec.
+-   * @param progress The Progressable object to track progress.
+    * @param metadata The metadata of the file.
+    * @return Returns the handle to the constructed SequenceFile Writer.
+    * @throws IOException
+diff --git a/src/core/org/apache/hadoop/util/ChecksumUtil.java b/src/core/org/apache/hadoop/util/ChecksumUtil.java
+index b127dd9..82740d9 100644
+--- a/src/core/org/apache/hadoop/util/ChecksumUtil.java
++++ b/src/core/org/apache/hadoop/util/ChecksumUtil.java
+@@ -24,7 +24,7 @@ public class ChecksumUtil {
+    * updates the checksum for a buffer
+    * 
+    * @param buf - buffer to update the checksum in
+-   * @param chunkOff - offset in the buffer where the checksum is to update
++   * @param checksumOff - offset in the buffer where the checksum is to update
+    * @param dataOff - offset in the buffer of the data
+    * @param dataLen - length of data to compute checksum on
+    */
+diff --git a/src/mapred/org/apache/hadoop/mapred/QueueAclsInfo.java b/src/mapred/org/apache/hadoop/mapred/QueueAclsInfo.java
+index f9056e1..45722fe 100644
+--- a/src/mapred/org/apache/hadoop/mapred/QueueAclsInfo.java
++++ b/src/mapred/org/apache/hadoop/mapred/QueueAclsInfo.java
+@@ -46,7 +46,7 @@ class QueueAclsInfo implements Writable {
+    * queue operations array
+    * 
+    * @param queueName Name of the job queue
+-   * @param queue operations
++   * @param operations queue operations
+    * 
+    */
+   QueueAclsInfo(String queueName, String[] operations) {
+-- 
+1.7.0.4
+

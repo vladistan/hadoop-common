@@ -1,0 +1,758 @@
+From 7542864048287158d8f3885f2a66d97353b50e57 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Fri, 21 Oct 2011 00:28:35 +0000
+Subject: [PATCH 1248/1344] HDFS-2427. Change the default permission in webhdfs to 755 and add range check/validation for all parameters.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1187141 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit ee5bc7b20b857146c87c434ecd3fb90d3496f76b)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java |    1 +
+ .../apache/hadoop/hdfs/protocol/FSConstants.java   |    3 +-
+ .../web/resources/NamenodeWebHdfsMethods.java      |   10 +-
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |    4 +-
+ .../hadoop/hdfs/web/resources/AccessTimeParam.java |    2 +-
+ .../hadoop/hdfs/web/resources/BlockSizeParam.java  |    8 +-
+ .../hadoop/hdfs/web/resources/BufferSizeParam.java |    2 +-
+ .../hdfs/web/resources/DestinationParam.java       |   54 +++++
+ .../hadoop/hdfs/web/resources/DstPathParam.java    |   43 ----
+ .../hadoop/hdfs/web/resources/IntegerParam.java    |   25 ++-
+ .../hadoop/hdfs/web/resources/LengthParam.java     |    2 +-
+ .../hadoop/hdfs/web/resources/LongParam.java       |   24 ++-
+ .../hdfs/web/resources/ModificationTimeParam.java  |    2 +-
+ .../hadoop/hdfs/web/resources/OffsetParam.java     |    2 +-
+ .../hadoop/hdfs/web/resources/PermissionParam.java |   10 +-
+ .../hdfs/web/resources/ReplicationParam.java       |    2 +-
+ .../hadoop/hdfs/web/resources/ShortParam.java      |   25 ++-
+ .../hadoop/hdfs/web/resources/TestParam.java       |  225 ++++++++++++++++++++
+ 18 files changed, 374 insertions(+), 70 deletions(-)
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/DestinationParam.java
+ delete mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java
+ create mode 100644 src/test/org/apache/hadoop/hdfs/web/resources/TestParam.java
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+index f3af814..5815873 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+@@ -28,6 +28,7 @@ import org.apache.hadoop.fs.CommonConfigurationKeys;
+ 
+ public class DFSConfigKeys extends CommonConfigurationKeys {
+ 
++  public static final String  DFS_BLOCK_SIZE_KEY = "dfs.block.size";
+   public static final long    DFS_BLOCK_SIZE_DEFAULT = 64*1024*1024;
+   public static final String  DFS_REPLICATION_KEY = "dfs.replication";
+   public static final short   DFS_REPLICATION_DEFAULT = 3;
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/protocol/FSConstants.java b/src/hdfs/org/apache/hadoop/hdfs/protocol/FSConstants.java
+index 5617c1e..37bba24 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/protocol/FSConstants.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/protocol/FSConstants.java
+@@ -18,6 +18,7 @@
+ package org.apache.hadoop.hdfs.protocol;
+ 
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hdfs.DFSConfigKeys;
+ 
+ /************************************
+  * Some handy constants
+@@ -49,7 +50,7 @@ public interface FSConstants {
+   //Used for writing header etc.
+   public static final int SMALL_BUFFER_SIZE = Math.min(BUFFER_SIZE/2, 512);
+   //TODO mb@media-style.com: should be conf injected?
+-  public static final long DEFAULT_BLOCK_SIZE = 64 * 1024 * 1024;
++  public static final long DEFAULT_BLOCK_SIZE = DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT;
+   public static final int DEFAULT_DATA_SOCKET_SIZE = 128 * 1024;
+ 
+   public static final int SIZE_OF_INTEGER = Integer.SIZE / Byte.SIZE;
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index 7cbe1e0..a01ca96 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -63,7 +63,7 @@ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+ import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
+ import org.apache.hadoop.hdfs.web.resources.DelegationParam;
+ import org.apache.hadoop.hdfs.web.resources.DeleteOpParam;
+-import org.apache.hadoop.hdfs.web.resources.DstPathParam;
++import org.apache.hadoop.hdfs.web.resources.DestinationParam;
+ import org.apache.hadoop.hdfs.web.resources.GetOpParam;
+ import org.apache.hadoop.hdfs.web.resources.GroupParam;
+ import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
+@@ -192,8 +192,8 @@ public class NamenodeWebHdfsMethods {
+       @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
+       @QueryParam(PutOpParam.NAME) @DefaultValue(PutOpParam.DEFAULT)
+           final PutOpParam op,
+-      @QueryParam(DstPathParam.NAME) @DefaultValue(DstPathParam.DEFAULT)
+-          final DstPathParam dstPath,
++      @QueryParam(DestinationParam.NAME) @DefaultValue(DestinationParam.DEFAULT)
++          final DestinationParam destination,
+       @QueryParam(OwnerParam.NAME) @DefaultValue(OwnerParam.DEFAULT)
+           final OwnerParam owner,
+       @QueryParam(GroupParam.NAME) @DefaultValue(GroupParam.DEFAULT)
+@@ -216,7 +216,7 @@ public class NamenodeWebHdfsMethods {
+ 
+     if (LOG.isTraceEnabled()) {
+       LOG.trace(op + ": " + path + ", ugi=" + ugi
+-          + Param.toSortedString(", ", dstPath, owner, group, permission,
++          + Param.toSortedString(", ", destination, owner, group, permission,
+               overwrite, bufferSize, replication, blockSize,
+               modificationTime, accessTime));
+     }
+@@ -250,7 +250,7 @@ public class NamenodeWebHdfsMethods {
+     }
+     case RENAME:
+     {
+-      final boolean b = namenode.rename(fullpath, dstPath.getValue());
++      final boolean b = namenode.rename(fullpath, destination.getValue());
+       final String js = JsonUtil.toJsonString("boolean", b);
+       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
+     }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index d27c3ce..36fd910 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -59,7 +59,7 @@ import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
+ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+ import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
+ import org.apache.hadoop.hdfs.web.resources.DeleteOpParam;
+-import org.apache.hadoop.hdfs.web.resources.DstPathParam;
++import org.apache.hadoop.hdfs.web.resources.DestinationParam;
+ import org.apache.hadoop.hdfs.web.resources.GetOpParam;
+ import org.apache.hadoop.hdfs.web.resources.GroupParam;
+ import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
+@@ -375,7 +375,7 @@ public class WebHdfsFileSystem extends FileSystem
+     statistics.incrementWriteOps(1);
+     final HttpOpParam.Op op = PutOpParam.Op.RENAME;
+     final Map<String, Object> json = run(op, src,
+-        new DstPathParam(makeQualified(dst).toUri().getPath()));
++        new DestinationParam(makeQualified(dst).toUri().getPath()));
+     return (Boolean)json.get("boolean");
+   }
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java
+index 8d82131..9bc938d 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java
+@@ -31,7 +31,7 @@ public class AccessTimeParam extends LongParam {
+    * @param value the parameter value.
+    */
+   public AccessTimeParam(final Long value) {
+-    super(DOMAIN, value);
++    super(DOMAIN, value, -1L, null);
+   }
+ 
+   /**
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java
+index 5fc2666..4076746 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java
+@@ -17,8 +17,10 @@
+  */
+ package org.apache.hadoop.hdfs.web.resources;
+ 
++import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT;
++import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_KEY;
++
+ import org.apache.hadoop.conf.Configuration;
+-import org.apache.hadoop.hdfs.protocol.FSConstants;
+ 
+ /** Block size parameter. */
+ public class BlockSizeParam extends LongParam {
+@@ -34,7 +36,7 @@ public class BlockSizeParam extends LongParam {
+    * @param value the parameter value.
+    */
+   public BlockSizeParam(final Long value) {
+-    super(DOMAIN, value);
++    super(DOMAIN, value, 1L, null);
+   }
+ 
+   /**
+@@ -53,6 +55,6 @@ public class BlockSizeParam extends LongParam {
+   /** @return the value or, if it is null, return the default from conf. */
+   public long getValue(final Configuration conf) {
+     return getValue() != null? getValue()
+-        : conf.getLong("dfs.block.size", FSConstants.DEFAULT_BLOCK_SIZE);
++        : conf.getLong(DFS_BLOCK_SIZE_KEY, DFS_BLOCK_SIZE_DEFAULT);
+   }
+ }
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java
+index 0634642..f0a54bc 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java
+@@ -33,7 +33,7 @@ public class BufferSizeParam extends IntegerParam {
+    * @param value the parameter value.
+    */
+   public BufferSizeParam(final Integer value) {
+-    super(DOMAIN, value);
++    super(DOMAIN, value, 1, null);
+   }
+ 
+   /**
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DestinationParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DestinationParam.java
+new file mode 100644
+index 0000000..6759738
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DestinationParam.java
+@@ -0,0 +1,54 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import org.apache.hadoop.fs.Path;
++
++/** Destination path parameter. */
++public class DestinationParam extends StringParam {
++  /** Parameter name. */
++  public static final String NAME = "destination";
++  /** Default parameter value. */
++  public static final String DEFAULT = "";
++
++  private static final Domain DOMAIN = new Domain(NAME, null);
++
++  private static String validate(final String str) {
++    if (str == null || str.equals(DEFAULT)) {
++      return null;
++    }
++    if (!str.startsWith(Path.SEPARATOR)) {
++      throw new IllegalArgumentException("Invalid parameter value: " + NAME
++          + " = \"" + str + "\" is not an absolute path.");
++    }
++    return new Path(str).toUri().getPath();
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public DestinationParam(final String str) {
++    super(DOMAIN, validate(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java
+deleted file mode 100644
+index 5fa5245..0000000
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java
++++ /dev/null
+@@ -1,43 +0,0 @@
+-/**
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package org.apache.hadoop.hdfs.web.resources;
+-
+-import org.apache.hadoop.fs.Path;
+-
+-/** Destination path parameter. */
+-public class DstPathParam extends StringParam {
+-  /** Parameter name. */
+-  public static final String NAME = "dstpath";
+-  /** Default parameter value. */
+-  public static final String DEFAULT = "";
+-
+-  private static final Domain DOMAIN = new Domain(NAME, null);
+-
+-  /**
+-   * Constructor.
+-   * @param str a string representation of the parameter value.
+-   */
+-  public DstPathParam(final String str) {
+-    super(DOMAIN, str == null || str.equals(DEFAULT)? null: new Path(str).toUri().getPath());
+-  }
+-
+-  @Override
+-  public String getName() {
+-    return NAME;
+-  }
+-}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/IntegerParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/IntegerParam.java
+index 5e89087..b80b1a2 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/IntegerParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/IntegerParam.java
+@@ -19,8 +19,24 @@ package org.apache.hadoop.hdfs.web.resources;
+ 
+ /** Integer parameter. */
+ abstract class IntegerParam extends Param<Integer, IntegerParam.Domain> {
+-  IntegerParam(final Domain domain, final Integer value) {
++  IntegerParam(final Domain domain, final Integer value,
++      final Integer min, final Integer max) {
+     super(domain, value);
++    checkRange(min, max);
++  }
++
++  private void checkRange(final Integer min, final Integer max) {
++    if (value == null) {
++      return;
++    }
++    if (min != null && value < min) {
++      throw new IllegalArgumentException("Invalid parameter range: " + getName()
++          + " = " + domain.toString(value) + " < " + domain.toString(min));
++    }
++    if (max != null && value > max) {
++      throw new IllegalArgumentException("Invalid parameter range: " + getName()
++          + " = " + domain.toString(value) + " > " + domain.toString(max));
++    }
+   }
+   
+   @Override
+@@ -49,7 +65,12 @@ abstract class IntegerParam extends Param<Integer, IntegerParam.Domain> {
+ 
+     @Override
+     Integer parse(final String str) {
+-      return NULL.equals(str)? null: Integer.parseInt(str, radix);
++      try{
++        return NULL.equals(str)? null: Integer.parseInt(str, radix);
++      } catch(NumberFormatException e) {
++        throw new IllegalArgumentException("Failed to parse \"" + str
++            + "\" as a radix-" + radix + " integer.", e);
++      }
+     }
+ 
+     /** Convert an Integer to a String. */ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/LengthParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/LengthParam.java
+index 90d4f62..6c59ee5 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/LengthParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/LengthParam.java
+@@ -31,7 +31,7 @@ public class LengthParam extends LongParam {
+    * @param value the parameter value.
+    */
+   public LengthParam(final Long value) {
+-    super(DOMAIN, value);
++    super(DOMAIN, value, 0L, null);
+   }
+ 
+   /**
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/LongParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/LongParam.java
+index 8a3e0f5..023402c 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/LongParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/LongParam.java
+@@ -19,8 +19,23 @@ package org.apache.hadoop.hdfs.web.resources;
+ 
+ /** Long parameter. */
+ abstract class LongParam extends Param<Long, LongParam.Domain> {
+-  LongParam(final Domain domain, final Long value) {
++  LongParam(final Domain domain, final Long value, final Long min, final Long max) {
+     super(domain, value);
++    checkRange(min, max);
++  }
++
++  private void checkRange(final Long min, final Long max) {
++    if (value == null) {
++      return;
++    }
++    if (min != null && value < min) {
++      throw new IllegalArgumentException("Invalid parameter range: " + getName()
++          + " = " + domain.toString(value) + " < " + domain.toString(min));
++    }
++    if (max != null && value > max) {
++      throw new IllegalArgumentException("Invalid parameter range: " + getName()
++          + " = " + domain.toString(value) + " > " + domain.toString(max));
++    }
+   }
+   
+   @Override
+@@ -49,7 +64,12 @@ abstract class LongParam extends Param<Long, LongParam.Domain> {
+ 
+     @Override
+     Long parse(final String str) {
+-      return NULL.equals(str)? null: Long.parseLong(str, radix);
++      try {
++        return NULL.equals(str)? null: Long.parseLong(str, radix);
++      } catch(NumberFormatException e) {
++        throw new IllegalArgumentException("Failed to parse \"" + str
++            + "\" as a radix-" + radix + " long integer.", e);
++      }
+     }
+ 
+     /** Convert a Short to a String. */ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java
+index a0e38a9..59911d7 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java
+@@ -31,7 +31,7 @@ public class ModificationTimeParam extends LongParam {
+    * @param value the parameter value.
+    */
+   public ModificationTimeParam(final Long value) {
+-    super(DOMAIN, value);
++    super(DOMAIN, value, -1L, null);
+   }
+ 
+   /**
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/OffsetParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/OffsetParam.java
+index 8b3654d..6973787 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/OffsetParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/OffsetParam.java
+@@ -31,7 +31,7 @@ public class OffsetParam extends LongParam {
+    * @param value the parameter value.
+    */
+   public OffsetParam(final Long value) {
+-    super(DOMAIN, value);
++    super(DOMAIN, value, 0L, null);
+   }
+ 
+   /**
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PermissionParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PermissionParam.java
+index 264e602..1a672fe 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PermissionParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PermissionParam.java
+@@ -27,13 +27,15 @@ public class PermissionParam extends ShortParam {
+   public static final String DEFAULT = NULL;
+ 
+   private static final Domain DOMAIN = new Domain(NAME, 8);
++
++  private static final short DEFAULT_PERMISSION = 0755;
+   
+   /**
+    * Constructor.
+    * @param value the parameter value.
+    */
+   public PermissionParam(final FsPermission value) {
+-    super(DOMAIN, value == null? null: value.toShort());
++    super(DOMAIN, value == null? null: value.toShort(), null, null);
+   }
+ 
+   /**
+@@ -41,7 +43,7 @@ public class PermissionParam extends ShortParam {
+    * @param str a string representation of the parameter value.
+    */
+   public PermissionParam(final String str) {
+-    super(DOMAIN, DOMAIN.parse(str));
++    super(DOMAIN, DOMAIN.parse(str), (short)0, (short)0777);
+   }
+ 
+   @Override
+@@ -51,7 +53,7 @@ public class PermissionParam extends ShortParam {
+ 
+   /** @return the represented FsPermission. */
+   public FsPermission getFsPermission() {
+-    final Short mode = getValue();
+-    return mode == null? FsPermission.getDefault(): new FsPermission(mode);
++    final Short v = getValue();
++    return new FsPermission(v != null? v: DEFAULT_PERMISSION);
+   }
+ }
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ReplicationParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ReplicationParam.java
+index 1eee7ee..797709a 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ReplicationParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ReplicationParam.java
+@@ -36,7 +36,7 @@ public class ReplicationParam extends ShortParam {
+    * @param value the parameter value.
+    */
+   public ReplicationParam(final Short value) {
+-    super(DOMAIN, value);
++    super(DOMAIN, value, (short)1, null);
+   }
+ 
+   /**
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ShortParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ShortParam.java
+index af3e72f..c1749cf 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ShortParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ShortParam.java
+@@ -19,8 +19,24 @@ package org.apache.hadoop.hdfs.web.resources;
+ 
+ /** Short parameter. */
+ abstract class ShortParam extends Param<Short, ShortParam.Domain> {
+-  ShortParam(final Domain domain, final Short value) {
++  ShortParam(final Domain domain, final Short value,
++      final Short min, final Short max) {
+     super(domain, value);
++    checkRange(min, max);
++  }
++
++  private void checkRange(final Short min, final Short max) {
++    if (value == null) {
++      return;
++    }
++    if (min != null && value < min) {
++      throw new IllegalArgumentException("Invalid parameter range: " + getName()
++          + " = " + domain.toString(value) + " < " + domain.toString(min));
++    }
++    if (max != null && value > max) {
++      throw new IllegalArgumentException("Invalid parameter range: " + getName()
++          + " = " + domain.toString(value) + " > " + domain.toString(max));
++    }
+   }
+   
+   @Override
+@@ -49,7 +65,12 @@ abstract class ShortParam extends Param<Short, ShortParam.Domain> {
+ 
+     @Override
+     Short parse(final String str) {
+-      return NULL.equals(str)? null: Short.parseShort(str, radix);
++      try {
++        return NULL.equals(str)? null: Short.parseShort(str, radix);
++      } catch(NumberFormatException e) {
++        throw new IllegalArgumentException("Failed to parse \"" + str
++            + "\" as a radix-" + radix + " short integer.", e);
++      }
+     }
+ 
+     /** Convert a Short to a String. */ 
+diff --git a/src/test/org/apache/hadoop/hdfs/web/resources/TestParam.java b/src/test/org/apache/hadoop/hdfs/web/resources/TestParam.java
+new file mode 100644
+index 0000000..0ef308e
+--- /dev/null
++++ b/src/test/org/apache/hadoop/hdfs/web/resources/TestParam.java
+@@ -0,0 +1,225 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.hdfs.DFSConfigKeys;
++import org.junit.Assert;
++import org.junit.Test;
++
++public class TestParam {
++  public static final Log LOG = LogFactory.getLog(TestParam.class);
++
++  final Configuration conf = new Configuration();
++ 
++  @Test
++  public void testAccessTimeParam() {
++    final AccessTimeParam p = new AccessTimeParam(AccessTimeParam.DEFAULT);
++    Assert.assertEquals(-1L, p.getValue().longValue());
++
++    new AccessTimeParam(-1L);
++
++    try {
++      new AccessTimeParam(-2L);
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++  }
++
++  @Test
++  public void testBlockSizeParam() {
++    final BlockSizeParam p = new BlockSizeParam(BlockSizeParam.DEFAULT);
++    Assert.assertEquals(null, p.getValue());
++    Assert.assertEquals(
++        conf.getLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY,
++            DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT),
++        p.getValue(conf));
++
++    new BlockSizeParam(1L);
++
++    try {
++      new BlockSizeParam(0L);
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++  }
++
++  @Test
++  public void testBufferSizeParam() {
++    final BufferSizeParam p = new BufferSizeParam(BufferSizeParam.DEFAULT);
++    Assert.assertEquals(null, p.getValue());
++    Assert.assertEquals(
++        conf.getInt("io.file.buffer.size", 4096),
++        p.getValue(conf));
++
++    new BufferSizeParam(1);
++
++    try {
++      new BufferSizeParam(0);
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++  }
++
++  @Test
++  public void testDelegationParam() {
++    final DelegationParam p = new DelegationParam(DelegationParam.DEFAULT);
++    Assert.assertEquals(null, p.getValue());
++  }
++
++  @Test
++  public void testDestinationParam() {
++    final DestinationParam p = new DestinationParam(DestinationParam.DEFAULT);
++    Assert.assertEquals(null, p.getValue());
++
++    new DestinationParam("/abc");
++
++    try {
++      new DestinationParam("abc");
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++  }
++
++  @Test
++  public void testGroupParam() {
++    final GroupParam p = new GroupParam(GroupParam.DEFAULT);
++    Assert.assertEquals(null, p.getValue());
++  }
++
++  @Test
++  public void testModificationTimeParam() {
++    final ModificationTimeParam p = new ModificationTimeParam(ModificationTimeParam.DEFAULT);
++    Assert.assertEquals(-1L, p.getValue().longValue());
++
++    new ModificationTimeParam(-1L);
++
++    try {
++      new ModificationTimeParam(-2L);
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++  }
++
++  @Test
++  public void testOverwriteParam() {
++    final OverwriteParam p = new OverwriteParam(OverwriteParam.DEFAULT);
++    Assert.assertEquals(false, p.getValue());
++
++    new OverwriteParam("trUe");
++
++    try {
++      new OverwriteParam("abc");
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++  }
++
++  @Test
++  public void testOwnerParam() {
++    final OwnerParam p = new OwnerParam(OwnerParam.DEFAULT);
++    Assert.assertEquals(null, p.getValue());
++  }
++
++  @Test
++  public void testPermissionParam() {
++    final PermissionParam p = new PermissionParam(PermissionParam.DEFAULT);
++    Assert.assertEquals(new FsPermission((short)0755), p.getFsPermission());
++
++    new PermissionParam("0");
++
++    try {
++      new PermissionParam("-1");
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++
++    new PermissionParam("777");
++
++    try {
++      new PermissionParam("1000");
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++
++    try {
++      new PermissionParam("8");
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++
++    try {
++      new PermissionParam("abc");
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++  }
++
++  @Test
++  public void testRecursiveParam() {
++    final RecursiveParam p = new RecursiveParam(RecursiveParam.DEFAULT);
++    Assert.assertEquals(false, p.getValue());
++
++    new RecursiveParam("falSe");
++
++    try {
++      new RecursiveParam("abc");
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++  }
++
++  @Test
++  public void testRenewerParam() {
++    final RenewerParam p = new RenewerParam(RenewerParam.DEFAULT);
++    Assert.assertEquals(null, p.getValue());
++  }
++
++  @Test
++  public void testReplicationParam() {
++    final ReplicationParam p = new ReplicationParam(ReplicationParam.DEFAULT);
++    Assert.assertEquals(null, p.getValue());
++    Assert.assertEquals(
++        (short)conf.getInt(DFSConfigKeys.DFS_REPLICATION_KEY,
++            DFSConfigKeys.DFS_REPLICATION_DEFAULT),
++        p.getValue(conf));
++
++    new ReplicationParam((short)1);
++
++    try {
++      new ReplicationParam((short)0);
++      Assert.fail();
++    } catch(IllegalArgumentException e) {
++      LOG.info("EXPECTED: " + e);
++    }
++  }
++}
+-- 
+1.7.0.4
+

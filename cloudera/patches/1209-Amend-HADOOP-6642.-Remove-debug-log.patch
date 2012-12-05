@@ -1,0 +1,26 @@
+From 8f1440dbaf528508deaa7a51d2bd817c6f14a865 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Wed, 27 Jun 2012 10:20:51 -0700
+Subject: [PATCH 1209/1344] Amend HADOOP-6642. Remove debug log.
+
+Author: Eli Collins
+Ref: CDH-4806
+---
+ .../org/apache/hadoop/mapred/JobInProgress.java    |    1 -
+ 1 files changed, 0 insertions(+), 1 deletions(-)
+
+diff --git a/src/mapred/org/apache/hadoop/mapred/JobInProgress.java b/src/mapred/org/apache/hadoop/mapred/JobInProgress.java
+index aef270f..c9f51ea 100644
+--- a/src/mapred/org/apache/hadoop/mapred/JobInProgress.java
++++ b/src/mapred/org/apache/hadoop/mapred/JobInProgress.java
+@@ -327,7 +327,6 @@ public class JobInProgress {
+    * Create an almost empty JobInProgress, which can be used only for tests
+    */
+   protected JobInProgress(JobID jobid, JobConf conf, JobTracker tracker) {
+-    System.out.println("DEBUG3");
+     this.conf = conf;
+     this.jobId = jobid;
+     this.numMapTasks = conf.getNumMapTasks();
+-- 
+1.7.0.4
+

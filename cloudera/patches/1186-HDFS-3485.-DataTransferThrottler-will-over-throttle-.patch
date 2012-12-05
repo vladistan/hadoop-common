@@ -1,0 +1,142 @@
+From 1c315a48f320a76f4ca1884baf79e90ff776972a Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Fri, 8 Jun 2012 19:20:27 -0700
+Subject: [PATCH 1186/1344] HDFS-3485. DataTransferThrottler will over-throttle when currentTimeMillis jumps.
+
+When the system clock is set backwards, DataTransferThrottler will
+simply pause until the clock reaches the end of the previously
+calculated transfer period. Instead of using currentTimeMillis() which
+is affected by system-clock-changes, this code should use nanoTime which
+ticks forward monotonically.
+
+Author: Andy Isaacson
+Ref: CDH-6036
+---
+ .../org/apache/hadoop/hdfs/server/common/Util.java |   19 +++++++++++++++++--
+ .../hadoop/hdfs/util/DataTransferThrottler.java    |   12 +++++++-----
+ .../hdfs/server/datanode/TestBlockReplacement.java |   11 ++++++++---
+ 3 files changed, 32 insertions(+), 10 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/common/Util.java b/src/hdfs/org/apache/hadoop/hdfs/server/common/Util.java
+index 5e8de72..a7cff80 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/common/Util.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/common/Util.java
+@@ -19,10 +19,25 @@ package org.apache.hadoop.hdfs.server.common;
+ 
+ public final class Util {
+   /**
+-   * Current system time.
++   * Current system time.  Do not use this to calculate a duration or interval
++   * to sleep, because it will be broken by settimeofday.  Instead, use
++   * monotonicNow.
+    * @return current time in msec.
+    */
+   public static long now() {
+     return System.currentTimeMillis();
+   }
+-}
+\ No newline at end of file
++
++   /**
++   * Current time from some arbitrary time base in the past, counting in
++   * milliseconds, and not affected by settimeofday or similar system clock
++   * changes.  This is appropriate to use when computing how much longer to
++   * wait for an interval to expire.
++   * @return a monotonic clock that counts in milliseconds.
++   */
++  public static long monotonicNow() {
++    final long NANOSECONDS_PER_MILLISECOND = 1000000;
++
++    return System.nanoTime() / NANOSECONDS_PER_MILLISECOND;
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/util/DataTransferThrottler.java b/src/hdfs/org/apache/hadoop/hdfs/util/DataTransferThrottler.java
+index 8ef5701..d452205 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/util/DataTransferThrottler.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/util/DataTransferThrottler.java
+@@ -17,6 +17,8 @@
+  */
+ package org.apache.hadoop.hdfs.util;
+ 
++import static org.apache.hadoop.hdfs.server.common.Util.monotonicNow;
++
+ /** 
+  * a class to throttle the data transfers.
+  * This class is thread safe. It can be shared by multiple threads.
+@@ -26,9 +28,9 @@ package org.apache.hadoop.hdfs.util;
+ public class DataTransferThrottler {
+   private long period;          // period over which bw is imposed
+   private long periodExtension; // Max period over which bw accumulates.
+-  private long bytesPerPeriod; // total number of bytes can be sent in each period
+-  private long curPeriodStart; // current period starting time
+-  private long curReserve;     // remaining bytes can be sent in the period
++  private long bytesPerPeriod;  // total number of bytes can be sent in each period
++  private long curPeriodStart;  // current period starting time
++  private long curReserve;      // remaining bytes can be sent in the period
+   private long bytesAlreadyUsed;
+ 
+   /** Constructor 
+@@ -45,7 +47,7 @@ public class DataTransferThrottler {
+    * @param bandwidthPerSec bandwidth allowed in bytes per second. 
+    */
+   public DataTransferThrottler(long period, long bandwidthPerSec) {
+-    this.curPeriodStart = System.currentTimeMillis();
++    this.curPeriodStart = monotonicNow();
+     this.period = period;
+     this.curReserve = this.bytesPerPeriod = bandwidthPerSec*period/1000;
+     this.periodExtension = period*3;
+@@ -87,7 +89,7 @@ public class DataTransferThrottler {
+     bytesAlreadyUsed += numOfBytes;
+ 
+     while (curReserve <= 0) {
+-      long now = System.currentTimeMillis();
++      long now = monotonicNow();
+       long curPeriodEnd = curPeriodStart + period;
+ 
+       if ( now < curPeriodEnd ) {
+diff --git a/src/test/org/apache/hadoop/hdfs/server/datanode/TestBlockReplacement.java b/src/test/org/apache/hadoop/hdfs/server/datanode/TestBlockReplacement.java
+index a8b2282..9f3874f 100644
+--- a/src/test/org/apache/hadoop/hdfs/server/datanode/TestBlockReplacement.java
++++ b/src/test/org/apache/hadoop/hdfs/server/datanode/TestBlockReplacement.java
+@@ -27,8 +27,6 @@ import java.util.Arrays;
+ import java.util.List;
+ import java.util.Random;
+ 
+-import junit.framework.TestCase;
+-
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+@@ -49,14 +47,20 @@ import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.net.NetUtils;
+ 
++import org.junit.Test;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
+ /**
+  * This class tests if block replacement request to data nodes work correctly.
+  */
+-public class TestBlockReplacement extends TestCase {
++public class TestBlockReplacement {
+   private static final Log LOG = LogFactory.getLog(
+   "org.apache.hadoop.hdfs.TestBlockReplacement");
+ 
+   MiniDFSCluster cluster;
++  @Test
+   public void testThrottler() throws IOException {
+     Configuration conf = new Configuration();
+     FileSystem.setDefaultUri(conf, "hdfs://localhost:0");
+@@ -80,6 +84,7 @@ public class TestBlockReplacement extends TestCase {
+     assertTrue(totalBytes*1000/(end-start)<=bandwidthPerSec);
+   }
+   
++  @Test
+   public void testBlockReplacement() throws IOException {
+     final Configuration CONF = new Configuration();
+     final String[] INITIAL_RACKS = {"/RACK0", "/RACK1", "/RACK2"};
+-- 
+1.7.0.4
+

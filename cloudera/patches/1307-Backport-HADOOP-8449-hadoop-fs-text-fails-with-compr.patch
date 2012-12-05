@@ -1,0 +1,110 @@
+From 8dfded0062ded93d1440af466612a9391df02a1f Mon Sep 17 00:00:00 2001
+From: Harsh J <harsh@cloudera.com>
+Date: Wed, 11 Jul 2012 00:03:23 +0530
+Subject: [PATCH 1307/1344] Backport HADOOP-8449: hadoop fs -text fails with compressed sequence files with the codec file extension
+
+Reason: Customer Request
+Ref: CDH-6337
+Author: Harsh J
+---
+ src/core/org/apache/hadoop/fs/FsShell.java        |   26 +++++++++++++-------
+ src/test/org/apache/hadoop/hdfs/TestDFSShell.java |   25 +++++++++++++++++++-
+ 2 files changed, 41 insertions(+), 10 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/fs/FsShell.java b/src/core/org/apache/hadoop/fs/FsShell.java
+index 0750291..9413a45 100644
+--- a/src/core/org/apache/hadoop/fs/FsShell.java
++++ b/src/core/org/apache/hadoop/fs/FsShell.java
+@@ -396,24 +396,32 @@ public class FsShell extends Configured implements Tool {
+   private InputStream forMagic(Path p, FileSystem srcFs) throws IOException {
+     FSDataInputStream i = srcFs.open(p);
+ 
+-    // check codecs
+-    CompressionCodecFactory cf = new CompressionCodecFactory(getConf());
+-    CompressionCodec codec = cf.getCodec(p);
+-    if (codec != null) {
+-      return codec.createInputStream(i);
+-    }
+-
+     switch(i.readShort()) {
+-      case 0x1f8b: // RFC 1952
++      case 0x1f8b: { // RFC 1952
++        // Must be gzip
+         i.seek(0);
+         return new GZIPInputStream(i);
+-      case 0x5345: // 'S' 'E'
++      }
++      case 0x5345: { // 'S' 'E'
++        // Might be a SequenceFile
+         if (i.readByte() == 'Q') {
+           i.close();
+           return new TextRecordInputStream(srcFs.getFileStatus(p));
+         }
++      }
++      default: {
++        // Check the type of compression instead, depending on Codec class's
++        // own detection methods, based on the provided path.
++        CompressionCodecFactory cf = new CompressionCodecFactory(getConf());
++        CompressionCodec codec = cf.getCodec(p);
++        if (codec != null) {
++          return codec.createInputStream(i);
++        }
+         break;
++      }
+     }
++
++    // File is non-compressed, or not a file container we know.
+     i.seek(0);
+     return i;
+   }
+diff --git a/src/test/org/apache/hadoop/hdfs/TestDFSShell.java b/src/test/org/apache/hadoop/hdfs/TestDFSShell.java
+index 7aaa852..64ca199 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestDFSShell.java
++++ b/src/test/org/apache/hadoop/hdfs/TestDFSShell.java
+@@ -48,6 +48,9 @@ import org.apache.hadoop.hdfs.protocol.Block;
+ import org.apache.hadoop.hdfs.server.datanode.DataNode;
+ import org.apache.hadoop.hdfs.server.datanode.FSDataset;
+ import org.apache.hadoop.io.IOUtils;
++import org.apache.hadoop.io.SequenceFile;
++import org.apache.hadoop.io.SequenceFile.CompressionType;
++import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.util.StringUtils;
+ import org.apache.hadoop.util.ToolRunner;
+@@ -567,12 +570,32 @@ public class TestDFSShell extends TestCase {
+       argv[0] = "-text";
+       argv[1] = new Path(root, "file.gz").toUri().getPath();
+       int ret = ToolRunner.run(new FsShell(), argv);
+-      assertTrue("-text returned -1", 0 >= ret);
+       file.reset();
+       out.reset();
++      assertTrue("-text returned -1", 0 >= ret);
+       assertTrue("Output doesn't match input",
+           Arrays.equals(file.toByteArray(), out.toByteArray()));
+ 
++      // Create a sequence file with a gz extension, to test proper
++      // container detection
++      SequenceFile.Writer writer = SequenceFile.createWriter(
++          fs,
++          conf,
++          new Path(root, "file.gz"),
++          Text.class,
++          Text.class);
++      writer.append(new Text("Foo"), new Text("Bar"));
++      writer.close();
++      out = new ByteArrayOutputStream();
++      System.setOut(new PrintStream(out));
++      argv = new String[2];
++      argv[0] = "-text";
++      argv[1] = new Path(root, "file.gz").toUri().getPath();
++      ret = ToolRunner.run(new FsShell(conf), argv);
++      assertEquals("'-text " + argv[1] + " returned " + ret, 0, ret);
++      assertTrue("Output doesn't match input",
++        Arrays.equals("Foo\tBar\n".getBytes(), out.toByteArray()));
++      out.reset();
+     } finally {
+       if (null != bak) {
+         System.setOut(bak);
+-- 
+1.7.0.4
+

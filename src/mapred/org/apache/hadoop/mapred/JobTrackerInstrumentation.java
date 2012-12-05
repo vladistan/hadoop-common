@@ -17,14 +17,7 @@
  */
 package org.apache.hadoop.mapred;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.metrics2.MetricsSystem;
-import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
-
 class JobTrackerInstrumentation {
-  private static final Log LOG =
-      LogFactory.getLog(JobTrackerInstrumentation.class);
 
   protected final JobTracker tracker;
   
@@ -164,26 +157,9 @@ class JobTrackerInstrumentation {
   public void decBlackListedTrackers(int trackers)
   { }
 
-  public void addGrayListedTrackers(int trackers)
-  { }
-
-  public void decGrayListedTrackers(int trackers)
-  { }
-
   public void setDecommissionedTrackers(int trackers)
   { }   
 
   public void heartbeat() {
   }
-
-  static JobTrackerInstrumentation create(JobTracker jt, JobConf conf) {
-    return create(jt, conf, DefaultMetricsSystem.INSTANCE);
-  }
-
-  static JobTrackerInstrumentation create(JobTracker jt, JobConf conf,
-                                          MetricsSystem ms) {
-    return ms.register("JobTrackerMetrics", "JobTracker metrics",
-                       new JobTrackerMetricsSource(jt, conf));
-  }
-
 }

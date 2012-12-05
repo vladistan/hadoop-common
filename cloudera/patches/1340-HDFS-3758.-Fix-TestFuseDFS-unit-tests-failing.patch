@@ -1,0 +1,119 @@
+From 580d1d26c7ad6a7c6ba72950d8605e2c6fbc96cc Mon Sep 17 00:00:00 2001
+From: Colin Patrick Mccabe <cmccabe@cloudera.com>
+Date: Mon, 6 Aug 2012 14:43:33 -0700
+Subject: [PATCH 1340/1344] HDFS-3758. Fix TestFuseDFS unit tests failing.
+
+TestFuseDFS has two bugs:
+- There is a race condition between mounting the filesystem and testing it
+- It doesn't clear the mount directory before it tries to mount there
+
+Reason: bug
+Ref: CDH-6950.
+Author: Colin Patrick McCabe
+---
+ src/contrib/fuse-dfs/src/test/TestFuseDFS.java |   53 +++++++++++++++++++++---
+ 1 files changed, 47 insertions(+), 6 deletions(-)
+
+diff --git a/src/contrib/fuse-dfs/src/test/TestFuseDFS.java b/src/contrib/fuse-dfs/src/test/TestFuseDFS.java
+index eb46d2c..1626994 100644
+--- a/src/contrib/fuse-dfs/src/test/TestFuseDFS.java
++++ b/src/contrib/fuse-dfs/src/test/TestFuseDFS.java
+@@ -44,6 +44,7 @@ public class TestFuseDFS {
+ 
+   private static MiniDFSCluster cluster;
+   private static FileSystem fs;
++  private static Process fuseProcess;
+   private static Runtime r;
+   private static String mountPoint;
+ 
+@@ -137,8 +138,28 @@ public class TestFuseDFS {
+     assertEquals("File content differs", expectedContents, s);
+   }
+ 
++  private static class RedirectToStdoutThread extends Thread {
++    private InputStream is;
++
++    RedirectToStdoutThread(InputStream is) {
++      this.is = is;
++    }
++    public void run() {
++      try {
++        InputStreamReader isr = new InputStreamReader(is);
++        BufferedReader br = new BufferedReader(isr);
++        String line=null;
++        while ( (line = br.readLine()) != null) {
++          LOG.error("FUSE_LINE:" + line);
++        }
++      } catch (IOException e) {
++        e.printStackTrace();
++      }
++    }
++  }
++
+   /** Run a fuse-dfs process to mount the given DFS */
+-  private static void establishMount(URI uri) throws IOException  {
++  private static Process establishMount(URI uri) throws IOException  {
+     Runtime r = Runtime.getRuntime();
+     String cp = System.getProperty("java.class.path");
+ 
+@@ -163,6 +184,8 @@ public class TestFuseDFS {
+       "-obig_writes",            // Allow >4kb writes
+       "-oentry_timeout=0.1",     // Don't cache dents long
+       "-oattribute_timeout=0.1", // Don't cache attributes long
++      "-ononempty",              // Don't complain about junk in mount point
++      "-f",                      // Don't background the process
+       "-ordbuffer=32768",        // Read buffer size in kb
+       "rw"
+     };
+@@ -178,17 +201,35 @@ public class TestFuseDFS {
+     execAssertSucceeds("mkdir -p " + mountPoint);
+ 
+     // Mount the mini cluster
++    String cmdStr = "";
++    for (String c : mountCmd) {
++      cmdStr += (" " + c);
++    }
++    LOG.info("now mounting with:" + cmdStr);
++    Process fuseProcess = r.exec(mountCmd, env);
++    RedirectToStdoutThread stdoutThread =
++      new RedirectToStdoutThread(fuseProcess.getInputStream());
++    RedirectToStdoutThread stderrThread =
++      new RedirectToStdoutThread(fuseProcess.getErrorStream());
++    stdoutThread.start();
++    stderrThread.start();
++    // Wait for fusermount to start up, so that we know we're operating on the
++    // FUSE FS when we run the tests.
+     try {
+-      Process fuseProcess = r.exec(mountCmd, env);
+-      assertEquals(0, fuseProcess.waitFor());
+-    } catch (InterruptedException ie) {
+-      fail("Failed to mount");
++      Thread.sleep(50000);
++    } catch (InterruptedException e) {
+     }
++    return fuseProcess;
+   }
+ 
+   /** Tear down the fuse-dfs process and mount */
+   private static void teardownMount() throws IOException {
+     execWaitRet("fusermount -u " + mountPoint);
++    try {
++      assertEquals(0, fuseProcess.waitFor()); // fuse_dfs should exit cleanly
++    } catch (InterruptedException e) {
++      fail("interrupted while waiting for fuse_dfs process to exit.");
++    }
+   }
+ 
+   @BeforeClass
+@@ -200,7 +241,7 @@ public class TestFuseDFS {
+     cluster = new MiniDFSCluster(conf, 1, true, null);
+     cluster.waitClusterUp();
+     fs = cluster.getFileSystem();
+-    establishMount(fs.getUri());
++    fuseProcess = establishMount(fs.getUri());
+   }
+ 
+   @AfterClass
+-- 
+1.7.0.4
+

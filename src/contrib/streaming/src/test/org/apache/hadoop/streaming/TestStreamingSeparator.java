@@ -86,7 +86,7 @@ public class TestStreamingSeparator extends TestCase
     };
   }
   
-  public void testCommandLine()
+  public void testCommandLine() throws Exception
   {
     try {
       try {
@@ -107,23 +107,10 @@ public class TestStreamingSeparator extends TestCase
       System.err.println("outEx1=" + outputExpect);
       System.err.println("  out1=" + output);
       assertEquals(outputExpect, output);
-    } catch(Exception e) {
-      failTrace(e);
     } finally {
-      try {
-        INPUT_FILE.delete();
-        FileUtil.fullyDelete(OUTPUT_DIR.getAbsoluteFile());
-      } catch(Exception e) {
-        failTrace(e);
-      }
+      INPUT_FILE.delete();
+      FileUtil.fullyDelete(OUTPUT_DIR.getAbsoluteFile());
     }
-  }
-
-  private void failTrace(Exception e)
-  {
-    StringWriter sw = new StringWriter();
-    e.printStackTrace(new PrintWriter(sw));
-    fail(sw.toString());
   }
 
   public static void main(String[]args) throws Exception

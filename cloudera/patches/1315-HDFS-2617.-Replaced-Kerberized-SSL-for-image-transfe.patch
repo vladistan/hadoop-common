@@ -1,0 +1,892 @@
+From 037f4035327e22b23a092429e13f3a627b85241e Mon Sep 17 00:00:00 2001
+From: Aaron T. Myers <atm@cloudera.com>
+Date: Fri, 20 Jul 2012 13:20:40 -0700
+Subject: [PATCH 1315/1344] HDFS-2617. Replaced Kerberized SSL for image transfer and fsck with
+ SPNEGO-based solution.
+
+Reason: Improvement
+Author: Jakob Homan, Owen O'Malley, Alejandro Abdelnur and Aaron T. Myers
+Ref: CDH-5634
+---
+ src/core/core-default.xml                          |   11 ++
+ .../apache/hadoop/fs/CommonConfigurationKeys.java  |    4 +
+ src/core/org/apache/hadoop/http/HttpServer.java    |   26 ++++--
+ .../org/apache/hadoop/security/SecurityUtil.java   |   49 +++++++++-
+ src/hdfs/hdfs-default.xml                          |   10 ++
+ src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java |    2 +
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |   25 +++--
+ .../hdfs/server/namenode/GetImageServlet.java      |    9 +-
+ .../hadoop/hdfs/server/namenode/NameNode.java      |  110 ++++++++++++--------
+ .../hdfs/server/namenode/SecondaryNameNode.java    |   98 +++++++++++++-----
+ .../hdfs/server/namenode/TransferFsImage.java      |   15 +--
+ src/hdfs/org/apache/hadoop/hdfs/tools/DFSck.java   |   21 ++--
+ .../hadoop/hdfs/tools/DelegationTokenFetcher.java  |   24 ++---
+ 13 files changed, 281 insertions(+), 123 deletions(-)
+
+diff --git a/src/core/core-default.xml b/src/core/core-default.xml
+index 7431b28..150a545 100644
+--- a/src/core/core-default.xml
++++ b/src/core/core-default.xml
+@@ -72,6 +72,17 @@
+   </description>
+ </property>
+ 
++<property>
++  <name>hadoop.security.use-weak-http-crypto</name>
++  <value>true</value>
++  <description>If enabled, use KSSL to authenticate HTTP connections to the
++  NameNode. Due to a bug in JDK6, using KSSL requires one to configure
++  Kerberos tickets to use encryption types that are known to be
++  cryptographically weak. If disabled, SPNEGO will be used for HTTP
++  authentication, which supports stronger encryption types.
++  </description>
++</property>
++
+ <!--
+ <property>
+   <name>hadoop.security.service.user.name.key</name>
+diff --git a/src/core/org/apache/hadoop/fs/CommonConfigurationKeys.java b/src/core/org/apache/hadoop/fs/CommonConfigurationKeys.java
+index 03a9708..b053e72 100644
+--- a/src/core/org/apache/hadoop/fs/CommonConfigurationKeys.java
++++ b/src/core/org/apache/hadoop/fs/CommonConfigurationKeys.java
+@@ -50,6 +50,10 @@ public class CommonConfigurationKeys {
+     "hadoop.security.token.service.use_ip";
+   public static final boolean HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT =
+       true;
++  public static final String HADOOP_SECURITY_USE_WEAK_HTTP_CRYPTO_KEY =
++      "hadoop.security.use-weak-http-crypto";
++  public static final boolean HADOOP_SECURITY_USE_WEAK_HTTP_CRYPTO_DEFAULT =
++      true;
+   
+   public static final String IPC_SERVER_RPC_READ_THREADS_KEY =
+                                         "ipc.server.read.threadpool.size";
+diff --git a/src/core/org/apache/hadoop/http/HttpServer.java b/src/core/org/apache/hadoop/http/HttpServer.java
+index 4b7c3ca..53dcafa 100644
+--- a/src/core/org/apache/hadoop/http/HttpServer.java
++++ b/src/core/org/apache/hadoop/http/HttpServer.java
+@@ -51,7 +51,9 @@ import org.apache.hadoop.log.LogLevel;
+ import org.apache.hadoop.metrics.MetricsServlet;
+ import org.apache.hadoop.security.Krb5AndCertsSslSocketConnector;
+ import org.apache.hadoop.security.Krb5AndCertsSslSocketConnector.MODE;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
++import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
+ import org.apache.hadoop.security.authorize.AccessControlList;
+ import org.apache.hadoop.util.ReflectionUtils;
+ 
+@@ -94,6 +96,8 @@ public class HttpServer implements FilterContainer {
+   // gets stored.
+   public static final String CONF_CONTEXT_ATTRIBUTE = "hadoop.conf";
+   static final String ADMINS_ACL = "admins.acl";
++  public static final String SPNEGO_FILTER = "SpnegoFilter";
++  public static final String KRB5_FILTER = "krb5Filter";
+ 
+   public static final String BIND_ADDRESS = "bind.address";
+ 
+@@ -178,7 +182,7 @@ public class HttpServer implements FilterContainer {
+ 
+     addDefaultApps(contexts, appDir);
+     
+-    defineFilter(webAppContext, "krb5Filter", 
++    defineFilter(webAppContext, KRB5_FILTER, 
+         Krb5AndCertsSslSocketConnector.Krb5SslFilter.class.getName(), 
+         null, null);
+     
+@@ -333,7 +337,7 @@ public class HttpServer implements FilterContainer {
+    */
+   public void addServlet(String name, String pathSpec,
+       Class<? extends HttpServlet> clazz) {
+-    addInternalServlet(name, pathSpec, clazz, false);
++    addInternalServlet(name, pathSpec, clazz, false, false);
+     addFilterPathMapping(pathSpec, webAppContext);
+   }
+ 
+@@ -347,7 +351,7 @@ public class HttpServer implements FilterContainer {
+   @Deprecated
+   public void addInternalServlet(String name, String pathSpec,
+       Class<? extends HttpServlet> clazz) {
+-    addInternalServlet(name, pathSpec, clazz, false);
++    addInternalServlet(name, pathSpec, clazz, false, false);
+   }
+ 
+   /**
+@@ -355,15 +359,18 @@ public class HttpServer implements FilterContainer {
+    * protect with Kerberos authentication. 
+    * Note: This method is to be used for adding servlets that facilitate
+    * internal communication and not for user facing functionality. For
+-   * servlets added using this method, filters (except internal Kerberized
++   * servlets added using this method, filters (except internal Kerberos
+    * filters) are not enabled. 
+    * 
+    * @param name The name of the servlet (can be passed as null)
+    * @param pathSpec The path spec for the servlet
+    * @param clazz The servlet class
++   * @param requireAuth Require Kerberos authenticate to access servlet
++   * @param useKsslForAuth true to use KSSL for auth, false to use SPNEGO
+    */
+   public void addInternalServlet(String name, String pathSpec, 
+-      Class<? extends HttpServlet> clazz, boolean requireAuth) {
++      Class<? extends HttpServlet> clazz, boolean requireAuth,
++      boolean useKsslForAuth) {
+     ServletHolder holder = new ServletHolder(clazz);
+     if (name != null) {
+       holder.setName(name);
+@@ -371,11 +378,16 @@ public class HttpServer implements FilterContainer {
+     webAppContext.addServlet(holder, pathSpec);
+     
+     if(requireAuth && UserGroupInformation.isSecurityEnabled()) {
+-       LOG.info("Adding Kerberos filter to " + name);
+        ServletHandler handler = webAppContext.getServletHandler();
+        FilterMapping fmap = new FilterMapping();
+        fmap.setPathSpec(pathSpec);
+-       fmap.setFilterName("krb5Filter");
++       if (useKsslForAuth) {
++         LOG.info("Adding Kerberos (KSSL) filter to " + name);
++         fmap.setFilterName(KRB5_FILTER);
++       } else {
++         LOG.info("Adding Kerberos (SPNEGO) filter to " + name);
++         fmap.setFilterName(SPNEGO_FILTER);
++       }
+        fmap.setDispatches(Handler.ALL);
+        handler.addFilterMapping(fmap);
+     }
+diff --git a/src/core/org/apache/hadoop/security/SecurityUtil.java b/src/core/org/apache/hadoop/security/SecurityUtil.java
+index 01537b8..e499e09 100644
+--- a/src/core/org/apache/hadoop/security/SecurityUtil.java
++++ b/src/core/org/apache/hadoop/security/SecurityUtil.java
+@@ -21,6 +21,7 @@ import java.net.InetAddress;
+ import java.net.InetSocketAddress;
+ import java.net.URI;
+ import java.net.URL;
++import java.net.URLConnection;
+ import java.net.UnknownHostException;
+ import java.util.Arrays;
+ import java.util.List;
+@@ -35,6 +36,8 @@ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.CommonConfigurationKeys;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.net.NetUtils;
++import org.apache.hadoop.security.authentication.client.AuthenticatedURL;
++import org.apache.hadoop.security.authentication.client.AuthenticationException;
+ import org.apache.hadoop.security.authorize.AccessControlList;
+ import org.apache.hadoop.security.token.Token;
+ 
+@@ -53,12 +56,19 @@ public class SecurityUtil {
+   // by the user; visible for testing
+   static boolean useIpForTokenService;
+   static HostResolver hostResolver;
++
++  private static final boolean useKsslAuth;
+   
+   static {
+-    boolean useIp = new Configuration().getBoolean(
++    Configuration conf = new Configuration();
++    boolean useIp = conf.getBoolean(
+       CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP,
+       CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT);
+     setTokenServiceUseIp(useIp);
++
++    useKsslAuth = conf.getBoolean(
++        CommonConfigurationKeys.HADOOP_SECURITY_USE_WEAK_HTTP_CRYPTO_KEY,
++        CommonConfigurationKeys.HADOOP_SECURITY_USE_WEAK_HTTP_CRYPTO_DEFAULT);
+   }
+   
+   /**
+@@ -349,8 +359,45 @@ public class SecurityUtil {
+   public static String getHostFromPrincipal(String principalName) {
+     return new KerberosName(principalName).getHostName();
+   }
++
++  /**
++   * @return true if we should use KSSL to authenticate NN HTTP endpoints,
++   *         false to use SPNEGO or if security is disabled.
++   */
++  public static boolean useKsslAuth() {
++    return UserGroupInformation.isSecurityEnabled() && useKsslAuth;
++  }
+   
+   /**
++   * Open a (if need be) secure connection to a URL in a secure environment
++   * that is using SPNEGO or KSSL to authenticate its URLs. All Namenode and
++   * Secondary Namenode URLs that are protected via SPNEGO or KSSL should be
++   * accessed via this method.
++   *
++   * @param url to authenticate via SPNEGO.
++   * @return A connection that has been authenticated via SPNEGO
++   * @throws IOException If unable to authenticate via SPNEGO
++   */
++  public static URLConnection openSecureHttpConnection(URL url)
++      throws IOException {
++    if (useKsslAuth) {
++      // Avoid Krb bug with cross-realm hosts
++      fetchServiceTicket(url);
++    }
++    if (!UserGroupInformation.isSecurityEnabled() || useKsslAuth) {
++      return url.openConnection();
++    } else {
++      AuthenticatedURL.Token token = new AuthenticatedURL.Token();
++      try {
++        return new AuthenticatedURL().openConnection(url, token);
++      } catch (AuthenticationException e) {
++        throw new IOException("Exception trying to open authenticated connection to "
++            + url, e);
++      }
++    }
++  }
++
++  /**
+    * Resolves a host subject to the security requirements determined by
+    * hadoop.security.token.service.use_ip.
+    * 
+diff --git a/src/hdfs/hdfs-default.xml b/src/hdfs/hdfs-default.xml
+index 4275ee0..794a374 100644
+--- a/src/hdfs/hdfs-default.xml
++++ b/src/hdfs/hdfs-default.xml
+@@ -551,4 +551,14 @@ creations/deletions), or "all".</description>
+   </description>
+ </property>
+ 
++<property>
++  <name>dfs.namenode.kerberos.internal.spnego.principal</name>
++  <value>${dfs.web.authentication.kerberos.principal}</value>
++</property>
++
++<property>
++  <name>dfs.secondary.namenode.kerberos.internal.spnego.principal</name>
++  <value>${dfs.web.authentication.kerberos.principal}</value>
++</property>
++
+ </configuration>
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+index 5815873..9cd2476 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+@@ -244,6 +244,7 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
+   public static final String  DFS_NAMENODE_KEYTAB_FILE_KEY = "dfs.namenode.keytab.file";
+   public static final String  DFS_NAMENODE_USER_NAME_KEY = "dfs.namenode.kerberos.principal";
+   public static final String  DFS_NAMENODE_KRB_HTTPS_USER_NAME_KEY = "dfs.namenode.kerberos.https.principal";
++  public static final String  DFS_NAMENODE_INTERNAL_SPENGO_USER_NAME_KEY = "dfs.namenode.kerberos.internal.spnego.principal";
+   public static final String  DFS_NAMENODE_RESOURCE_CHECK_INTERVAL_KEY = "dfs.namenode.resource.check.interval";
+   public static final int     DFS_NAMENODE_RESOURCE_CHECK_INTERVAL_DEFAULT = 5000;
+   public static final String  DFS_NAMENODE_DU_RESERVED_KEY = "dfs.namenode.resource.du.reserved";
+@@ -253,6 +254,7 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
+   public static final String  DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY = "dfs.secondary.namenode.keytab.file";
+   public static final String  DFS_SECONDARY_NAMENODE_USER_NAME_KEY = "dfs.secondary.namenode.kerberos.principal";
+   public static final String  DFS_SECONDARY_NAMENODE_KRB_HTTPS_USER_NAME_KEY = "dfs.secondary.namenode.kerberos.https.principal";
++  public static final String  DFS_SECONDARY_NAMENODE_INTERNAL_SPENGO_USER_NAME_KEY = "dfs.secondary.namenode.kerberos.internal.spnego.principal";
+   public static final String  DFS_BLOCK_LOCAL_PATH_ACCESS_USER_KEY = "dfs.block.local-path-access.user";
+   public static final String  DFS_NAMENODE_NAME_CACHE_THRESHOLD_KEY = "dfs.namenode.name.cache.threshold";
+   public static final int     DFS_NAMENODE_NAME_CACHE_THRESHOLD_DEFAULT = 10;
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index 518be0b..7407900 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -48,6 +48,7 @@ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifie
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenRenewer;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSelector;
+ import org.apache.hadoop.hdfs.server.namenode.JspHelper;
++import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.server.namenode.StreamFile;
+ import org.apache.hadoop.hdfs.tools.DelegationTokenFetcher;
+ import org.apache.hadoop.io.Text;
+@@ -121,8 +122,9 @@ public class HftpFileSystem extends FileSystem
+   }
+ 
+   protected int getDefaultSecurePort() {
+-    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_KEY,
+-        DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT);
++    return !SecurityUtil.useKsslAuth() ? getDefaultPort() :
++        getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_KEY,
++            DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT);
+   }
+ 
+   protected InetSocketAddress getNamenodeAddr(URI uri) {
+@@ -217,13 +219,14 @@ public class HftpFileSystem extends FileSystem
+       ugi.checkTGTAndReloginFromKeytab();
+       return ugi.doAs(new PrivilegedExceptionAction<Token<?>>() {
+         public Token<?> run() throws IOException {
+-          final String nnHttpUrl = DFSUtil.createUri("https", nnSecureAddr).toString();
++          final String nnHttpUrl = DFSUtil.createUri(
++              NameNode.getHttpUriScheme(), nnSecureAddr).toString();
+           Credentials c;
+           try {
+             c = DelegationTokenFetcher.getDTfromRemote(nnHttpUrl, renewer);
+           } catch (Exception e) {
+             LOG.info("Couldn't get a delegation token from " + nnHttpUrl + 
+-            " using https.");
++            " using " + NameNode.getHttpUriScheme());
+             LOG.debug("error was ", e);
+             //Maybe the server is in unsecure mode (that's bad but okay)
+             remoteIsInsecure = true;
+@@ -681,12 +684,11 @@ public class HftpFileSystem extends FileSystem
+                       Configuration conf) throws IOException {
+       // update the kerberos credentials, if they are coming from a keytab
+       UserGroupInformation.getLoginUser().checkTGTAndReloginFromKeytab();
+-      // use https to renew the token
++      // use http/s to renew the token
+       InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
+       return DelegationTokenFetcher.renewDelegationToken(
+-          DFSUtil.createUri("https", serviceAddr).toString(),
+-          (Token<DelegationTokenIdentifier>) token
+-      );
++          DFSUtil.createUri(NameNode.getHttpUriScheme(), serviceAddr).toString(),
++          (Token<DelegationTokenIdentifier>) token);
+     }
+ 
+     @SuppressWarnings("unchecked")
+@@ -695,12 +697,11 @@ public class HftpFileSystem extends FileSystem
+                        Configuration conf) throws IOException {
+       // update the kerberos credentials, if they are coming from a keytab
+       UserGroupInformation.getLoginUser().checkTGTAndReloginFromKeytab();
+-      // use https to cancel the token
++      // use http/s to cancel the token
+       InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
+       DelegationTokenFetcher.cancelDelegationToken(
+-          DFSUtil.createUri("https", serviceAddr).toString(), 
+-          (Token<DelegationTokenIdentifier>) token
+-      );
++          DFSUtil.createUri(NameNode.getHttpUriScheme(), serviceAddr).toString(),
++          (Token<DelegationTokenIdentifier>) token);
+     }
+     
+   }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java
+index 8a78af1..59878b9 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java
+@@ -67,12 +67,13 @@ public class GetImageServlet extends HttpServlet {
+       final FSImage nnImage = (FSImage)context.getAttribute("name.system.image");
+       final TransferFsImage ff = new TransferFsImage(pmap, request, response);
+       final Configuration conf = (Configuration)getServletContext().getAttribute(JspHelper.CURRENT_CONF);
++
+       if(UserGroupInformation.isSecurityEnabled() && 
+-          !isValidRequestor(request.getRemoteUser(), conf)) {
++          !isValidRequestor(request.getUserPrincipal().getName(), conf)) {
+         response.sendError(HttpServletResponse.SC_FORBIDDEN, 
+             "Only Namenode and Secondary Namenode may access this servlet");
+         LOG.warn("Received non-NN/SNN request for image or edits from " 
+-            + request.getRemoteHost());
++            + request.getUserPrincipal().getName() + " at " + request.getRemoteHost());
+         return;
+       }
+       
+@@ -178,11 +179,11 @@ public class GetImageServlet extends HttpServlet {
+     
+     for(String v : validRequestors) {
+       if(v != null && v.equals(remoteUser)) {
+-        if(LOG.isDebugEnabled()) LOG.debug("isValidRequestor is allowing: " + remoteUser);
++        LOG.info("GetImageServlet allowing: " + remoteUser);
+         return true;
+       }
+     }
+-    if(LOG.isDebugEnabled()) LOG.debug("isValidRequestor is rejecting: " + remoteUser);
++    LOG.info("GetImageServlet rejecting: " + remoteUser);
+     return false;
+   }
+ }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+index bb4f318..7b4ca61 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+@@ -87,6 +87,7 @@ import org.apache.hadoop.security.Groups;
+ import org.apache.hadoop.security.RefreshUserMappingsProtocol;
+ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
++import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
+ import org.apache.hadoop.security.authorize.AuthorizationException;
+ import org.apache.hadoop.security.authorize.ProxyUsers;
+ import org.apache.hadoop.security.authorize.RefreshAuthorizationPolicyProtocol;
+@@ -362,36 +363,37 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+ 
+   @SuppressWarnings("deprecation")
+   public static String getInfoServer(Configuration conf) {
+-    String http = UserGroupInformation.isSecurityEnabled() ? "dfs.https.address"
+-        : "dfs.http.address";
++    String http = SecurityUtil.useKsslAuth() ? "dfs.https.address" :
++        "dfs.http.address";
+     return NetUtils.getServerAddress(conf, "dfs.info.bindAddress",
+         "dfs.info.port", http);
+   }
++
++  /**
++   * @return "https" if KSSL should be used, "http" if security is disabled
++   *         or SPNEGO is enabled.
++   */
++  public static String getHttpUriScheme() {
++    return SecurityUtil.useKsslAuth() ? "https" : "http";
++  }
+   
+   @SuppressWarnings("deprecation")
+   private void startHttpServer(final Configuration conf) throws IOException {
+     final String infoAddr = NetUtils.getServerAddress(conf,
+         "dfs.info.bindAddress", "dfs.info.port", "dfs.http.address");
+     final InetSocketAddress infoSocAddr = NetUtils.createSocketAddr(infoAddr);
+-    if(UserGroupInformation.isSecurityEnabled()) {
++    
++    if (SecurityUtil.useKsslAuth()) {
+       String httpsUser = SecurityUtil.getServerPrincipal(conf
+           .get(DFSConfigKeys.DFS_NAMENODE_KRB_HTTPS_USER_NAME_KEY), infoSocAddr
+           .getHostName());
+-      if (httpsUser == null) {
+-        LOG.warn(DFSConfigKeys.DFS_NAMENODE_KRB_HTTPS_USER_NAME_KEY
+-            + " not defined in config. Starting http server as "
+-            + SecurityUtil.getServerPrincipal(conf
+-                .get(DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY), serverAddress
+-                .getHostName())
+-            + ": Kerberized SSL may be not function correctly.");
+-      } else {
+-        // Kerberized SSL servers must be run from the host principal...
+-        LOG.info("Logging in as " + httpsUser + " to start http server.");
+-        SecurityUtil.login(conf, DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY,
+-            DFSConfigKeys.DFS_NAMENODE_KRB_HTTPS_USER_NAME_KEY, infoSocAddr
+-                .getHostName());
+-      }
++      // Kerberized SSL servers must be run from the host principal...
++      LOG.info("Logging in as " + httpsUser + " to start http server.");
++      SecurityUtil.login(conf, DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY,
++          DFSConfigKeys.DFS_NAMENODE_KRB_HTTPS_USER_NAME_KEY, infoSocAddr
++              .getHostName());
+     }
++
+     UserGroupInformation ugi = UserGroupInformation.getLoginUser();
+     try {
+       this.httpServer = ugi.doAs(new PrivilegedExceptionAction<HttpServer>() {
+@@ -403,6 +405,28 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+               infoPort == 0, conf, 
+               SecurityUtil.getAdminAcls(conf, DFSConfigKeys.DFS_ADMIN)) {
+             {
++              // Add SPNEGO support to NameNode
++              if (UserGroupInformation.isSecurityEnabled() &&
++                  !SecurityUtil.useKsslAuth()) {
++                Map<String, String> params = new HashMap<String, String>();
++                String principalInConf = conf.get(
++                    DFSConfigKeys.DFS_NAMENODE_INTERNAL_SPENGO_USER_NAME_KEY);
++                if (principalInConf != null && !principalInConf.isEmpty()) {
++                  params.put("kerberos.principal",
++                      SecurityUtil.getServerPrincipal(principalInConf,
++                          serverAddress.getHostName()));
++                }
++                String httpKeytab = conf.get(DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY);
++                if (httpKeytab != null && !httpKeytab.isEmpty()) {
++                  params.put("kerberos.keytab", httpKeytab);
++                }
++  
++                params.put(AuthenticationFilter.AUTH_TYPE, "kerberos");
++  
++                defineFilter(webAppContext, SPNEGO_FILTER,
++                    AuthenticationFilter.class.getName(), params, null);
++              }
++  
+               if (WebHdfsFileSystem.isEnabled(conf, LOG)) {
+                 //add SPNEGO authentication filter for webhdfs
+                 final String name = "SPNEGO";
+@@ -444,8 +468,7 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+           };
+           
+           boolean certSSL = conf.getBoolean("dfs.https.enable", false);
+-          boolean useKrb = UserGroupInformation.isSecurityEnabled();
+-          if (certSSL || useKrb) {
++          if (certSSL || SecurityUtil.useKsslAuth()) {
+             boolean needClientAuth = conf.getBoolean("dfs.https.need.client.auth", false);
+             InetSocketAddress secInfoSocAddr = NetUtils.createSocketAddr(infoHost + ":"+ conf.get(
+                                 "dfs.https.port", infoHost + ":" + 0));
+@@ -454,7 +477,8 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+               sslConf.addResource(conf.get("dfs.https.server.keystore.resource",
+                   "ssl-server.xml"));
+             }
+-            httpServer.addSslListener(secInfoSocAddr, sslConf, needClientAuth, useKrb);
++            httpServer.addSslListener(secInfoSocAddr, sslConf, needClientAuth,
++                SecurityUtil.useKsslAuth());
+             // assume same ssl port for all datanodes
+             InetSocketAddress datanodeSslPort = NetUtils.createSocketAddr(conf.get(
+                 "dfs.datanode.https.address", infoHost + ":" + 50475));
+@@ -465,29 +489,32 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+           httpServer.setAttribute("name.node.address", getNameNodeAddress());
+           httpServer.setAttribute("name.system.image", getFSImage());
+           httpServer.setAttribute(JspHelper.CURRENT_CONF, conf);
+-          httpServer.addInternalServlet("getDelegationToken", 
+-                                        GetDelegationTokenServlet.PATH_SPEC, 
+-                                        GetDelegationTokenServlet.class, true);
+-          httpServer.addInternalServlet("renewDelegationToken", 
+-                                        RenewDelegationTokenServlet.PATH_SPEC, 
+-                                        RenewDelegationTokenServlet.class, true);
+-          httpServer.addInternalServlet("cancelDelegationToken", 
+-                                        CancelDelegationTokenServlet.PATH_SPEC, 
++          httpServer.addInternalServlet("getDelegationToken",
++                                        GetDelegationTokenServlet.PATH_SPEC,
++                                        GetDelegationTokenServlet.class, true,
++                                        SecurityUtil.useKsslAuth());
++          httpServer.addInternalServlet("renewDelegationToken",
++                                        RenewDelegationTokenServlet.PATH_SPEC,
++                                        RenewDelegationTokenServlet.class, true,
++                                        SecurityUtil.useKsslAuth());
++          httpServer.addInternalServlet("cancelDelegationToken",
++                                        CancelDelegationTokenServlet.PATH_SPEC,
+                                         CancelDelegationTokenServlet.class,
+-                                        true);
+-          httpServer.addInternalServlet("fsck", "/fsck", FsckServlet.class, true);
+-          httpServer.addInternalServlet("getimage", "/getimage", 
+-              GetImageServlet.class, true);
+-          httpServer.addInternalServlet("listPaths", "/listPaths/*", 
+-              ListPathsServlet.class, false);
+-          httpServer.addInternalServlet("data", "/data/*", 
+-              FileDataServlet.class, false);
++                                        true, SecurityUtil.useKsslAuth());
++          httpServer.addInternalServlet("fsck", "/fsck", FsckServlet.class, true,
++              SecurityUtil.useKsslAuth());
++          httpServer.addInternalServlet("getimage", "/getimage",
++              GetImageServlet.class, true, SecurityUtil.useKsslAuth());
++          httpServer.addInternalServlet("listPaths", "/listPaths/*",
++              ListPathsServlet.class);
++          httpServer.addInternalServlet("data", "/data/*",
++              FileDataServlet.class);
+           httpServer.addInternalServlet("checksum", "/fileChecksum/*",
+-              FileChecksumServlets.RedirectServlet.class, false);
++              FileChecksumServlets.RedirectServlet.class);
+           httpServer.addInternalServlet("contentSummary", "/contentSummary/*",
+-              ContentSummaryServlet.class, false);
++              ContentSummaryServlet.class);
+           httpServer.start();
+-      
++
+           // The web-server port can be ephemeral... ensure we have the correct info
+           infoPort = httpServer.getPort();
+           httpAddress = new InetSocketAddress(infoHost, infoPort);
+@@ -499,8 +526,7 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+     } catch (InterruptedException e) {
+       throw new IOException(e);
+     } finally {
+-      if(UserGroupInformation.isSecurityEnabled() && 
+-          conf.get(DFSConfigKeys.DFS_NAMENODE_KRB_HTTPS_USER_NAME_KEY) != null) {
++      if (SecurityUtil.useKsslAuth()) {
+         // Go back to being the correct Namenode principal
+         LOG.info("Logging back in as "
+             + SecurityUtil.getServerPrincipal(conf
+@@ -511,7 +537,7 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+                 .getHostName());
+       }
+     }
+- }
++  }
+ 
+   /**
+    * Start NameNode.
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/SecondaryNameNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/SecondaryNameNode.java
+index be12491..ddc6b4f 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/SecondaryNameNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/SecondaryNameNode.java
+@@ -29,8 +29,10 @@ import java.security.PrivilegedAction;
+ import java.security.PrivilegedExceptionAction;
+ import java.util.ArrayList;
+ import java.util.Collection;
++import java.util.HashMap;
+ import java.util.Date;
+ import java.util.Iterator;
++import java.util.Map;
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+@@ -51,6 +53,7 @@ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.Krb5AndCertsSslSocketConnector;
+ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
++import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
+ import org.apache.hadoop.util.Daemon;
+ import org.apache.hadoop.util.StringUtils;
+ 
+@@ -201,6 +204,69 @@ public class SecondaryNameNode implements Runnable {
+     checkpointSize = conf.getLong("fs.checkpoint.size", 4194304);
+ 
+     // initialize the webserver for uploading files.
++    if (SecurityUtil.useKsslAuth()) {
++      initializeKsslWebServer(infoSocAddr);
++    } else {
++      initializeHttpWebServer(infoSocAddr);
++    }
++
++    LOG.info("Web server init done");
++    // The web-server port can be ephemeral... ensure we have the correct info
++    
++    infoPort = infoServer.getPort();
++    if (!SecurityUtil.useKsslAuth()) {
++      imagePort = infoPort;
++    }
++    conf.set("dfs.secondary.http.address", infoBindAddress + ":" +infoPort); 
++    LOG.info("Secondary Web-server up at: " + infoBindAddress + ":" +infoPort);
++    LOG.warn("Checkpoint Period   :" + checkpointPeriod + " secs " +
++             "(" + checkpointPeriod/60 + " min)");
++    LOG.warn("Log Size Trigger    :" + checkpointSize + " bytes " +
++             "(" + checkpointSize/1024 + " KB)");
++  }
++
++  private void initializeHttpWebServer(final InetSocketAddress infoSocAddr)
++      throws IOException {
++    int tmpInfoPort = infoSocAddr.getPort();
++    infoServer = new HttpServer("secondary", infoBindAddress, tmpInfoPort,
++                                tmpInfoPort == 0, conf,
++                                SecurityUtil.getAdminAcls
++                                  (conf, DFSConfigKeys.DFS_ADMIN)) {
++        {
++          if (UserGroupInformation.isSecurityEnabled()) {
++            // Security is enabled, so use SPNEGO to authenticate.
++            Map<String, String> params = new HashMap<String, String>();
++            String principalInConf = 
++              conf.get(DFSConfigKeys.DFS_SECONDARY_NAMENODE_INTERNAL_SPENGO_USER_NAME_KEY);
++            if (principalInConf != null && !principalInConf.isEmpty()) {
++              params.put("kerberos.principal",
++                         SecurityUtil.getServerPrincipal
++                           (principalInConf, infoSocAddr.getHostName()));
++            }
++            String httpKeytab = 
++              conf.get(DFSConfigKeys.DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY);
++            if (httpKeytab != null && !httpKeytab.isEmpty()) {
++              params.put("kerberos.keytab", httpKeytab);
++            }
++
++            params.put(AuthenticationFilter.AUTH_TYPE, "kerberos");
++
++            defineFilter(webAppContext, SPNEGO_FILTER, 
++                         AuthenticationFilter.class.getName(),
++                         params, null);
++          }
++        }
++      };
++
++    infoServer.setAttribute("name.system.image", checkpointImage);
++    infoServer.setAttribute(JspHelper.CURRENT_CONF, conf);
++    infoServer.addInternalServlet("getimage", "/getimage",
++        GetImageServlet.class, true, false);
++    infoServer.start();
++  }
++
++  private void initializeKsslWebServer(final InetSocketAddress infoSocAddr)
++      throws IOException {
+     // Kerberized SSL servers must be run from the host principal...
+     UserGroupInformation httpUGI = 
+       UserGroupInformation.loginUserFromKeytabAndReturnUGI(
+@@ -221,21 +287,19 @@ public class SecondaryNameNode implements Runnable {
+               tmpInfoPort == 0, conf, 
+               SecurityUtil.getAdminAcls(conf, DFSConfigKeys.DFS_ADMIN));
+           
+-          if(UserGroupInformation.isSecurityEnabled()) {
+-            System.setProperty("https.cipherSuites", 
+-                Krb5AndCertsSslSocketConnector.KRB5_CIPHER_SUITES.get(0));
+-            InetSocketAddress secInfoSocAddr = 
+-              NetUtils.createSocketAddr(infoBindAddress + ":" + conf.getInt(
+-                "dfs.secondary.https.port", 50490));
+-            imagePort = secInfoSocAddr.getPort();
+-            infoServer.addSslListener(secInfoSocAddr, conf, false, true);
+-          }
++          System.setProperty("https.cipherSuites", 
++              Krb5AndCertsSslSocketConnector.KRB5_CIPHER_SUITES.get(0));
++          InetSocketAddress secInfoSocAddr = 
++            NetUtils.createSocketAddr(infoBindAddress + ":" + conf.getInt(
++              "dfs.secondary.https.port", 50490));
++          imagePort = secInfoSocAddr.getPort();
++          infoServer.addSslListener(secInfoSocAddr, conf, false, true);
+           
+           infoServer.setAttribute("secondary.name.node", SecondaryNameNode.this);
+           infoServer.setAttribute("name.system.image", checkpointImage);
+           infoServer.setAttribute(JspHelper.CURRENT_CONF, conf);
+           infoServer.addInternalServlet("getimage", "/getimage",
+-              GetImageServlet.class, true);
++              GetImageServlet.class, true, true);
+           infoServer.start();
+           return infoServer;
+         }
+@@ -243,20 +307,6 @@ public class SecondaryNameNode implements Runnable {
+     } catch (InterruptedException e) {
+       throw new RuntimeException(e);
+     }
+-    LOG.info("Web server init done");
+-    // The web-server port can be ephemeral... ensure we have the correct info
+-    
+-    infoPort = infoServer.getPort();
+-    if(!UserGroupInformation.isSecurityEnabled())
+-      imagePort = infoPort;
+-    
+-    conf.set("dfs.secondary.http.address", infoBindAddress + ":" +infoPort); 
+-    LOG.info("Secondary Web-server up at: " + infoBindAddress + ":" +infoPort);
+-    LOG.info("Secondary image servlet up at: " + infoBindAddress + ":" + imagePort);
+-    LOG.warn("Checkpoint Period   :" + checkpointPeriod + " secs " +
+-             "(" + checkpointPeriod/60 + " min)");
+-    LOG.warn("Log Size Trigger    :" + checkpointSize + " bytes " +
+-             "(" + checkpointSize/1024 + " KB)");
+   }
+ 
+   /**
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
+index 0db079a..4b66189 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
+@@ -35,7 +35,6 @@ import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+ import org.apache.hadoop.hdfs.server.common.Util;
+ import org.apache.hadoop.hdfs.server.namenode.SecondaryNameNode.ErrorSimulator;
+ import org.apache.hadoop.io.MD5Hash;
+-import org.apache.hadoop.security.UserGroupInformation;
+ 
+ /**
+  * This class provides fetching a specified file from the NameNode.
+@@ -181,20 +180,16 @@ class TransferFsImage implements FSConstants {
+   static MD5Hash getFileClient(String fsName, String id, File[] localPath,
+       boolean getChecksum) throws IOException {
+     byte[] buf = new byte[BUFFER_SIZE];
+-    String proto = UserGroupInformation.isSecurityEnabled() ? "https://" : "http://";
+-    
+-    StringBuffer str = new StringBuffer(proto+fsName+"/getimage?");
+-    str.append(id);
+ 
++    String str = NameNode.getHttpUriScheme() + "://" + fsName + "/getimage?" + id;
++    LOG.info("Opening connection to " + str);
+     //
+     // open connection to remote server
+     //
+     long startTime = Util.monotonicNow();
+-    URL url = new URL(str.toString());
+-    
+-    // Avoid Krb bug with cross-realm hosts
+-    SecurityUtil.fetchServiceTicket(url);
+-    URLConnection connection = url.openConnection();
++    URL url = new URL(str);
++
++    URLConnection connection = SecurityUtil.openSecureHttpConnection(url);
+     long advertisedSize;
+     String contentLength = connection.getHeaderField(CONTENT_LENGTH);
+     if (contentLength != null) {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/tools/DFSck.java b/src/hdfs/org/apache/hadoop/hdfs/tools/DFSck.java
+index 850b3f6..85674b8 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/tools/DFSck.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/tools/DFSck.java
+@@ -30,7 +30,6 @@ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.conf.Configured;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck;
+-import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.Krb5AndCertsSslSocketConnector;
+ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -111,14 +110,15 @@ public class DFSck extends Configured implements Tool {
+         @Override
+         public Integer run() throws Exception {
+ 
+-          String proto = "http://";
+-          if(UserGroupInformation.isSecurityEnabled()) { 
+-             System.setProperty("https.cipherSuites", Krb5AndCertsSslSocketConnector.KRB5_CIPHER_SUITES.get(0));
+-             proto = "https://";
++          if (SecurityUtil.useKsslAuth()) {
++            System.setProperty("https.cipherSuites",
++                Krb5AndCertsSslSocketConnector.KRB5_CIPHER_SUITES.get(0));
+           }
+-          
+-          final StringBuffer url = new StringBuffer(proto);
+-          url.append(NameNode.getInfoServer(getConf())).append("/fsck?ugi=").append(ugi.getShortUserName()).append("&path=");
++
++          final StringBuffer url = new StringBuffer(
++            NameNode.getHttpUriScheme() + "://");
++          url.append(NameNode.getInfoServer(getConf())).append("/fsck?ugi=")
++              .append(ugi.getShortUserName()).append("&path=");
+ 
+           String dir = "/";
+           // find top-level dir first
+@@ -135,9 +135,10 @@ public class DFSck extends Configured implements Tool {
+             else if (args[idx].equals("-locations")) { url.append("&locations=1"); }
+             else if (args[idx].equals("-racks")) { url.append("&racks=1"); }
+           }
++
+           URL path = new URL(url.toString());
+-          SecurityUtil.fetchServiceTicket(path);
+-          URLConnection connection = path.openConnection();
++
++          URLConnection connection = SecurityUtil.openSecureHttpConnection(path);
+           InputStream stream = connection.getInputStream();
+           BufferedReader input = new BufferedReader(new InputStreamReader(
+               stream, "UTF-8"));
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java b/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java
+index 8930b22..1485c78 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java
+@@ -41,6 +41,7 @@ import org.apache.hadoop.hdfs.HftpFileSystem;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.server.namenode.CancelDelegationTokenServlet;
+ import org.apache.hadoop.hdfs.server.namenode.GetDelegationTokenServlet;
++import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.server.namenode.RenewDelegationTokenServlet;
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.net.NetUtils;
+@@ -98,7 +99,7 @@ public class DelegationTokenFetcher {
+     final Configuration conf = new Configuration();
+     Options fetcherOptions = new Options();
+     fetcherOptions.addOption(WEBSERVICE, true, 
+-                             "HTTPS url to reach the NameNode at");
++                             "HTTP/S url to reach the NameNode at");
+     fetcherOptions.addOption(CANCEL, false, "cancel the token");
+     fetcherOptions.addOption(RENEW, false, "renew the token");
+     GenericOptionsParser parser =
+@@ -168,10 +169,11 @@ public class DelegationTokenFetcher {
+   
+   /**
+    * Utility method to obtain a delegation token over http
+-   * @param nnHttpAddr Namenode http addr, such as http://namenode:50070
++   * @param nnAddr Namenode http addr, such as http://namenode:50070
++   * @param renewer User that is renewing the ticket in such a request
+    */
+   static public Credentials getDTfromRemote(String nnAddr, 
+-                                            String renewer) throws IOException {
++      String renewer) throws IOException {
+     DataInputStream dis = null;
+     InetSocketAddress serviceAddr = NetUtils.createSocketAddr(nnAddr);
+ 
+@@ -185,8 +187,7 @@ public class DelegationTokenFetcher {
+       }
+       System.out.println("Retrieving token from: " + url);
+       URL remoteURL = new URL(url.toString());
+-      SecurityUtil.fetchServiceTicket(remoteURL);
+-      URLConnection connection = remoteURL.openConnection();
++      URLConnection connection = SecurityUtil.openSecureHttpConnection(remoteURL);
+ 
+       InputStream in = connection.getInputStream();
+       Credentials ts = new Credentials();
+@@ -212,8 +213,7 @@ public class DelegationTokenFetcher {
+    * @throws IOException
+    */
+   static public long renewDelegationToken(String nnAddr,
+-                                          Token<DelegationTokenIdentifier> tok
+-                                          ) throws IOException {
++      Token<DelegationTokenIdentifier> tok) throws IOException {
+     StringBuilder buf = new StringBuilder();
+     buf.append(nnAddr);
+     buf.append(RenewDelegationTokenServlet.PATH_SPEC);
+@@ -225,8 +225,7 @@ public class DelegationTokenFetcher {
+     HttpURLConnection connection = null;
+     try {
+       URL url = new URL(buf.toString());
+-      SecurityUtil.fetchServiceTicket(url);
+-      connection = (HttpURLConnection)url.openConnection();
++      connection = (HttpURLConnection) SecurityUtil.openSecureHttpConnection(url);
+       in = new BufferedReader(new InputStreamReader
+                               (connection.getInputStream()));
+       long result = Long.parseLong(in.readLine());
+@@ -279,8 +278,7 @@ public class DelegationTokenFetcher {
+    * @throws IOException
+    */
+   static public void cancelDelegationToken(String nnAddr,
+-                                           Token<DelegationTokenIdentifier> tok
+-                                           ) throws IOException {
++    Token<DelegationTokenIdentifier> tok) throws IOException {
+     StringBuilder buf = new StringBuilder();
+     buf.append(nnAddr);
+     buf.append(CancelDelegationTokenServlet.PATH_SPEC);
+@@ -291,8 +289,8 @@ public class DelegationTokenFetcher {
+     BufferedReader in = null;
+     try {
+       URL url = new URL(buf.toString());
+-      SecurityUtil.fetchServiceTicket(url);
+-      HttpURLConnection connection = (HttpURLConnection) url.openConnection();
++      HttpURLConnection connection =
++              (HttpURLConnection)SecurityUtil.openSecureHttpConnection(url);
+       if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) {
+         throw new IOException("Error cancelling token:" + 
+                               connection.getResponseMessage());
+-- 
+1.7.0.4
+

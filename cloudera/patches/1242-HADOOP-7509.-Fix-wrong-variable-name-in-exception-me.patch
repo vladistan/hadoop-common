@@ -1,0 +1,33 @@
+From 97d098bc9dd1a305040e0367c6af9bba5235451f Mon Sep 17 00:00:00 2001
+From: Suresh Srinivas <suresh@apache.org>
+Date: Thu, 13 Oct 2011 22:01:06 +0000
+Subject: [PATCH 1242/1344] HADOOP-7509. Fix wrong variable name in exception message introduced in HADOOP-7509. Contributed by Ravi Prakash.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1183129 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 9a8e740adadda29646db61c4cf6e6d97a47709e0)
+
+Author: Ravi Prakash
+Ref: CDH-4806
+---
+ src/core/org/apache/hadoop/ipc/Server.java |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/ipc/Server.java b/src/core/org/apache/hadoop/ipc/Server.java
+index 9daa175..1d26139 100644
+--- a/src/core/org/apache/hadoop/ipc/Server.java
++++ b/src/core/org/apache/hadoop/ipc/Server.java
+@@ -1158,9 +1158,9 @@ public abstract class Server {
+           }
+           if (isSecurityEnabled && authMethod == AuthMethod.SIMPLE) {
+             AccessControlException ae = new AccessControlException("Authorization ("
+-              + CommonConfigurationKeys.HADOOP_SECURITY_AUTHENTICATION
+-              + ") is enabled but authentication ("
+               + CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION
++              + ") is enabled but authentication ("
++              + CommonConfigurationKeys.HADOOP_SECURITY_AUTHENTICATION
+               + ") is configured as simple. Please configure another method "
+               + "like kerberos or digest.");
+             setupResponse(authFailedResponse, authFailedCall, Status.FATAL,
+-- 
+1.7.0.4
+

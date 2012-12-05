@@ -96,13 +96,11 @@ public class TestCommandLineJobSubmission extends TestCase {
       libjars[1] = fs.getUri().resolve(cachePath + "/test.jar").toString();
       
       // construct options for -archives
-      String[] archives = new String[4];
+      String[] archives = new String[3];
       archives[0] = tgzPath.toString();
       archives[1] = tarPath + "#tarlink";
       archives[2] = 
         fs.getUri().resolve(cachePath + "/test.zip#ziplink").toString();
-      archives[3] = 
-        fs.getUri().resolve(cachePath + "/test.jar#jarlink").toString();
       
       String[] args = new String[8];
       args[0] = "-files";

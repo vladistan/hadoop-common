@@ -1,0 +1,243 @@
+From 35efcb432c890ad2982c5a61e846aaa044d1b1e0 Mon Sep 17 00:00:00 2001
+From: Colin Patrick Mccabe <cmccabe@cloudera.com>
+Date: Fri, 20 Jul 2012 14:31:42 -0700
+Subject: [PATCH 1320/1344] HDFS-3539. libhdfs code cleanups.
+
+Reason: nice to have
+Ref: CDH-6716
+Author: Colin Patrick McCabe
+---
+ src/c++/libhdfs/hdfs.c                        |   37 ++++++++++++++++-
+ src/c++/libhdfs/hdfs.h                        |   53 ++++++++++--------------
+ src/contrib/fuse-dfs/src/fuse_dfs.c           |    3 +
+ src/contrib/fuse-dfs/src/fuse_impls_release.c |    3 +
+ src/contrib/fuse-dfs/src/fuse_init.c          |    3 +
+ src/contrib/fuse-dfs/src/fuse_options.c       |    5 ++-
+ 6 files changed, 69 insertions(+), 35 deletions(-)
+
+diff --git a/src/c++/libhdfs/hdfs.c b/src/c++/libhdfs/hdfs.c
+index 194ed81..b03b1f1 100644
+--- a/src/c++/libhdfs/hdfs.c
++++ b/src/c++/libhdfs/hdfs.c
+@@ -19,6 +19,8 @@
+ #include "hdfs.h"
+ #include "hdfsJniHelper.h"
+ 
++#include <stdio.h>
++#include <string.h>
+ 
+ /* Some frequently used Java paths */
+ #define HADOOP_CONF     "org/apache/hadoop/conf/Configuration"
+@@ -48,6 +50,35 @@
+ #define KERBEROS_TICKET_CACHE_PATH "hadoop.security.kerberos.ticket.cache.path"
+ 
+ /**
++ * The C equivalent of org.apache.org.hadoop.FSData(Input|Output)Stream .
++ */
++enum hdfsStreamType
++{
++    UNINITIALIZED = 0,
++    INPUT = 1,
++    OUTPUT = 2,
++};
++
++/**
++ * The 'file-handle' to a file in hdfs.
++ */
++struct hdfsFile_internal {
++    void* file;
++    enum hdfsStreamType type;
++    int flags;
++};
++    
++int hdfsFileIsOpenForRead(hdfsFile file)
++{
++    return (file->type == INPUT);
++}
++
++int hdfsFileIsOpenForWrite(hdfsFile file)
++{
++    return (file->type == OUTPUT);
++}
++
++/**
+  * hdfsJniEnv: A wrapper struct to be used as 'value'
+  * while saving thread -> JNIEnv* mappings
+  */
+@@ -224,7 +255,7 @@ done:
+  */
+ static int jStrToCstr(JNIEnv *env, jstring jstr, char **cstr)
+ {
+-    char *tmp;
++    const char *tmp;
+ 
+     tmp = (*env)->GetStringUTFChars(env, jstr, NULL);
+     *cstr = strdup(tmp);
+@@ -536,7 +567,7 @@ done:
+ 
+     if (ret)
+         errno = ret;
+-    return gFsRef;
++    return (hdfsFS)gFsRef;
+ }
+ 
+ int hdfsDisconnect(hdfsFS fs)
+@@ -571,7 +602,7 @@ int hdfsDisconnect(hdfsFS fs)
+     }
+ 
+     //Release unnecessary references
+-    (*env)->DeleteGlobalRef(env, fs);
++    (*env)->DeleteGlobalRef(env, jFS);
+ 
+     return 0;
+ }
+diff --git a/src/c++/libhdfs/hdfs.h b/src/c++/libhdfs/hdfs.h
+index 5e945b3..934cde5 100644
+--- a/src/c++/libhdfs/hdfs.h
++++ b/src/c++/libhdfs/hdfs.h
+@@ -19,18 +19,10 @@
+ #ifndef LIBHDFS_HDFS_H
+ #define LIBHDFS_HDFS_H
+ 
+-#include <sys/types.h>
+-#include <sys/stat.h>
+-
+-#include <fcntl.h>
+-#include <stdio.h>
+-#include <stdint.h>
+-#include <string.h>
+-#include <stdlib.h>
+-#include <time.h>
+-#include <errno.h>
+-
+-#include <jni.h>
++#include <errno.h> /* for EINTERNAL, etc. */ 
++#include <fcntl.h> /* for O_RDONLY, O_WRONLY */
++#include <stdint.h> /* for uint64_t, etc. */
++#include <time.h> /* for time_t */
+ 
+ #ifndef O_RDONLY
+ #define O_RDONLY 1
+@@ -46,10 +38,10 @@
+ 
+ 
+ /** All APIs set errno to meaningful values */
++
+ #ifdef __cplusplus
+ extern  "C" {
+ #endif
+-
+     /**
+      * Some utility decls used in libhdfs.
+      */
+@@ -67,29 +59,28 @@ extern  "C" {
+     /**
+      * The C reflection of org.apache.org.hadoop.FileSystem .
+      */
+-    typedef void* hdfsFS;
++	struct hdfs_internal;
++	typedef struct hdfs_internal* hdfsFS;
++
++	struct hdfsFile_internal;
++	typedef struct hdfsFile_internal* hdfsFile;
+ 
+-    
+     /**
+-     * The C equivalent of org.apache.org.hadoop.FSData(Input|Output)Stream .
++     * Determine if a file is open for read.
++     *
++     * @param file     The HDFS file
++     * @return         1 if the file is open for read; 0 otherwise
+      */
+-    enum hdfsStreamType
+-    {
+-        UNINITIALIZED = 0,
+-        INPUT = 1,
+-        OUTPUT = 2,
+-    };
++    int hdfsFileIsOpenForRead(hdfsFile file);
+ 
+-    
+     /**
+-     * The 'file-handle' to a file in hdfs.
+-     */
+-    struct hdfsFile_internal {
+-        void* file;
+-        enum hdfsStreamType type;
+-    };
+-    typedef struct hdfsFile_internal* hdfsFile;
+-      
++     * Determine if a file is open for write.
++     *
++     * @param file     The HDFS file
++     * @return         1 if the file is open for write; 0 otherwise
++     */
++    int hdfsFileIsOpenForWrite(hdfsFile file);
++
+     /** 
+      * hdfsConnectAsUser - Connect to a hdfs file system as a specific user
+      * Connect to the hdfs.
+diff --git a/src/contrib/fuse-dfs/src/fuse_dfs.c b/src/contrib/fuse-dfs/src/fuse_dfs.c
+index 3b19f45..137752a 100644
+--- a/src/contrib/fuse-dfs/src/fuse_dfs.c
++++ b/src/contrib/fuse-dfs/src/fuse_dfs.c
+@@ -22,6 +22,9 @@
+ #include "fuse_init.h"
+ #include "fuse_connect.h"
+ 
++#include <stdio.h>
++#include <stdlib.h>
++
+ int is_protected(const char *path) {
+ 
+   dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
+diff --git a/src/contrib/fuse-dfs/src/fuse_impls_release.c b/src/contrib/fuse-dfs/src/fuse_impls_release.c
+index 78ea2b1..b0c2b91 100644
+--- a/src/contrib/fuse-dfs/src/fuse_impls_release.c
++++ b/src/contrib/fuse-dfs/src/fuse_impls_release.c
+@@ -21,6 +21,9 @@
+ #include "fuse_file_handle.h"
+ #include "fuse_connect.h"
+ 
++#include <stdio.h>
++#include <stdlib.h>
++
+ /**
+  * This mutex is to protect releasing a file handle in case the user calls close in different threads
+  * and fuse passes these calls to here.
+diff --git a/src/contrib/fuse-dfs/src/fuse_init.c b/src/contrib/fuse-dfs/src/fuse_init.c
+index 22c7767..11f580e 100644
+--- a/src/contrib/fuse-dfs/src/fuse_init.c
++++ b/src/contrib/fuse-dfs/src/fuse_init.c
+@@ -24,6 +24,9 @@
+ #include "fuse_context_handle.h"
+ #include "fuse_connect.h"
+ 
++#include <stdio.h>
++#include <stdlib.h>
++
+ // Hacked up function to basically do:
+ //  protectedpaths = split(options.protected,':');
+ 
+diff --git a/src/contrib/fuse-dfs/src/fuse_options.c b/src/contrib/fuse-dfs/src/fuse_options.c
+index 4264f01..35b8b6d 100644
+--- a/src/contrib/fuse-dfs/src/fuse_options.c
++++ b/src/contrib/fuse-dfs/src/fuse_options.c
+@@ -18,10 +18,13 @@
+ 
+ #include "fuse_dfs.h"
+ #include "fuse_options.h"
+-#include <getopt.h>
+ 
+ #include "fuse_context_handle.h"
+ 
++#include <getopt.h>
++#include <stdio.h>
++#include <stdlib.h>
++
+ void print_options() {
+   printf("options:\n"
+ 	 "\tprotected=%s\n"
+-- 
+1.7.0.4
+

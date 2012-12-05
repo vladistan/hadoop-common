@@ -268,8 +268,7 @@ public class TestJobRetire extends TestCase {
   }
  
   // create a new job and add it to the jobtracker
-  private JobInProgress createAndAddJob(JobTracker jobtracker, JobConf conf) 
-  throws IOException {
+  private JobInProgress createAndAddJob(JobTracker jobtracker, JobConf conf) {
     // submit a job in a fake manner
     // get the new job-id
     JobID id = 
@@ -334,7 +333,7 @@ public class TestJobRetire extends TestCase {
   //   - remove the job from the jobtracker
   //   - check if the fake attempt is removed from the jobtracker
   private void testRemoveJobTasks(JobTracker jobtracker, JobConf conf, 
-                                  TaskType type) throws IOException {
+                                  TaskType type) {
     // create and submit a job
     JobInProgress jip = createAndAddJob(jobtracker, conf);
     // create and add a tip

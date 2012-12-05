@@ -1,0 +1,966 @@
+From fded2e8d166e999a84f64da99efbac0beebece2b Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Wed, 21 Sep 2011 02:57:35 +0000
+Subject: [PATCH 1222/1344] HDFS-2340. Support getFileBlockLocations and getDelegationToken in webhdfs.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1173470 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 0117d6e6c000956589463ffaa3883aa54e6b6c88)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ src/hdfs/org/apache/hadoop/hdfs/DFSClient.java     |   26 +--
+ src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java       |   40 +++-
+ .../apache/hadoop/hdfs/protocol/DatanodeInfo.java  |   21 ++-
+ .../hadoop/hdfs/server/namenode/NameNode.java      |    7 +-
+ .../web/resources/NamenodeWebHdfsMethods.java      |   59 ++++-
+ src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java  |  279 +++++++++++++++++++-
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |   36 +++-
+ .../hadoop/hdfs/web/resources/GetOpParam.java      |    3 +
+ .../hadoop/hdfs/web/resources/RenewerParam.java    |   41 +++
+ .../hadoop/hdfs/security/TestDelegationToken.java  |   44 +++-
+ .../hdfs/web/TestWebHdfsFileSystemContract.java    |   17 ++
+ 11 files changed, 525 insertions(+), 48 deletions(-)
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/RenewerParam.java
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+index 018afee..fc68239 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+@@ -596,31 +596,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+   public BlockLocation[] getBlockLocations(String src, long start, 
+     long length) throws IOException {
+     LocatedBlocks blocks = callGetBlockLocations(namenode, src, start, length);
+-    if (blocks == null) {
+-      return new BlockLocation[0];
+-    }
+-    int nrBlocks = blocks.locatedBlockCount();
+-    BlockLocation[] blkLocations = new BlockLocation[nrBlocks];
+-    int idx = 0;
+-    for (LocatedBlock blk : blocks.getLocatedBlocks()) {
+-      assert idx < nrBlocks : "Incorrect index";
+-      DatanodeInfo[] locations = blk.getLocations();
+-      String[] hosts = new String[locations.length];
+-      String[] names = new String[locations.length];
+-      String[] racks = new String[locations.length];
+-      for (int hCnt = 0; hCnt < locations.length; hCnt++) {
+-        hosts[hCnt] = locations[hCnt].getHostName();
+-        names[hCnt] = locations[hCnt].getName();
+-        NodeBase node = new NodeBase(names[hCnt], 
+-                                     locations[hCnt].getNetworkLocation());
+-        racks[hCnt] = node.toString();
+-      }
+-      blkLocations[idx] = new BlockLocation(names, hosts, racks,
+-                                            blk.getStartOffset(),
+-                                            blk.getBlockSize());
+-      idx++;
+-    }
+-    return blkLocations;
++    return DFSUtil.locatedBlocks2Locations(blocks);
+   }
+ 
+   public DFSInputStream open(String src) throws IOException {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java b/src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java
+index aa1e4c8..c8add49 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java
+@@ -19,9 +19,14 @@
+ package org.apache.hadoop.hdfs;
+ 
+ import java.io.UnsupportedEncodingException;
+-
+ import java.util.StringTokenizer;
++
++import org.apache.hadoop.fs.BlockLocation;
+ import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.net.NodeBase;
+ 
+ public class DFSUtil {
+   /**
+@@ -72,5 +77,38 @@ public class DFSUtil {
+     }
+     return null;
+   }
++
++  /**
++   * Convert a LocatedBlocks to BlockLocations[]
++   * @param blocks a LocatedBlocks
++   * @return an array of BlockLocations
++   */
++  public static BlockLocation[] locatedBlocks2Locations(LocatedBlocks blocks) {
++    if (blocks == null) {
++      return new BlockLocation[0];
++    }
++    int nrBlocks = blocks.locatedBlockCount();
++    BlockLocation[] blkLocations = new BlockLocation[nrBlocks];
++    int idx = 0;
++    for (LocatedBlock blk : blocks.getLocatedBlocks()) {
++      assert idx < nrBlocks : "Incorrect index";
++      DatanodeInfo[] locations = blk.getLocations();
++      String[] hosts = new String[locations.length];
++      String[] names = new String[locations.length];
++      String[] racks = new String[locations.length];
++      for (int hCnt = 0; hCnt < locations.length; hCnt++) {
++        hosts[hCnt] = locations[hCnt].getHostName();
++        names[hCnt] = locations[hCnt].getName();
++        NodeBase node = new NodeBase(names[hCnt], 
++                                     locations[hCnt].getNetworkLocation());
++        racks[hCnt] = node.toString();
++      }
++      blkLocations[idx] = new BlockLocation(names, hosts, racks,
++                                            blk.getStartOffset(),
++                                            blk.getBlockSize());
++      idx++;
++    }
++    return blkLocations;
++  }
+ }
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/protocol/DatanodeInfo.java b/src/hdfs/org/apache/hadoop/hdfs/protocol/DatanodeInfo.java
+index 42c173e..4deda3e 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/protocol/DatanodeInfo.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/protocol/DatanodeInfo.java
+@@ -88,6 +88,25 @@ public class DatanodeInfo extends DatanodeID implements Node {
+     this.hostName = hostName;
+   }
+   
++  /** Constructor */
++  public DatanodeInfo(final String name, final String storageID,
++      final int infoPort, final int ipcPort,
++      final long capacity, final long dfsUsed, final long remaining,
++      final long lastUpdate, final int xceiverCount,
++      final String networkLocation, final String hostName,
++      final AdminStates adminState) {
++    super(name, storageID, infoPort, ipcPort);
++
++    this.capacity = capacity;
++    this.dfsUsed = dfsUsed;
++    this.remaining = remaining;
++    this.lastUpdate = lastUpdate;
++    this.xceiverCount = xceiverCount;
++    this.location = networkLocation;
++    this.hostName = hostName;
++    this.adminState = adminState;
++  }
++
+   /** The raw capacity. */
+   public long getCapacity() { return capacity; }
+   
+@@ -279,7 +298,7 @@ public class DatanodeInfo extends DatanodeID implements Node {
+   /**
+    * Retrieves the admin state of this node.
+    */
+-  AdminStates getAdminState() {
++  public AdminStates getAdminState() {
+     if (adminState == null) {
+       return AdminStates.NORMAL;
+     }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+index 921efcb..035c273 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+@@ -611,8 +611,11 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+   }
+   
+   private static String getClientMachine() {
+-    String clientMachine = Server.getRemoteAddress();
+-    if (clientMachine == null) {
++    String clientMachine = NamenodeWebHdfsMethods.getRemoteAddress();
++    if (clientMachine == null) { //not a web client
++      clientMachine = Server.getRemoteAddress();
++    }
++    if (clientMachine == null) { //not a RPC client
+       clientMachine = "";
+     }
+     return clientMachine;
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index d0b52eb..f58d045 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -73,6 +73,7 @@ import org.apache.hadoop.hdfs.web.resources.PermissionParam;
+ import org.apache.hadoop.hdfs.web.resources.PostOpParam;
+ import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+ import org.apache.hadoop.hdfs.web.resources.RecursiveParam;
++import org.apache.hadoop.hdfs.web.resources.RenewerParam;
+ import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
+ import org.apache.hadoop.hdfs.web.resources.UriFsPathParam;
+ import org.apache.hadoop.hdfs.web.resources.UserParam;
+@@ -86,7 +87,14 @@ import org.apache.hadoop.security.token.TokenIdentifier;
+ /** Web-hdfs NameNode implementation. */
+ @Path("")
+ public class NamenodeWebHdfsMethods {
+-  private static final Log LOG = LogFactory.getLog(NamenodeWebHdfsMethods.class);
++  public static final Log LOG = LogFactory.getLog(NamenodeWebHdfsMethods.class);
++
++  private static final ThreadLocal<String> REMOTE_ADDRESS = new ThreadLocal<String>(); 
++
++  /** @return the remote client address. */
++  public static String getRemoteAddress() {
++    return REMOTE_ADDRESS.get();
++  }
+ 
+   private @Context ServletContext context;
+   private @Context HttpServletRequest request;
+@@ -205,6 +213,8 @@ public class NamenodeWebHdfsMethods {
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException, URISyntaxException {
++        REMOTE_ADDRESS.set(request.getRemoteAddr());
++        try {
+ 
+     final String fullpath = path.getAbsolutePath();
+     final NameNode namenode = (NameNode)context.getAttribute("name.node");
+@@ -253,6 +263,10 @@ public class NamenodeWebHdfsMethods {
+     default:
+       throw new UnsupportedOperationException(op + " is not supported");
+     }
++
++        } finally {
++          REMOTE_ADDRESS.set(null);
++        }
+       }
+     });
+   }
+@@ -282,6 +296,8 @@ public class NamenodeWebHdfsMethods {
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException, URISyntaxException {
++        REMOTE_ADDRESS.set(request.getRemoteAddr());
++        try {
+ 
+     final String fullpath = path.getAbsolutePath();
+     final NameNode namenode = (NameNode)context.getAttribute("name.node");
+@@ -296,6 +312,10 @@ public class NamenodeWebHdfsMethods {
+     default:
+       throw new UnsupportedOperationException(op + " is not supported");
+     }
++
++        } finally {
++          REMOTE_ADDRESS.set(null);
++        }
+       }
+     });
+   }
+@@ -316,10 +336,12 @@ public class NamenodeWebHdfsMethods {
+           final OffsetParam offset,
+       @QueryParam(LengthParam.NAME) @DefaultValue(LengthParam.DEFAULT)
+           final LengthParam length,
++      @QueryParam(RenewerParam.NAME) @DefaultValue(RenewerParam.DEFAULT)
++          final RenewerParam renewer,
+       @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
+           final BufferSizeParam bufferSize
+       ) throws IOException, URISyntaxException, InterruptedException {
+-    return get(ugi, delegation, ROOT, op, offset, length, bufferSize);
++    return get(ugi, delegation, ROOT, op, offset, length, renewer, bufferSize);
+   }
+ 
+   /** Handle HTTP GET request. */
+@@ -337,19 +359,23 @@ public class NamenodeWebHdfsMethods {
+           final OffsetParam offset,
+       @QueryParam(LengthParam.NAME) @DefaultValue(LengthParam.DEFAULT)
+           final LengthParam length,
++      @QueryParam(RenewerParam.NAME) @DefaultValue(RenewerParam.DEFAULT)
++          final RenewerParam renewer,
+       @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
+           final BufferSizeParam bufferSize
+       ) throws IOException, URISyntaxException, InterruptedException {
+ 
+     if (LOG.isTraceEnabled()) {
+       LOG.trace(op + ": " + path + ", ugi=" + ugi
+-          + Param.toSortedString(", ", offset, length, bufferSize));
++          + Param.toSortedString(", ", offset, length, renewer, bufferSize));
+     }
+ 
+ 
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException, URISyntaxException {
++        REMOTE_ADDRESS.set(request.getRemoteAddr());
++        try {
+ 
+     final NameNode namenode = (NameNode)context.getAttribute("name.node");
+     final String fullpath = path.getAbsolutePath();
+@@ -361,6 +387,15 @@ public class NamenodeWebHdfsMethods {
+           op.getValue(), offset.getValue(), offset, length, bufferSize);
+       return Response.temporaryRedirect(uri).build();
+     }
++    case GETFILEBLOCKLOCATIONS:
++    {
++      final long offsetValue = offset.getValue();
++      final Long lengthValue = length.getValue();
++      final LocatedBlocks locatedblocks = namenode.getBlockLocations(fullpath,
++          offsetValue, lengthValue != null? lengthValue: offsetValue + 1);
++      final String js = JsonUtil.toJsonString(locatedblocks);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++    }
+     case GETFILESTATUS:
+     {
+       final HdfsFileStatus status = namenode.getFileInfo(fullpath);
+@@ -372,9 +407,20 @@ public class NamenodeWebHdfsMethods {
+       final StreamingOutput streaming = getListingStream(namenode, fullpath);
+       return Response.ok(streaming).type(MediaType.APPLICATION_JSON).build();
+     }
++    case GETDELEGATIONTOKEN:
++    {
++      final Token<? extends TokenIdentifier> token = generateDelegationToken(
++          namenode, ugi, renewer.getValue());
++      final String js = JsonUtil.toJsonString(token);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++    }
+     default:
+       throw new UnsupportedOperationException(op + " is not supported");
+     }    
++
++        } finally {
++          REMOTE_ADDRESS.set(null);
++        }
+       }
+     });
+   }
+@@ -442,6 +488,9 @@ public class NamenodeWebHdfsMethods {
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException {
++        REMOTE_ADDRESS.set(request.getRemoteAddr());
++        try {
++
+         final NameNode namenode = (NameNode)context.getAttribute("name.node");
+         final String fullpath = path.getAbsolutePath();
+ 
+@@ -455,6 +504,10 @@ public class NamenodeWebHdfsMethods {
+         default:
+           throw new UnsupportedOperationException(op + " is not supported");
+         }
++
++        } finally {
++          REMOTE_ADDRESS.set(null);
++        }
+       }
+     });
+   }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+index d39539e..1beed30 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+@@ -17,19 +17,34 @@
+  */
+ package org.apache.hadoop.hdfs.web;
+ 
++import java.io.DataOutput;
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
+ import java.util.Map;
+ import java.util.TreeMap;
+ 
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSUtil;
++import org.apache.hadoop.hdfs.protocol.Block;
++import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.DatanodeInfo.AdminStates;
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
++import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
++import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.WritableUtils;
+ import org.apache.hadoop.ipc.RemoteException;
++import org.apache.hadoop.security.token.Token;
++import org.apache.hadoop.security.token.TokenIdentifier;
+ import org.mortbay.util.ajax.JSON;
+ 
+ /** JSON Utilities */
+ public class JsonUtil {
+-  private static final ThreadLocal<Map<String, Object>> jsonMap
+-      = new ThreadLocal<Map<String, Object>>() {
++  private static class ThreadLocalMap extends ThreadLocal<Map<String, Object>> {
+     @Override
+     protected Map<String, Object> initialValue() {
+       return new TreeMap<String, Object>();
+@@ -41,7 +56,54 @@ public class JsonUtil {
+       m.clear();
+       return m;
+     }
+-  };
++  }
++
++  private static final ThreadLocalMap jsonMap = new ThreadLocalMap();
++  private static final ThreadLocalMap tokenMap = new ThreadLocalMap();
++  private static final ThreadLocalMap datanodeInfoMap = new ThreadLocalMap();
++  private static final ThreadLocalMap BlockMap = new ThreadLocalMap();
++  private static final ThreadLocalMap locatedBlockMap = new ThreadLocalMap();
++
++  private static final DatanodeInfo[] EMPTY_DATANODE_INFO_ARRAY = {};
++
++  /** Convert a token object to a Json string. */
++  public static String toJsonString(final Token<? extends TokenIdentifier> token
++      ) throws IOException {
++    if (token == null) {
++      return null;
++    }
++
++    final Map<String, Object> m = tokenMap.get();
++    m.put("urlString", token.encodeToUrlString());
++    return JSON.toString(m);
++  }
++
++  /** Convert a Json map to a Token. */
++  public static Token<? extends TokenIdentifier> toToken(
++      final Map<?, ?> m) throws IOException {
++    if (m == null) {
++      return null;
++    }
++
++    final Token<DelegationTokenIdentifier> token
++        = new Token<DelegationTokenIdentifier>();
++    token.decodeFromUrlString((String)m.get("urlString"));
++    return token;
++  }
++
++  /** Convert a Json map to a Token of DelegationTokenIdentifier. */
++  @SuppressWarnings("unchecked")
++  public static Token<DelegationTokenIdentifier> toDelegationToken(
++      final Map<?, ?> m) throws IOException {
++    return (Token<DelegationTokenIdentifier>)toToken(m);
++  }
++
++  /** Convert a Json map to a Token of BlockTokenIdentifier. */
++  @SuppressWarnings("unchecked")
++  public static Token<BlockTokenIdentifier> toBlockToken(
++      final Map<?, ?> m) throws IOException {
++    return (Token<BlockTokenIdentifier>)toToken(m);
++  }
+ 
+   /** Convert an exception object to a Json string. */
+   public static String toJsonString(final Exception e) {
+@@ -77,11 +139,10 @@ public class JsonUtil {
+ 
+   /** Convert a HdfsFileStatus object to a Json string. */
+   public static String toJsonString(final HdfsFileStatus status) {
+-    final Map<String, Object> m = jsonMap.get();
+     if (status == null) {
+-      m.put("isNull", true);
++      return null;
+     } else {
+-      m.put("isNull", false);
++      final Map<String, Object> m = jsonMap.get();
+       m.put("localName", status.getLocalName());
+       m.put("isDir", status.isDir());
+       m.put("len", status.getLen());
+@@ -92,8 +153,8 @@ public class JsonUtil {
+       m.put("modificationTime", status.getModificationTime());
+       m.put("blockSize", status.getBlockSize());
+       m.put("replication", status.getReplication());
++      return JSON.toString(m);
+     }
+-    return JSON.toString(m);
+   }
+ 
+   @SuppressWarnings("unchecked")
+@@ -101,9 +162,9 @@ public class JsonUtil {
+     return (Map<String, Object>) JSON.parse(jsonString);
+   }
+ 
+-  /** Convert a Json string to a HdfsFileStatus object. */
++  /** Convert a Json map to a HdfsFileStatus object. */
+   public static HdfsFileStatus toFileStatus(final Map<String, Object> m) {
+-    if ((Boolean)m.get("isNull")) {
++    if (m == null) {
+       return null;
+     }
+ 
+@@ -120,4 +181,204 @@ public class JsonUtil {
+     return new HdfsFileStatus(len, isDir, replication, blockSize, mTime, aTime,
+         permission, owner, group, DFSUtil.string2Bytes(localName));
+   }
++
++  /** Convert a LocatedBlock to a Json string. */
++  public static String toJsonString(final Block Block) {
++    if (Block == null) {
++      return null;
++    }
++
++    final Map<String, Object> m = BlockMap.get();
++    m.put("blockId", Block.getBlockId());
++    m.put("numBytes", Block.getNumBytes());
++    m.put("generationStamp", Block.getGenerationStamp());
++    return JSON.toString(m);
++  }
++
++  /** Convert a Json map to an Block object. */
++  public static Block toBlock(final Map<?, ?> m) {
++    if (m == null) {
++      return null;
++    }
++    
++    final long blockId = (Long)m.get("blockId");
++    final long numBytes = (Long)m.get("numBytes");
++    final long generationStamp = (Long)m.get("generationStamp");
++    return new Block(blockId, numBytes, generationStamp);
++  }
++  
++  /** Convert a DatanodeInfo to a Json string. */
++  public static String toJsonString(final DatanodeInfo datanodeinfo) {
++    if (datanodeinfo == null) {
++      return null;
++    }
++
++    final Map<String, Object> m = datanodeInfoMap.get();
++    m.put("name", datanodeinfo.getName());
++    m.put("storageID", datanodeinfo.getStorageID());
++    m.put("infoPort", datanodeinfo.getInfoPort());
++
++    m.put("ipcPort", datanodeinfo.getIpcPort());
++
++    m.put("capacity", datanodeinfo.getCapacity());
++    m.put("dfsUsed", datanodeinfo.getDfsUsed());
++    m.put("remaining", datanodeinfo.getRemaining());
++    m.put("lastUpdate", datanodeinfo.getLastUpdate());
++    m.put("xceiverCount", datanodeinfo.getXceiverCount());
++    m.put("networkLocation", datanodeinfo.getNetworkLocation());
++    m.put("hostName", datanodeinfo.getHostName());
++    m.put("adminState", datanodeinfo.getAdminState().name());
++    return JSON.toString(m);
++  }
++
++  /** Convert a Json map to an DatanodeInfo object. */
++  public static DatanodeInfo toDatanodeInfo(final Map<?, ?> m) {
++    if (m == null) {
++      return null;
++    }
++
++    return new DatanodeInfo(
++        (String)m.get("name"),
++        (String)m.get("storageID"),
++        (int)(long)(Long)m.get("infoPort"),
++        (int)(long)(Long)m.get("ipcPort"),
++
++        (Long)m.get("capacity"),
++        (Long)m.get("dfsUsed"),
++        (Long)m.get("remaining"),
++        (Long)m.get("lastUpdate"),
++        (int)(long)(Long)m.get("xceiverCount"),
++        (String)m.get("networkLocation"),
++        (String)m.get("hostName"),
++        AdminStates.valueOf((String)m.get("adminState")));
++  }
++
++  /** Convert a DatanodeInfo[] to a Json string. */
++  public static String toJsonString(final DatanodeInfo[] array
++      ) throws IOException {
++    if (array == null) {
++      return null;
++    } else if (array.length == 0) {
++      return "[]";
++    } else {
++      final StringBuilder b = new StringBuilder().append('[').append(
++          toJsonString(array[0]));
++      for(int i = 1; i < array.length; i++) {
++        b.append(", ").append(toJsonString(array[i]));
++      }
++      return b.append(']').toString();
++    }
++  }
++
++  /** Convert an Object[] to a DatanodeInfo[]. */
++  public static DatanodeInfo[] toDatanodeInfoArray(final Object[] objects) {
++    if (objects == null) {
++      return null;
++    } else if (objects.length == 0) {
++      return EMPTY_DATANODE_INFO_ARRAY;
++    } else {
++      final DatanodeInfo[] array = new DatanodeInfo[objects.length];
++      for(int i = 0; i < array.length; i++) {
++        array[i] = (DatanodeInfo)toDatanodeInfo((Map<?, ?>) objects[i]);
++      }
++      return array;
++    }
++  }
++
++  /** Convert a LocatedBlock to a Json string. */
++  public static String toJsonString(final LocatedBlock locatedblock
++      ) throws IOException {
++    if (locatedblock == null) {
++      return null;
++    }
++ 
++    final Map<String, Object> m = locatedBlockMap.get();
++    m.put("blockToken", toJsonString(locatedblock.getBlockToken()));
++    m.put("isCorrupt", locatedblock.isCorrupt());
++    m.put("startOffset", locatedblock.getStartOffset());
++    m.put("block", toJsonString(locatedblock.getBlock()));
++
++    m.put("locations", toJsonString(locatedblock.getLocations()));
++    return JSON.toString(m);
++  }
++
++  /** Convert a Json map to LocatedBlock. */
++  public static LocatedBlock toLocatedBlock(final Map<?, ?> m) throws IOException {
++    if (m == null) {
++      return null;
++    }
++
++    final Block b = toBlock((Map<?, ?>)JSON.parse((String)m.get("block")));
++    final DatanodeInfo[] locations = toDatanodeInfoArray(
++        (Object[])JSON.parse((String)m.get("locations")));
++    final long startOffset = (Long)m.get("startOffset");
++    final boolean isCorrupt = (Boolean)m.get("isCorrupt");
++
++    final LocatedBlock locatedblock = new LocatedBlock(b, locations, startOffset, isCorrupt);
++    locatedblock.setBlockToken(toBlockToken((Map<?, ?>)JSON.parse((String)m.get("blockToken"))));
++    return locatedblock;
++  }
++
++  /** Convert a LocatedBlock[] to a Json string. */
++  public static String toJsonString(final List<LocatedBlock> array
++      ) throws IOException {
++    if (array == null) {
++      return null;
++    } else if (array.size() == 0) {
++      return "[]";
++    } else {
++      final StringBuilder b = new StringBuilder().append('[').append(
++          toJsonString(array.get(0)));
++      for(int i = 1; i < array.size(); i++) {
++        b.append(",\n  ").append(toJsonString(array.get(i)));
++      }
++      return b.append(']').toString();
++    }
++  }
++
++  /** Convert an Object[] to a List of LocatedBlock. 
++   * @throws IOException */
++  public static List<LocatedBlock> toLocatedBlockList(final Object[] objects
++      ) throws IOException {
++    if (objects == null) {
++      return null;
++    } else if (objects.length == 0) {
++      return Collections.emptyList();
++    } else {
++      final List<LocatedBlock> list = new ArrayList<LocatedBlock>(objects.length);
++      for(int i = 0; i < objects.length; i++) {
++        list.add((LocatedBlock)toLocatedBlock((Map<?, ?>)objects[i]));
++      }
++      return list;
++    }
++  }
++
++  /** Convert LocatedBlocks to a Json string. */
++  public static String toJsonString(final LocatedBlocks locatedblocks
++      ) throws IOException {
++    if (locatedblocks == null) {
++      return null;
++    }
++
++    final Map<String, Object> m = jsonMap.get();
++    m.put("fileLength", locatedblocks.getFileLength());
++    m.put("isUnderConstruction", locatedblocks.isUnderConstruction());
++
++    m.put("locatedBlocks", toJsonString(locatedblocks.getLocatedBlocks()));
++    return JSON.toString(m);
++  }
++
++  /** Convert a Json map to LocatedBlock. */
++  public static LocatedBlocks toLocatedBlocks(final Map<String, Object> m
++      ) throws IOException {
++    if (m == null) {
++      return null;
++    }
++    
++    final long fileLength = (Long)m.get("fileLength");
++    final boolean isUnderConstruction = (Boolean)m.get("isUnderConstruction");
++    final List<LocatedBlock> locatedBlocks = toLocatedBlockList(
++        (Object[])JSON.parse((String) m.get("locatedBlocks")));
++    return new LocatedBlocks(fileLength, locatedBlocks, isUnderConstruction);
++  }
+ }
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index db00484..18714d0 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -27,9 +27,12 @@ import java.net.HttpURLConnection;
+ import java.net.URI;
+ import java.net.URISyntaxException;
+ import java.net.URL;
++import java.util.Arrays;
++import java.util.List;
+ import java.util.Map;
+ 
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.BlockLocation;
+ import org.apache.hadoop.fs.FSDataInputStream;
+ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.FileStatus;
+@@ -41,6 +44,7 @@ import org.apache.hadoop.hdfs.HftpFileSystem;
+ import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+ import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.server.namenode.SafeModeException;
+ import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
+ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+@@ -50,7 +54,9 @@ import org.apache.hadoop.hdfs.web.resources.DstPathParam;
+ import org.apache.hadoop.hdfs.web.resources.GetOpParam;
+ import org.apache.hadoop.hdfs.web.resources.GroupParam;
+ import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
++import org.apache.hadoop.hdfs.web.resources.LengthParam;
+ import org.apache.hadoop.hdfs.web.resources.ModificationTimeParam;
++import org.apache.hadoop.hdfs.web.resources.OffsetParam;
+ import org.apache.hadoop.hdfs.web.resources.OverwriteParam;
+ import org.apache.hadoop.hdfs.web.resources.OwnerParam;
+ import org.apache.hadoop.hdfs.web.resources.Param;
+@@ -58,13 +64,16 @@ import org.apache.hadoop.hdfs.web.resources.PermissionParam;
+ import org.apache.hadoop.hdfs.web.resources.PostOpParam;
+ import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+ import org.apache.hadoop.hdfs.web.resources.RecursiveParam;
++import org.apache.hadoop.hdfs.web.resources.RenewerParam;
+ import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
+ import org.apache.hadoop.hdfs.web.resources.UserParam;
++import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.ipc.RemoteException;
+ import org.apache.hadoop.security.AccessControlException;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.authentication.client.AuthenticatedURL;
+ import org.apache.hadoop.security.authentication.client.AuthenticationException;
++import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.util.Progressable;
+ import org.mortbay.util.ajax.JSON;
+ 
+@@ -171,7 +180,7 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+       final Param<?,?>... parameters) throws IOException {
+     //initialize URI path and query
+     final String path = "/" + PATH_PREFIX
+-        + makeQualified(fspath).toUri().getPath();
++        + (fspath == null? "/": makeQualified(fspath).toUri().getPath());
+     final String query = op.toQueryString()
+         + '&' + new UserParam(ugi)
+         + Param.toSortedString("&", parameters);
+@@ -390,4 +399,29 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+     }
+     return statuses;
+   }
++
++  @Override
++  public Token<DelegationTokenIdentifier> getDelegationToken(final String renewer
++      ) throws IOException {
++    final HttpOpParam.Op op = GetOpParam.Op.GETDELEGATIONTOKEN;
++    final Map<String, Object> m = run(op, null, new RenewerParam(renewer));
++    final Token<DelegationTokenIdentifier> token = JsonUtil.toDelegationToken(m); 
++    token.setService(new Text(getCanonicalServiceName()));
++    return token;
++  }
++
++  @Override
++  public BlockLocation[] getFileBlockLocations(final FileStatus status,
++      final long offset, final long length) throws IOException {
++    if (status == null) {
++      return null;
++    }
++    statistics.incrementReadOps(1);
++
++    final Path p = status.getPath();
++    final HttpOpParam.Op op = GetOpParam.Op.GETFILEBLOCKLOCATIONS;
++    final Map<String, Object> m = run(op, p, new OffsetParam(offset),
++        new LengthParam(length));
++    return DFSUtil.locatedBlocks2Locations(JsonUtil.toLocatedBlocks(m));
++  }
+ }
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
+index 6f11871..aeb3135 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
+@@ -27,10 +27,13 @@ public class GetOpParam extends HttpOpParam<GetOpParam.Op> {
+   /** Get operations. */
+   public static enum Op implements HttpOpParam.Op {
+     OPEN(HttpURLConnection.HTTP_OK),
++    GETFILEBLOCKLOCATIONS(HttpURLConnection.HTTP_OK),
+ 
+     GETFILESTATUS(HttpURLConnection.HTTP_OK),
+     LISTSTATUS(HttpURLConnection.HTTP_OK),
+ 
++    GETDELEGATIONTOKEN(HttpURLConnection.HTTP_OK),
++
+     NULL(HttpURLConnection.HTTP_NOT_IMPLEMENTED);
+ 
+     final int expectedHttpResponseCode;
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/RenewerParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/RenewerParam.java
+new file mode 100644
+index 0000000..750e8bc
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/RenewerParam.java
+@@ -0,0 +1,41 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Renewer parameter. */
++public class RenewerParam extends StringParam {
++  /** Parameter name. */
++  public static final String NAME = "renewer";
++  /** Default parameter value. */
++  public static final String DEFAULT = NULL;
++
++  private static final Domain DOMAIN = new Domain(NAME, null);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public RenewerParam(final String str) {
++    super(DOMAIN, str == null || str.equals(DEFAULT)? null: str);
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java b/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java
+index 113657d..fcca5eb 100644
+--- a/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java
++++ b/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java
+@@ -23,25 +23,29 @@ package org.apache.hadoop.hdfs.security;
+ import java.io.ByteArrayInputStream;
+ import java.io.DataInputStream;
+ import java.io.IOException;
++import java.net.URI;
+ import java.security.PrivilegedExceptionAction;
+ 
+-import junit.framework.Assert;
+-
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.commons.logging.impl.Log4JLogger;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.DistributedFileSystem;
+ import org.apache.hadoop.hdfs.MiniDFSCluster;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager;
++import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
++import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.security.AccessControlException;
+ import org.apache.hadoop.security.UserGroupInformation;
+-import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.SecretManager.InvalidToken;
+-import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+-import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager;
++import org.apache.hadoop.security.token.Token;
++import org.apache.log4j.Level;
+ import org.junit.After;
++import org.junit.Assert;
+ import org.junit.Before;
+ import org.junit.Test;
+ 
+@@ -53,6 +57,7 @@ public class TestDelegationToken {
+   @Before
+   public void setUp() throws Exception {
+     config = new Configuration();
++    config.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
+     config.setLong(DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_MAX_LIFETIME_KEY, 10000);
+     config.setLong(DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_RENEW_INTERVAL_KEY, 5000);
+     config.set("hadoop.security.auth_to_local", 
+@@ -60,7 +65,7 @@ public class TestDelegationToken {
+         "DEFAULT");
+ 
+     FileSystem.setDefaultUri(config, "hdfs://localhost:" + "0");
+-    cluster = new MiniDFSCluster(0, config, 1, true, true, true,  null, null, null, null);
++    cluster = new MiniDFSCluster(0, config, 0, true, true, true,  null, null, null, null);
+     cluster.waitActive();
+     cluster.getNameNode().getNamesystem().getDelegationTokenSecretManager()
+ 				.startThreads();
+@@ -160,6 +165,33 @@ public class TestDelegationToken {
+   }
+   
+   @Test
++  public void testDelegationTokenWebHdfsApi() throws Exception {
++    ((Log4JLogger)NamenodeWebHdfsMethods.LOG).getLogger().setLevel(Level.ALL);
++    final DelegationTokenSecretManager dtSecretManager = cluster.getNameNode(
++        ).getNamesystem().getDelegationTokenSecretManager();
++    final String uri = WebHdfsFileSystem.SCHEME  + "://"
++        + config.get("dfs.http.address");
++    //get file system as JobTracker
++    final UserGroupInformation ugi = UserGroupInformation.createUserForTesting(
++        "JobTracker", new String[]{"user"});
++    final WebHdfsFileSystem webhdfs = ugi.doAs(
++        new PrivilegedExceptionAction<WebHdfsFileSystem>() {
++      @Override
++      public WebHdfsFileSystem run() throws Exception {
++        return (WebHdfsFileSystem)FileSystem.get(new URI(uri), config);
++      }
++    });
++
++    final Token<DelegationTokenIdentifier> token = webhdfs.getDelegationToken("JobTracker");
++    DelegationTokenIdentifier identifier = new DelegationTokenIdentifier();
++    byte[] tokenId = token.getIdentifier();
++    identifier.readFields(new DataInputStream(new ByteArrayInputStream(tokenId)));
++    LOG.info("A valid token should have non-null password, and should be renewed successfully");
++    Assert.assertTrue(null != dtSecretManager.retrievePassword(identifier));
++    dtSecretManager.renewToken(token, "JobTracker");
++  }
++
++  @Test
+   public void testDelegationTokenWithDoAs() throws Exception {
+     final DistributedFileSystem dfs = (DistributedFileSystem) cluster.getFileSystem();
+     final Token<DelegationTokenIdentifier> token = dfs.getDelegationToken(new Text(
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+index b9a2c0e..0523a2b 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
++++ b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+@@ -24,6 +24,8 @@ import java.net.URI;
+ import java.security.PrivilegedExceptionAction;
+ 
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.BlockLocation;
++import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.FileSystemContractBaseTest;
+ import org.apache.hadoop.fs.Path;
+@@ -132,4 +134,19 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+       // expected
+     }
+   }
++  
++  public void testGetFileBlockLocations() throws IOException {
++    final String f = "/test/testGetFileBlockLocations";
++    final Path p = path(f);
++    createFile(p);
++    final BlockLocation[] computed = fs.getFileBlockLocations(
++        fs.getFileStatus(p), 0L, 1L);
++    final FileSystem hdfs = cluster.getFileSystem();
++    final BlockLocation[] expected = hdfs.getFileBlockLocations(
++        hdfs.getFileStatus(new Path(f)), 0L, 1L);
++    assertEquals(expected.length, computed.length);
++    for(int i = 0; i < computed.length; i++) {
++      assertEquals(expected[i].toString(), computed[i].toString());
++    }
++  }
+ }
+-- 
+1.7.0.4
+

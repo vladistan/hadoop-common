@@ -26,14 +26,18 @@ import java.io.ByteArrayOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.DataOutputStream;
 import java.io.StringWriter;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
+import java.util.regex.Pattern;
 
 import junit.framework.TestCase;
+import static org.junit.Assert.assertArrayEquals;
 
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.util.StringUtils;
 import org.codehaus.jackson.map.ObjectMapper;
 
 
@@ -245,6 +249,40 @@ public class TestConfiguration extends TestCase {
     }
   }
 
+  public void testGetLocalPath() throws IOException {
+    Configuration conf = new Configuration();
+    String[] dirs = new String[]{"a", "b", "c"};
+    for (int i = 0; i < dirs.length; i++) {
+      dirs[i] = new Path(System.getProperty("test.build.data"), dirs[i])
+          .toString();
+    }
+    conf.set("dirs", StringUtils.join(",", Arrays.<String>asList(dirs)));
+    for (int i = 0; i < 1000; i++) {
+      String localPath = conf.getLocalPath("dirs", "dir" + i).toString();
+      assertTrue("Path doesn't end in specified dir: " + localPath,
+        localPath.endsWith("dir" + i));
+      assertFalse("Path has internal whitespace: " + localPath,
+        localPath.contains(" "));
+    }
+  }
+
+  public void testGetFile() throws IOException {
+    Configuration conf = new Configuration();
+    String[] dirs = new String[]{"a", "b", "c"};
+    for (int i = 0; i < dirs.length; i++) {
+      dirs[i] = new Path(System.getProperty("test.build.data"), dirs[i])
+          .toString();
+    }
+    conf.set("dirs", StringUtils.join(",", Arrays.<String>asList(dirs)));
+    for (int i = 0; i < 1000; i++) {
+      String localPath = conf.getFile("dirs", "dir" + i).toString();
+      assertTrue("Path doesn't end in specified dir: " + localPath,
+        localPath.endsWith("dir" + i));
+      assertFalse("Path has internal whitespace: " + localPath,
+        localPath.contains(" "));
+    }
+  }
+
   public void testToString() throws IOException {
     out=new BufferedWriter(new FileWriter(CONFIG));
     startConfig();
@@ -253,11 +291,22 @@ public class TestConfiguration extends TestCase {
     conf.addResource(fileResource);
     
     String expectedOutput = 
-      "Configuration: core-default.xml, core-site.xml, " + 
+      "Configuration: core-default.xml, core-site.xml," +
+      " mapred-default.xml, mapred-site.xml, " + 
       fileResource.toString();
     assertEquals(expectedOutput, conf.toString());
   }
-  
+
+  public void testWriteXml() throws IOException {
+    Configuration conf = new Configuration();
+    ByteArrayOutputStream baos = new ByteArrayOutputStream(); 
+    conf.writeXml(baos);
+    String result = baos.toString();
+    assertTrue("Result has proper header", result.startsWith(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?><configuration>"));
+    assertTrue("Result has proper footer", result.endsWith("</configuration>"));
+  }
+
   public void testIncludes() throws Exception {
     tearDown();
     System.out.println("XXX testIncludes");
@@ -341,6 +390,7 @@ public class TestConfiguration extends TestCase {
     appendProperty("test.int1", "20");
     appendProperty("test.int2", "020");
     appendProperty("test.int3", "-20");
+    appendProperty("test.int4", " -20 ");
     endConfig();
     Path fileResource = new Path(CONFIG);
     conf.addResource(fileResource);
@@ -350,8 +400,107 @@ public class TestConfiguration extends TestCase {
     assertEquals(20, conf.getLong("test.int2", 0));
     assertEquals(-20, conf.getInt("test.int3", 0));
     assertEquals(-20, conf.getLong("test.int3", 0));
+    assertEquals(-20, conf.getInt("test.int4", 0));
+    assertEquals(-20, conf.getLong("test.int4", 0));
   }
-	
+
+  public void testBooleanValues() throws IOException {
+    out=new BufferedWriter(new FileWriter(CONFIG));
+    startConfig();
+    appendProperty("test.bool1", "true");
+    appendProperty("test.bool2", "false");
+    appendProperty("test.bool3", "  true ");
+    appendProperty("test.bool4", " false ");
+    appendProperty("test.bool5", "foo");
+    endConfig();
+    Path fileResource = new Path(CONFIG);
+    conf.addResource(fileResource);
+    assertEquals(true, conf.getBoolean("test.bool1", false));
+    assertEquals(false, conf.getBoolean("test.bool2", true));
+    assertEquals(true, conf.getBoolean("test.bool3", false));
+    assertEquals(false, conf.getBoolean("test.bool4", true));
+    assertEquals(true, conf.getBoolean("test.bool5", true));
+  }
+  
+  public void testFloatValues() throws IOException {
+    out=new BufferedWriter(new FileWriter(CONFIG));
+    startConfig();
+    appendProperty("test.float1", "3.1415");
+    appendProperty("test.float2", "003.1415");
+    appendProperty("test.float3", "-3.1415");
+    appendProperty("test.float4", " -3.1415 ");
+    endConfig();
+    Path fileResource = new Path(CONFIG);
+    conf.addResource(fileResource);
+    assertEquals(3.1415f, conf.getFloat("test.float1", 0.0f));
+    assertEquals(3.1415f, conf.getFloat("test.float2", 0.0f));
+    assertEquals(-3.1415f, conf.getFloat("test.float3", 0.0f));
+    assertEquals(-3.1415f, conf.getFloat("test.float4", 0.0f));
+  }
+  
+  public void testGetClass() throws IOException {
+    out=new BufferedWriter(new FileWriter(CONFIG));
+    startConfig();
+    appendProperty("test.class1", "java.lang.Integer");
+    appendProperty("test.class2", " java.lang.Integer ");
+    endConfig();
+    Path fileResource = new Path(CONFIG);
+    conf.addResource(fileResource);
+    assertEquals("java.lang.Integer", conf.getClass("test.class1", null).getCanonicalName());
+    assertEquals("java.lang.Integer", conf.getClass("test.class2", null).getCanonicalName());
+  }
+  
+  public void testGetClasses() throws IOException {
+    out=new BufferedWriter(new FileWriter(CONFIG));
+    startConfig();
+    appendProperty("test.classes1", "java.lang.Integer,java.lang.String");
+    appendProperty("test.classes2", " java.lang.Integer , java.lang.String ");
+    endConfig();
+    Path fileResource = new Path(CONFIG);
+    conf.addResource(fileResource);
+    String[] expectedNames = {"java.lang.Integer", "java.lang.String"};
+    Class<?>[] defaultClasses = {};
+    Class<?>[] classes1 = conf.getClasses("test.classes1", defaultClasses);
+    Class<?>[] classes2 = conf.getClasses("test.classes2", defaultClasses);
+    assertArrayEquals(expectedNames, extractClassNames(classes1));
+    assertArrayEquals(expectedNames, extractClassNames(classes2));
+  }
+  
+  private static String[] extractClassNames(Class<?>[] classes) {
+    String[] classNames = new String[classes.length];
+    for (int i = 0; i < classNames.length; i++) {
+      classNames[i] = classes[i].getCanonicalName();
+    }
+    return classNames;
+  }
+
+  public void testPattern() throws IOException {
+    out = new BufferedWriter(new FileWriter(CONFIG));
+    startConfig();
+    appendProperty("test.pattern1", "");
+    appendProperty("test.pattern2", "(");
+    appendProperty("test.pattern3", "a+b");
+    endConfig();
+    Path fileResource = new Path(CONFIG);
+    conf.addResource(fileResource);
+
+    Pattern defaultPattern = Pattern.compile("x+");
+    // Return default if missing
+    assertEquals(defaultPattern.pattern(),
+                 conf.getPattern("xxxxx", defaultPattern).pattern());
+    // Return null if empty and default is null
+    assertNull(conf.getPattern("test.pattern1", null));
+    // Return default for empty
+    assertEquals(defaultPattern.pattern(),
+                 conf.getPattern("test.pattern1", defaultPattern).pattern());
+    // Return default for malformed
+    assertEquals(defaultPattern.pattern(),
+                 conf.getPattern("test.pattern2", defaultPattern).pattern());
+    // Works for correct patterns
+    assertEquals("a+b",
+                 conf.getPattern("test.pattern3", defaultPattern).pattern());
+  }
+
   enum Dingo { FOO, BAR };
   enum Yak { RAB, FOO };
   public void testEnum() throws IOException {
@@ -625,5 +774,14 @@ public class TestConfiguration extends TestCase {
     assertTrue("Picked out wrong key " + key3, !res.containsKey(key3));
     assertTrue("Picked out wrong key " + key4, !res.containsKey(key4));
   }
+
+  public void testUnset() {
+    Configuration conf = new Configuration();
+    conf.set("foo", "bar");
+    assertNotNull(conf.get("foo"));
+    conf.unset("foo");
+    assertNull(conf.get("foo"));
+  }
+
 }
 

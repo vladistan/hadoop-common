@@ -1,0 +1,2274 @@
+From 7419a8eb2d231ddc66c40df20543765c3d3c55b9 Mon Sep 17 00:00:00 2001
+From: Suresh Srinivas <suresh@apache.org>
+Date: Tue, 27 Sep 2011 22:21:14 +0000
+Subject: [PATCH 1229/1344] HADOOP-7510. Tokens should use original hostname provided instead of ip. Contributed by Daryn Sharp.
+ Merging change r1176645 for HADOOP-7510 from 0.20.205.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1176646 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit b009f5d4ab40b5751f3d4d9d3a5a2554ab3e9a72)
+
+Author: Daryn Sharp
+Ref: CDH-4806
+---
+ src/core/core-default.xml                          |   12 +
+ .../apache/hadoop/fs/CommonConfigurationKeys.java  |    6 +
+ src/core/org/apache/hadoop/fs/FileSystem.java      |   14 +-
+ src/core/org/apache/hadoop/ipc/Client.java         |   26 ++-
+ src/core/org/apache/hadoop/net/NetUtils.java       |  247 +++++++++++++--
+ .../org/apache/hadoop/security/SecurityUtil.java   |   95 ++++--
+ src/hdfs/org/apache/hadoop/hdfs/DFSClient.java     |   10 +-
+ .../apache/hadoop/hdfs/DistributedFileSystem.java  |    6 -
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |  193 ++++++-----
+ .../org/apache/hadoop/hdfs/HsftpFileSystem.java    |   21 +-
+ .../hadoop/hdfs/tools/DelegationTokenFetcher.java  |   10 +-
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |   14 +-
+ src/mapred/org/apache/hadoop/mapred/Child.java     |   10 +-
+ src/mapred/org/apache/hadoop/mapred/JobClient.java |    6 +-
+ .../hadoop/mapreduce/security/TokenCache.java      |    1 -
+ .../org/apache/hadoop/fs/TestLocalFileSystem.java  |    2 +-
+ .../org/apache/hadoop/hdfs/MiniDFSCluster.java     |    4 +-
+ .../org/apache/hadoop/hdfs/TestHftpFileSystem.java |  346 +++++++++-----------
+ .../hadoop/hdfs/server/namenode/TestJspHelper.java |    6 +-
+ src/test/org/apache/hadoop/ipc/TestSaslRPC.java    |   71 +++--
+ .../hadoop/mapreduce/security/TestTokenCache.java  |    6 +-
+ src/test/org/apache/hadoop/net/TestNetUtils.java   |  232 +++++++++++++-
+ .../apache/hadoop/security/TestSecurityUtil.java   |  226 +++++++++++++
+ 23 files changed, 1141 insertions(+), 423 deletions(-)
+
+diff --git a/src/core/core-default.xml b/src/core/core-default.xml
+index 027f165..7431b28 100644
+--- a/src/core/core-default.xml
++++ b/src/core/core-default.xml
+@@ -60,6 +60,18 @@
+   </description>
+ </property>
+ 
++<property>
++  <name>hadoop.security.token.service.use_ip</name>
++  <value>true</value>
++  <description>Controls whether tokens always use IP addresses.  DNS changes
++  will not be detected if this option is enabled.  Existing client connections
++  that break will always reconnect to the IP of the original host.  New clients
++  will connect to the host's new IP but fail to locate a token.  Disabling
++  this option will allow existing and new clients to detect an IP change and
++  continue to locate the new host's token.
++  </description>
++</property>
++
+ <!--
+ <property>
+   <name>hadoop.security.service.user.name.key</name>
+diff --git a/src/core/org/apache/hadoop/fs/CommonConfigurationKeys.java b/src/core/org/apache/hadoop/fs/CommonConfigurationKeys.java
+index 4b49b62..75c506f 100644
+--- a/src/core/org/apache/hadoop/fs/CommonConfigurationKeys.java
++++ b/src/core/org/apache/hadoop/fs/CommonConfigurationKeys.java
+@@ -45,6 +45,12 @@ public class CommonConfigurationKeys {
+   /** See src/core/core-default.xml */
+   public static final String  HADOOP_SECURITY_SERVICE_USER_NAME_KEY = 
+     "hadoop.security.service.user.name.key";
++  /** See src/core/core-default.xml */
++  public static final String HADOOP_SECURITY_TOKEN_SERVICE_USE_IP =
++    "hadoop.security.token.service.use_ip";
++  public static final boolean HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT =
++      true;
++  
+   public static final String IPC_SERVER_RPC_READ_THREADS_KEY =
+                                         "ipc.server.read.threadpool.size";
+   public static final int IPC_SERVER_RPC_READ_THREADS_DEFAULT = 1;
+diff --git a/src/core/org/apache/hadoop/fs/FileSystem.java b/src/core/org/apache/hadoop/fs/FileSystem.java
+index 00ba298..ed0c4e1 100644
+--- a/src/core/org/apache/hadoop/fs/FileSystem.java
++++ b/src/core/org/apache/hadoop/fs/FileSystem.java
+@@ -169,14 +169,16 @@ public abstract class FileSystem extends Configured implements Closeable {
+   }
+ 
+   /**
+-   * Get a canonical name for this file system. It returns the uri of the file
+-   * system unless overridden by a FileSystem implementation. File Systems with
+-   * a valid authority can choose to return host:port or ip:port.
+-   * 
+-   * @return A string that uniquely identifies this file system
++   * Get a canonical service name for this file system.  The token cache is
++   * the only user of this value, and uses it to lookup this filesystem's
++   * service tokens.  The token cache will not attempt to acquire tokens if the
++   * service is null.
++   * @return a service string that uniquely identifies this file system, null
++   *         if the filesystem does not implement tokens
++   * @see SecurityUtil#buildDTServiceName(URI, int) 
+    */
+   public String getCanonicalServiceName() {
+-    return getUri().toString();
++    return SecurityUtil.buildDTServiceName(getUri(), getDefaultPort());
+   }
+   
+   /** @deprecated call #getUri() instead.*/
+diff --git a/src/core/org/apache/hadoop/ipc/Client.java b/src/core/org/apache/hadoop/ipc/Client.java
+index 413f4f9..607d10a 100644
+--- a/src/core/org/apache/hadoop/ipc/Client.java
++++ b/src/core/org/apache/hadoop/ipc/Client.java
+@@ -55,7 +55,6 @@ import org.apache.commons.logging.*;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.io.IOUtils;
+-import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableUtils;
+ import org.apache.hadoop.io.DataOutputBuffer;
+@@ -412,6 +411,27 @@ public class Client {
+       saslRpcClient = new SaslRpcClient(authMethod, token, serverPrincipal);
+       return saslRpcClient.saslConnect(in2, out2);
+     }
++
++    /**
++     * Update the server address if the address corresponding to the host
++     * name has changed.
++     *
++     * @return true if an addr change was detected.
++     * @throws IOException when the hostname cannot be resolved.
++     */
++    private synchronized boolean updateAddress() throws IOException {
++      // Do a fresh lookup with the old host name.
++      InetSocketAddress currentAddr = NetUtils.makeSocketAddr(
++                               server.getHostName(), server.getPort());
++
++      if (!server.equals(currentAddr)) {
++        LOG.warn("Address change detected. Old: " + server.toString() +
++                                 " New: " + currentAddr.toString());
++        server = currentAddr;
++        return true;
++      }
++      return false;
++    }
+     
+     private synchronized void setupConnection() throws IOException {
+       short ioFailures = 0;
+@@ -1106,7 +1126,9 @@ public class Client {
+           call.error.fillInStackTrace();
+           throw call.error;
+         } else { // local exception
+-          throw wrapException(remoteId.getAddress(), call.error);
++          // use the connection because it will reflect an ip change, unlike
++          // the remoteId
++          throw wrapException(connection.getRemoteAddress(), call.error);
+         }
+       } else {
+         return call.value;
+diff --git a/src/core/org/apache/hadoop/net/NetUtils.java b/src/core/org/apache/hadoop/net/NetUtils.java
+index e48eda1..0ffbb8c 100644
+--- a/src/core/org/apache/hadoop/net/NetUtils.java
++++ b/src/core/org/apache/hadoop/net/NetUtils.java
+@@ -40,18 +40,41 @@ import org.apache.commons.logging.LogFactory;
+ import org.apache.commons.net.util.SubnetUtils;
+ import org.apache.commons.net.util.SubnetUtils.SubnetInfo;
+ import org.apache.hadoop.conf.Configuration;
+-import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.ipc.Server;
+ import org.apache.hadoop.ipc.VersionedProtocol;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.util.ReflectionUtils;
+ import org.apache.hadoop.thirdparty.guava.common.base.Preconditions;
+ 
++// this will need to be replaced someday when there is a suitable replacement
++import sun.net.dns.ResolverConfiguration;
++import sun.net.util.IPAddressUtil;
++
+ public class NetUtils {
+   private static final Log LOG = LogFactory.getLog(NetUtils.class);
+-  
++    
+   private static Map<String, String> hostToResolved = 
+                                      new HashMap<String, String>();
+ 
++  private static HostResolver hostResolver;
++  
++  static {
++    // SecurityUtils requires a more secure host resolver if tokens are
++    // using hostnames
++    setUseQualifiedHostResolver(!SecurityUtil.getTokenServiceUseIp());
++  }
++
++  /**
++   * This method is intended for use only by SecurityUtils!
++   * @param flag where the qualified or standard host resolver is used
++   *             to create socket addresses
++   */
++  public static void setUseQualifiedHostResolver(boolean flag) {
++      hostResolver = flag
++          ? new QualifiedHostResolver()
++          : new StandardHostResolver();
++  }
++  
+   /**
+    * Get the socket factory for the given class according to its
+    * configuration parameter
+@@ -138,39 +161,209 @@ public class NetUtils {
+   public static InetSocketAddress createSocketAddr(String target,
+                                                    int defaultPort) {
+     if (target == null) {
+-      throw new IllegalArgumentException("Target address cannot be null.");
++      throw new IllegalArgumentException("Socket address is null");
+     }
+-    int colonIndex = target.indexOf(':');
+-    if (colonIndex < 0 && defaultPort == -1) {
+-      throw new RuntimeException("Not a host:port pair: " + target);
+-    }
+-    String hostname;
+-    int port = -1;
+-    if (!target.contains("/")) {
+-      if (colonIndex == -1) {
+-        hostname = target;
+-      } else {
+-        // must be the old style <host>:<port>
+-        hostname = target.substring(0, colonIndex);
+-        port = Integer.parseInt(target.substring(colonIndex + 1));
+-      }
+-    } else {
+-      // a new uri
+-      URI addr = new Path(target).toUri();
+-      hostname = addr.getHost();
+-      port = addr.getPort();
++    boolean hasScheme = target.contains("://");    
++    URI uri = null;
++    try {
++      uri = hasScheme ? URI.create(target) : URI.create("dummyscheme://"+target);
++    } catch (IllegalArgumentException e) {
++      throw new IllegalArgumentException(
++          "Does not contain a valid host:port authority: " + target
++      );
+     }
+ 
++    String host = uri.getHost();
++    int port = uri.getPort();
+     if (port == -1) {
+       port = defaultPort;
+     }
++    String path = uri.getPath();
++    
++    if ((host == null) || (port < 0) ||
++        (!hasScheme && path != null && !path.isEmpty()))
++    {
++      throw new IllegalArgumentException(
++          "Does not contain a valid host:port authority: " + target
++      );
++    }
++    return makeSocketAddr(host, port);
++  }
++
++  /**
++   * Create a socket address with the given host and port.  The hostname
++   * might be replaced with another host that was set via
++   * {@link #addStaticResolution(String, String)}.  The value of
++   * hadoop.security.token.service.use_ip will determine whether the
++   * standard java host resolver is used, or if the fully qualified resolver
++   * is used.
++   * @param host the hostname or IP use to instantiate the object
++   * @param port the port number
++   * @return InetSocketAddress
++   */
++  public static InetSocketAddress makeSocketAddr(String host, int port) {
++    String staticHost = getStaticResolution(host);
++    String resolveHost = (staticHost != null) ? staticHost : host;
++    
++    InetSocketAddress addr;
++    try {
++      InetAddress iaddr = hostResolver.getByName(resolveHost);
++      // if there is a static entry for the host, make the returned
++      // address look like the original given host
++      if (staticHost != null) {
++        iaddr = InetAddress.getByAddress(host, iaddr.getAddress());
++      }
++      addr = new InetSocketAddress(iaddr, port);
++    } catch (UnknownHostException e) {
++      addr = InetSocketAddress.createUnresolved(host, port);
++    }
++    return addr;
++  }
++  
++  protected interface HostResolver {
++    InetAddress getByName(String host) throws UnknownHostException;    
++  }
+   
+-    if (getStaticResolution(hostname) != null) {
+-      hostname = getStaticResolution(hostname);
++  /**
++   * Uses standard java host resolution
++   */
++  protected static class StandardHostResolver implements HostResolver {
++    public InetAddress getByName(String host) throws UnknownHostException {
++      return InetAddress.getByName(host);
+     }
+-    return new InetSocketAddress(hostname, port);
+   }
++  
++  /**
++   * This an alternate resolver with important properties that the standard
++   * java resolver lacks:
++   * 1) The hostname is fully qualified.  This avoids security issues if not
++   *    all hosts in the cluster do not share the same search domains.  It
++   *    also prevents other hosts from performing unnecessary dns searches.
++   *    In contrast, InetAddress simply returns the host as given.
++   * 2) The InetAddress is instantiated with an exact host and IP to prevent
++   *    further unnecessary lookups.  InetAddress may perform an unnecessary
++   *    reverse lookup for an IP.
++   * 3) A call to getHostName() will always return the qualified hostname, or
++   *    more importantly, the IP if instantiated with an IP.  This avoids
++   *    unnecessary dns timeouts if the host is not resolvable.
++   * 4) Point 3 also ensures that if the host is re-resolved, ex. during a
++   *    connection re-attempt, that a reverse lookup to host and forward
++   *    lookup to IP is not performed since the reverse/forward mappings may
++   *    not always return the same IP.  If the client initiated a connection
++   *    with an IP, then that IP is all that should ever be contacted.
++   *    
++   * NOTE: this resolver is only used if:
++   *       hadoop.security.token.service.use_ip=false 
++   */
++  protected static class QualifiedHostResolver implements HostResolver {
++    @SuppressWarnings("unchecked")
++    private List<String> searchDomains =
++        ResolverConfiguration.open().searchlist();
++    
++    /**
++     * Create an InetAddress with a fully qualified hostname of the given
++     * hostname.  InetAddress does not qualify an incomplete hostname that
++     * is resolved via the domain search list.
++     * {@link InetAddress#getCanonicalHostName()} will fully qualify the
++     * hostname, but it always return the A record whereas the given hostname
++     * may be a CNAME.
++     * 
++     * @param host a hostname or ip address
++     * @return InetAddress with the fully qualified hostname or ip
++     * @throws UnknownHostException if host does not exist
++     */
++    public InetAddress getByName(String host) throws UnknownHostException {
++      InetAddress addr = null;
+ 
++      if (IPAddressUtil.isIPv4LiteralAddress(host)) {
++        // use ipv4 address as-is
++        byte[] ip = IPAddressUtil.textToNumericFormatV4(host);
++        addr = InetAddress.getByAddress(host, ip);
++      } else if (IPAddressUtil.isIPv6LiteralAddress(host)) {
++        // use ipv6 address as-is
++        byte[] ip = IPAddressUtil.textToNumericFormatV6(host);
++        addr = InetAddress.getByAddress(host, ip);
++      } else if (host.endsWith(".")) {
++        // a rooted host ends with a dot, ex. "host."
++        // rooted hosts never use the search path, so only try an exact lookup
++        addr = getByExactName(host);
++      } else if (host.contains(".")) {
++        // the host contains a dot (domain), ex. "host.domain"
++        // try an exact host lookup, then fallback to search list
++        addr = getByExactName(host);
++        if (addr == null) {
++          addr = getByNameWithSearch(host);
++        }
++      } else {
++        // it's a simple host with no dots, ex. "host"
++        // try the search list, then fallback to exact host
++        InetAddress loopback = InetAddress.getByName(null);
++        if (host.equalsIgnoreCase(loopback.getHostName())) {
++          addr = InetAddress.getByAddress(host, loopback.getAddress());
++        } else {
++          addr = getByNameWithSearch(host);
++          if (addr == null) {
++            addr = getByExactName(host);
++          }
++        }
++      }
++      // unresolvable!
++      if (addr == null) {
++        throw new UnknownHostException(host);
++      }
++      return addr;
++    }
++
++    InetAddress getByExactName(String host) {
++      InetAddress addr = null;
++      // InetAddress will use the search list unless the host is rooted
++      // with a trailing dot.  The trailing dot will disable any use of the
++      // search path in a lower level resolver.  See RFC 1535.
++      String fqHost = host;
++      if (!fqHost.endsWith(".")) fqHost += ".";
++      try {
++        addr = getInetAddressByName(fqHost);
++        // can't leave the hostname as rooted or other parts of the system
++        // malfunction, ex. kerberos principals are lacking proper host
++        // equivalence for rooted/non-rooted hostnames
++        addr = InetAddress.getByAddress(host, addr.getAddress());
++      } catch (UnknownHostException e) {
++        // ignore, caller will throw if necessary
++      }
++      return addr;
++    }
++
++    InetAddress getByNameWithSearch(String host) {
++      InetAddress addr = null;
++      if (host.endsWith(".")) { // already qualified?
++        addr = getByExactName(host); 
++      } else {
++        for (String domain : searchDomains) {
++          String dot = !domain.startsWith(".") ? "." : "";
++          addr = getByExactName(host + dot + domain);
++          if (addr != null) break;
++        }
++      }
++      return addr;
++    }
++
++    // implemented as a separate method to facilitate unit testing
++    InetAddress getInetAddressByName(String host) throws UnknownHostException {
++      return InetAddress.getByName(host);
++    }
++
++    void setSearchDomains(String ... domains) {
++      searchDomains = Arrays.asList(domains);
++    }
++  }
++  
++  /**
++   * This is for testing only!
++   */
++  static void setHostResolver(QualifiedHostResolver newResolver) {
++    hostResolver = newResolver;
++  }
++    
+   /**
+    * Handle the transition from pairs of attributes specifying a host and port
+    * to a single colon separated one.
+@@ -273,8 +466,8 @@ public class NetUtils {
+    */
+   public static InetSocketAddress getConnectAddress(Server server) {
+     InetSocketAddress addr = server.getListenerAddress();
+-    if (addr.getAddress().getHostAddress().equals("0.0.0.0")) {
+-      addr = new InetSocketAddress("127.0.0.1", addr.getPort());
++    if (addr.getAddress().isAnyLocalAddress()) {
++      addr = makeSocketAddr("127.0.0.1", addr.getPort());
+     }
+     return addr;
+   }
+diff --git a/src/core/org/apache/hadoop/security/SecurityUtil.java b/src/core/org/apache/hadoop/security/SecurityUtil.java
+index c2f0568..d6167de 100644
+--- a/src/core/org/apache/hadoop/security/SecurityUtil.java
++++ b/src/core/org/apache/hadoop/security/SecurityUtil.java
+@@ -30,6 +30,7 @@ import javax.security.auth.kerberos.KerberosTicket;
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.CommonConfigurationKeys;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.authorize.AccessControlList;
+@@ -43,6 +44,33 @@ public class SecurityUtil {
+   public static final Log LOG = LogFactory.getLog(SecurityUtil.class);
+   public static final String HOSTNAME_PATTERN = "_HOST";
+ 
++  // controls whether buildTokenService will use an ip or host/ip as given
++  // by the user
++  private static boolean useIpForTokenService;
++  
++  static {
++    boolean useIp = new Configuration().getBoolean(
++      CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP,
++      CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT);
++    setTokenServiceUseIp(useIp);
++  }
++  
++  /**
++   * For use only by tests!
++   */
++  static void setTokenServiceUseIp(boolean flag) {
++    useIpForTokenService = flag;
++    NetUtils.setUseQualifiedHostResolver(!flag);
++  }
++  
++  /**
++   * Intended only for temporary use by NetUtils.  Do not use.
++   * @return whether tokens use an IP address
++   */
++ public static boolean getTokenServiceUseIp() {
++    return useIpForTokenService;
++  }
++  
+   /**
+    * Find the original TGT within the current subject's credentials. Cross-realm
+    * TGT's of the form "krbtgt/TWO.COM@ONE.COM" may be present.
+@@ -236,6 +264,15 @@ public class SecurityUtil {
+         hostname);
+     UserGroupInformation.loginUserFromKeytab(principalName, keytabFilename);
+   }
++
++  /**
++   * Decode the given token's service field into an InetAddress
++   * @param token from which to obtain the service
++   * @return InetAddress for the service
++   */
++  public static InetSocketAddress getTokenServiceAddr(Token<?> token) {
++    return NetUtils.createSocketAddr(token.getService().toString());
++  }
+   
+   /**
+    * Set the given token's service to the format expected by the RPC client 
+@@ -248,48 +285,42 @@ public class SecurityUtil {
+   
+   /**
+    * Construct the service key for a token
+-   * @param addr the socket for the rpc connection
+-   * @return Text formatted for the service field in a token 
++   * @param addr InetSocketAddress of remote connection with a token
++   * @return "ip:port" or "host:port" depending on the value of
++   *          hadoop.security.token.service.use_ip
+    */
+   public static Text buildTokenService(InetSocketAddress addr) {
+-    return new Text(buildDTAuthority(addr));
++    String host = null;
++    if (useIpForTokenService) {
++      if (addr.isUnresolved()) { // host has no ip address
++        throw new IllegalArgumentException(
++            new UnknownHostException(addr.getHostName())
++        );
++      }
++      host = addr.getAddress().getHostAddress();
++    } else {
++      host = addr.getHostName().toLowerCase();
++    }
++    return new Text(host + ":" + addr.getPort());
+   }
+   
+   /**
+-   * create service name for Delegation token ip:port
+-   * @param uri
+-   * @return "ip:port"
++   * create the service name for a Delegation token
++   * @param uri of the service
++   * @param defPort is used if the uri lacks a port
++   * @return the token service, or null if no authority
++   * @see #buildTokenService(InetSocketAddress)
+    */
+   public static String buildDTServiceName(URI uri, int defPort) {
+-    InetSocketAddress addr = NetUtils.createSocketAddr(uri.getAuthority(),
+-                                                       defPort);
+-    return buildDTAuthority(addr);
++    String authority = uri.getAuthority();
++    if (authority == null || authority.isEmpty()) {
++      return null;
++    }
++    InetSocketAddress addr = NetUtils.createSocketAddr(authority, defPort);
++    return buildTokenService(addr).toString();
+    }
+   
+   /**
+-   * create an authority name for looking up a Delegation token based
+-   * on a socket
+-   * @param addr InetSocketAddress of remote connection with a token
+-   * @return "ip:port"
+-   */
+-  static String buildDTAuthority(InetSocketAddress addr) {
+-    String host= addr.getAddress().getHostAddress();
+-    return buildDTAuthority(host, addr.getPort());
+-  }
+-  
+-  /**
+-   * create an authority name for looking up a Delegation token based
+-   * on a host/ip pair
+-   * @param host the remote host
+-   * @param port the remote port
+-   * @return "ip:port"
+-   */
+-  static String buildDTAuthority(String host, int port) {
+-    host = (host != null) ? NetUtils.normalizeHostName(host) : "";
+-    return host + ":" + port;
+-  }
+-  
+-  /**
+    * Get the ACL object representing the cluster administrators
+    * The user who starts the daemon is automatically added as an admin
+    * @param conf
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+index fc68239..ff913ec 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+@@ -161,7 +161,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+ 
+   /** Create {@link ClientDatanodeProtocol} proxy with block/token */
+   static ClientDatanodeProtocol createClientDatanodeProtocolProxy (
+-      DatanodeInfo di, Configuration conf, int socketTimeout,
++      DatanodeInfo di, Configuration conf,  int socketTimeout,
+       Block block, Token<BlockTokenIdentifier> token,
+       boolean connectToDnViaHostname) throws IOException {
+     final String dnName = di.getNameWithIpcPort(connectToDnViaHostname);
+@@ -494,9 +494,9 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+       Token<DelegationTokenIdentifier> delToken = 
+           (Token<DelegationTokenIdentifier>) token;
+       LOG.info("Renewing " + stringifyToken(delToken));
++      InetSocketAddress addr = SecurityUtil.getTokenServiceAddr(token);
+       ClientProtocol nn = 
+-        createRPCNamenode(NameNode.getAddress(token.getService().toString()),
+-                          conf, UserGroupInformation.getCurrentUser());
++          createRPCNamenode(addr, conf, UserGroupInformation.getCurrentUser());
+       try {
+         return nn.renewDelegationToken(delToken);
+       } catch (RemoteException re) {
+@@ -511,9 +511,9 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+       Token<DelegationTokenIdentifier> delToken = 
+           (Token<DelegationTokenIdentifier>) token;
+       LOG.info("Cancelling " + stringifyToken(delToken));
++      InetSocketAddress addr = SecurityUtil.getTokenServiceAddr(token);
+       ClientProtocol nn = 
+-          createRPCNamenode(NameNode.getAddress(token.getService().toString()),
+-                            conf, UserGroupInformation.getCurrentUser());
++          createRPCNamenode(addr, conf, UserGroupInformation.getCurrentUser());
+         try {
+           nn.cancelDelegationToken(delToken);
+         } catch (RemoteException re) {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+index dcdbd92..5afc102 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+@@ -39,7 +39,6 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.DFSClient.DFSOutputStream;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.security.AccessControlException;
+-import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.SecretManager.InvalidToken;
+ import org.apache.hadoop.util.Progressable;
+@@ -66,11 +65,6 @@ public class DistributedFileSystem extends FileSystem {
+   public DistributedFileSystem() {
+   }
+ 
+-  @Override
+-  public String getCanonicalServiceName() {
+-    return SecurityUtil.buildDTServiceName(getUri(), getDefaultPort());
+-  }
+-  
+   /** @deprecated */
+   public DistributedFileSystem(InetSocketAddress namenode,
+     Configuration conf) throws IOException {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index 5c4ebeb..f16e5da 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -49,6 +49,7 @@ import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSelector;
+ import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.server.namenode.StreamFile;
+@@ -62,6 +63,7 @@ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+ import org.apache.hadoop.security.token.TokenRenewer;
++import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
+ import org.apache.hadoop.util.Progressable;
+ import org.apache.hadoop.util.ServletUtil;
+ import org.xml.sax.Attributes;
+@@ -82,21 +84,28 @@ public class HftpFileSystem extends FileSystem {
+     HttpURLConnection.setFollowRedirects(true);
+   }
+ 
+-  public static final int DEFAULT_PORT = 50470;
++  public static final int DEFAULT_PORT = 50070;
++  public static final int DEFAULT_SECURE_PORT = 50470;
+   public static final Text TOKEN_KIND = new Text("HFTP delegation");
+   
+-  protected InetSocketAddress nnAddr;
+   protected UserGroupInformation ugi; 
+-  private String nnHttpUrl;
+-  private Text hdfsServiceName;
+   private URI hftpURI;
+ 
++  protected InetSocketAddress nnAddr;
++  protected InetSocketAddress nnSecureAddr;  
++
+   public static final String HFTP_TIMEZONE = "UTC";
+   public static final String HFTP_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssZ";
+   private Token<?> delegationToken;
+   private Token<?> renewToken;
+   public static final String HFTP_SERVICE_NAME_KEY = "hdfs.service.host_";
+ 
++  private static final HftpDelegationTokenSelector hftpTokenSelector =
++      new HftpDelegationTokenSelector();
++
++  private static final DelegationTokenSelector hdfsTokenSelector =
++      new DelegationTokenSelector();
++
+   public static final SimpleDateFormat getDateFormat() {
+     final SimpleDateFormat df = new SimpleDateFormat(HFTP_DATE_FORMAT);
+     df.setTimeZone(TimeZone.getTimeZone(HFTP_TIMEZONE));
+@@ -112,97 +121,96 @@ public class HftpFileSystem extends FileSystem {
+ 
+   @Override
+   protected int getDefaultPort() {
+-    return DEFAULT_PORT;
++    return getConf().getInt("dfs.http.port", DEFAULT_PORT);
++  }
++
++  protected int getDefaultSecurePort() {
++    return getConf().getInt("dfs.https.port", DEFAULT_SECURE_PORT);
++  }
++
++  protected InetSocketAddress getNamenodeAddr(URI uri) {
++    // use authority so user supplied uri can override port
++    return NetUtils.createSocketAddr(uri.getAuthority(), getDefaultPort());
++  }
++
++  protected InetSocketAddress getNamenodeSecureAddr(URI uri) {
++    // must only use the host and the configured https port
++    return NetUtils.makeSocketAddr(uri.getHost(), getDefaultSecurePort());
+   }
+ 
+   @Override
+   public String getCanonicalServiceName() {
+-    return SecurityUtil.buildDTServiceName(hftpURI, getDefaultPort());
++    // unlike other filesystems, hftp's service is the secure port, not the
++    // actual port in the uri
++    return SecurityUtil.buildTokenService(nnSecureAddr).toString();
+   }
+ 
+   @Override
+   public void initialize(final URI name, final Configuration conf) 
+   throws IOException {
+-    super.initialize(name, conf);
+     setConf(conf);
++    super.initialize(name, conf);
+     this.ugi = UserGroupInformation.getCurrentUser();
+-
+-    nnAddr = NetUtils.createSocketAddr(name.toString());
+-    StringBuilder sb = new StringBuilder();
+-    sb.append(NetUtils.normalizeHostName(name.getHost()));
+-    sb.append(":");
+-    sb.append(conf.getInt("dfs.https.port", DEFAULT_PORT));
+-    String tail = sb.toString();
+-    nnHttpUrl = "https://" + tail;
++    this.nnAddr = getNamenodeAddr(name);
++    this.nnSecureAddr = getNamenodeSecureAddr(name);
++    this.hftpURI = createUri(name.getScheme(), nnAddr);
+     
+-    try {
+-      hftpURI = new URI("hftp://" + tail);
+-    } catch (URISyntaxException ue) {
+-      throw new IOException("bad uri for hdfs", ue);
+-    }
+-    String key = HftpFileSystem.HFTP_SERVICE_NAME_KEY+
+-        SecurityUtil.buildDTServiceName(name, DEFAULT_PORT);
+-    LOG.debug("Trying to find DT for " + name + " using key=" + key + 
+-        "; conf=" + conf.get(key, ""));
+-    String nnServiceName = conf.get(key);
+-    int nnPort = NameNode.DEFAULT_PORT;
+-    if (nnServiceName != null) {
+-      nnPort = NetUtils.createSocketAddr(nnServiceName, 
+-                                         NameNode.DEFAULT_PORT).getPort();
+-    }
+-    sb = new StringBuilder("hdfs://");
+-    sb.append(nnAddr.getHostName());
+-    sb.append(":");
+-    sb.append(nnPort);
+-    try {
+-      URI hdfsURI = new URI(sb.toString());
+-      hdfsServiceName = new Text(SecurityUtil.buildDTServiceName(hdfsURI, 
+-                                                                 nnPort));
+-    } catch (URISyntaxException ue) {
+-      throw new IOException("bad uri for hdfs", ue);
+-    }
+     if (UserGroupInformation.isSecurityEnabled()) {
+-      String hftpServiceName = getCanonicalServiceName();
+-      for (Token<? extends TokenIdentifier> t : ugi.getTokens()) {
+-        Text kind = t.getKind();
+-        if (DelegationTokenIdentifier.HDFS_DELEGATION_KIND.equals(kind)){
+-          if (hdfsServiceName.equals(t.getService())) {
+-            setDelegationToken(t);
+-            break;
+-          }
+-        } else if (TOKEN_KIND.equals(kind)) {
+-          if (hftpServiceName.equals(normalizeService(t.getService()
+-                                       .toString()))) {
+-            setDelegationToken(t);
+-            break;
+-          }
+-        }
+-      }
+-      
++      Token<?> token = selectHftpDelegationToken();
++      if (token == null) {
++        token = selectHdfsDelegationToken();
++      }   
+       //since we don't already have a token, go get one over https
+-      if (delegationToken == null) {
+-        Token<?> newToken = getDelegationToken(null);
+-        if (newToken != null) {
+-          setDelegationToken(newToken);
++      if (token == null) {
++        token = getDelegationToken(null);
++        // security might be disabled
++        if (token != null) {
++          setDelegationToken(token);
+           renewer.addTokenToRenew(this);
+-          LOG.debug("Created new DT for " + delegationToken.getService());
++          LOG.debug("Created new DT for " + token.getService());
+         }
+       } else {
+-        LOG.debug("Found existing DT for " + delegationToken.getService());        
++        LOG.debug("Found existing DT for " + token.getService());        
+       }
+     }
+   }
+ 
+-  private String normalizeService(String service) {
+-    int colonIndex = service.indexOf(':');
+-    if (colonIndex == -1) {
+-      throw new IllegalArgumentException("Invalid service for hftp token: " + 
+-                                         service);
++  private Token<DelegationTokenIdentifier> selectHftpDelegationToken() {
++    Text serviceName = SecurityUtil.buildTokenService(nnSecureAddr);
++    return hftpTokenSelector.selectToken(serviceName, ugi.getTokens());      
++  }
++  
++  private Token<DelegationTokenIdentifier> selectHdfsDelegationToken() {
++    // this guesses the remote cluster's rpc service port.
++    // the current token design assumes it's the same as the local cluster's
++    // rpc port unless a config key is set.  there should be a way to automatic
++    // and correctly determine the value
++    String key = HftpFileSystem.HFTP_SERVICE_NAME_KEY+
++        SecurityUtil.buildTokenService(nnSecureAddr);
++    String nnServiceName = getConf().get(key);
++    LOG.debug("Trying to find DT for " + getUri() + " using key=" + key + 
++        "; conf=" + nnServiceName);
++    
++    int nnRpcPort = NameNode.DEFAULT_PORT;
++    if (nnServiceName != null) {
++      nnRpcPort = NetUtils.createSocketAddr(nnServiceName, nnRpcPort).getPort(); 
+     }
+-    String hostname = 
+-        NetUtils.normalizeHostName(service.substring(0, colonIndex));
+-    String port = service.substring(colonIndex + 1);
+-    return hostname + ":" + port;
++    
++    InetSocketAddress addr = 
++        NetUtils.makeSocketAddr(nnAddr.getHostName(), nnRpcPort);
++    Text serviceName = SecurityUtil.buildTokenService(addr);
++    
++    return hdfsTokenSelector.selectToken(serviceName, ugi.getTokens());
++  }
++  
++  private static URI createUri(String scheme, InetSocketAddress addr) {
++    URI uri = null;
++    try {
++      uri = new URI(scheme, null, addr.getHostName(), addr.getPort(), null, null, null);
++    } catch (URISyntaxException ue) {
++      throw new IllegalArgumentException(ue);
++    }
++    return uri;
+   }
+ 
+   private <T extends TokenIdentifier> void setDelegationToken(Token<T> token) {
+@@ -210,13 +218,18 @@ public class HftpFileSystem extends FileSystem {
+     // emulate the 203 usage of the tokens
+     // by setting the kind and service as if they were hdfs tokens
+     delegationToken = new Token<T>(token);
++    // NOTE: the remote nn must be configured to use hdfs
+     delegationToken.setKind(DelegationTokenIdentifier.HDFS_DELEGATION_KIND);
+-    delegationToken.setService(hdfsServiceName);
++    // no need to change service because we aren't exactly sure what it
++    // should be.  we can guess, but it might be wrong if the local conf
++    // value is incorrect.  the service is a client side field, so the remote
++    // end does not care about the value
+   }
+ 
+   @Override
+   public synchronized Token<?> getDelegationToken(final String renewer
+                                                   ) throws IOException {
++    final String nnHttpUrl = createUri("https", nnSecureAddr).toString();
+     try {
+       //Renew TGT if needed
+       ugi.checkTGTAndReloginFromKeytab();
+@@ -247,12 +260,7 @@ public class HftpFileSystem extends FileSystem {
+ 
+   @Override
+   public URI getUri() {
+-    try {
+-      return new URI("hftp", null, nnAddr.getHostName(), nnAddr.getPort(),
+-                     null, null, null);
+-    } catch (URISyntaxException e) {
+-      return null;
+-    } 
++    return hftpURI;
+   }
+   
+   /**
+@@ -810,10 +818,11 @@ public class HftpFileSystem extends FileSystem {
+       // update the kerberos credentials, if they are coming from a keytab
+       UserGroupInformation.getLoginUser().checkTGTAndReloginFromKeytab();
+       // use https to renew the token
+-      return 
+-        DelegationTokenFetcher.renewDelegationToken
+-        ("https://" + token.getService().toString(), 
+-         (Token<DelegationTokenIdentifier>) token);
++      InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
++      return DelegationTokenFetcher.renewDelegationToken(
++          createUri("https", serviceAddr).toString(),
++          (Token<DelegationTokenIdentifier>) token
++      );
+     }
+ 
+     @SuppressWarnings("unchecked")
+@@ -823,10 +832,20 @@ public class HftpFileSystem extends FileSystem {
+       // update the kerberos credentials, if they are coming from a keytab
+       UserGroupInformation.getLoginUser().checkTGTAndReloginFromKeytab();
+       // use https to cancel the token
+-      DelegationTokenFetcher.cancelDelegationToken
+-        ("https://" + token.getService().toString(), 
+-         (Token<DelegationTokenIdentifier>) token);
++      InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
++      DelegationTokenFetcher.cancelDelegationToken(
++          createUri("https", serviceAddr).toString(), 
++          (Token<DelegationTokenIdentifier>) token
++      );
+     }
+     
+   }
++  
++  private static class HftpDelegationTokenSelector
++  extends AbstractDelegationTokenSelector<DelegationTokenIdentifier> {
++
++    public HftpDelegationTokenSelector() {
++      super(TOKEN_KIND);
++    }
++  }
+ }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
+index 9280a09..6b413fa 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
+@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs;
+ 
+ import java.io.IOException;
+ import java.net.HttpURLConnection;
++import java.net.InetSocketAddress;
+ import java.net.URI;
+ import java.net.URISyntaxException;
+ import java.net.URL;
+@@ -65,6 +66,16 @@ public class HsftpFileSystem extends HftpFileSystem {
+   }
+ 
+   @Override
++  protected int getDefaultPort() {
++    return getDefaultSecurePort();
++  }
++
++  @Override
++  protected InetSocketAddress getNamenodeSecureAddr(URI uri) {
++    return getNamenodeAddr(uri);
++  }
++
++  @Override
+   protected HttpURLConnection openConnection(String path, String query)
+       throws IOException {
+     try {
+@@ -80,16 +91,6 @@ public class HsftpFileSystem extends HftpFileSystem {
+     }
+   }
+ 
+-  @Override
+-  public URI getUri() {
+-    try {
+-      return new URI("hsftp", null, nnAddr.getHostName(), nnAddr.getPort(),
+-                     null, null, null);
+-    } catch (URISyntaxException e) {
+-      return null;
+-    } 
+-  }
+-
+   /**
+    * Dummy hostname verifier that is used to bypass hostname checking
+    */
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java b/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java
+index bdd9c1a..a4076f5 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java
+@@ -24,6 +24,7 @@ import java.io.InputStream;
+ import java.io.InputStreamReader;
+ import java.io.PrintStream;
+ import java.net.HttpURLConnection;
++import java.net.InetSocketAddress;
+ import java.net.URL;
+ import java.net.URLConnection;
+ import java.security.PrivilegedExceptionAction;
+@@ -42,7 +43,7 @@ import org.apache.hadoop.hdfs.server.namenode.CancelDelegationTokenServlet;
+ import org.apache.hadoop.hdfs.server.namenode.GetDelegationTokenServlet;
+ import org.apache.hadoop.hdfs.server.namenode.RenewDelegationTokenServlet;
+ import org.apache.hadoop.io.IOUtils;
+-import org.apache.hadoop.io.Text;
++import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.Credentials;
+ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -112,7 +113,7 @@ public class DelegationTokenFetcher {
+       printUsage(System.err);
+     }
+     if (remaining.length != 1 || remaining[0].charAt(0) == '-') {
+-      System.err.println("ERROR: Must specify exacltly one token file");
++      System.err.println("ERROR: Must specify exactly one token file");
+       printUsage(System.err);
+     }
+     // default to using the local file system
+@@ -167,6 +168,7 @@ public class DelegationTokenFetcher {
+   static public Credentials getDTfromRemote(String nnAddr, 
+                                             String renewer) throws IOException {
+     DataInputStream dis = null;
++    InetSocketAddress serviceAddr = NetUtils.createSocketAddr(nnAddr);
+ 
+     try {
+       StringBuffer url = new StringBuffer();
+@@ -187,9 +189,7 @@ public class DelegationTokenFetcher {
+       ts.readFields(dis);
+       for(Token<?> token: ts.getAllTokens()) {
+         token.setKind(HftpFileSystem.TOKEN_KIND);
+-        token.setService(new Text(SecurityUtil.buildDTServiceName
+-                                   (remoteURL.toURI(), 
+-                                    HftpFileSystem.DEFAULT_PORT)));
++        SecurityUtil.setTokenService(token, serviceAddr);
+       }
+       return ts;
+     } catch (Exception e) {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 178b174..56b7c77 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -65,9 +65,9 @@ import org.apache.hadoop.hdfs.web.resources.RecursiveParam;
+ import org.apache.hadoop.hdfs.web.resources.RenewerParam;
+ import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
+ import org.apache.hadoop.hdfs.web.resources.UserParam;
+-import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.ipc.RemoteException;
+ import org.apache.hadoop.security.AccessControlException;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.authentication.client.AuthenticatedURL;
+ import org.apache.hadoop.security.authentication.client.AuthenticationException;
+@@ -106,16 +106,6 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+   }
+ 
+   @Override
+-  public URI getUri() {
+-    try {
+-      return new URI(SCHEME, null, nnAddr.getHostName(), nnAddr.getPort(),
+-          null, null, null);
+-    } catch (URISyntaxException e) {
+-      return null;
+-    }
+-  }
+-
+-  @Override
+   public Path getHomeDirectory() {
+     return makeQualified(new Path("/user/" + ugi.getShortUserName()));
+   }
+@@ -416,7 +406,7 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+     final HttpOpParam.Op op = GetOpParam.Op.GETDELEGATIONTOKEN;
+     final Map<String, Object> m = run(op, null, new RenewerParam(renewer));
+     final Token<DelegationTokenIdentifier> token = JsonUtil.toDelegationToken(m); 
+-    token.setService(new Text(getCanonicalServiceName()));
++    SecurityUtil.setTokenService(token, nnAddr);
+     return token;
+   }
+ 
+diff --git a/src/mapred/org/apache/hadoop/mapred/Child.java b/src/mapred/org/apache/hadoop/mapred/Child.java
+index 78f8ee6..da39c12 100644
+--- a/src/mapred/org/apache/hadoop/mapred/Child.java
++++ b/src/mapred/org/apache/hadoop/mapred/Child.java
+@@ -25,16 +25,12 @@ import java.io.PrintStream;
+ import java.net.InetSocketAddress;
+ import java.security.PrivilegedExceptionAction;
+ import java.util.Arrays;
+-import java.util.List;
+-import java.util.regex.Pattern;
+-
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.fs.FSError;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.LocalDirAllocator;
+ import org.apache.hadoop.fs.Path;
+-import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.ipc.RPC;
+ import org.apache.hadoop.mapreduce.security.TokenCache;
+ import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
+@@ -46,6 +42,7 @@ import org.apache.hadoop.mapreduce.server.tasktracker.JVMInfo;
+ import org.apache.hadoop.mapreduce.server.tasktracker.Localizer;
+ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.Credentials;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.util.Shell;
+@@ -88,7 +85,7 @@ class Child {
+     final JobConf defaultConf = new JobConf();
+     String host = args[0];
+     int port = Integer.parseInt(args[1]);
+-    final InetSocketAddress address = new InetSocketAddress(host, port);
++    final InetSocketAddress address = NetUtils.makeSocketAddr(host, port);
+     final TaskAttemptID firstTaskid = TaskAttemptID.forName(args[2]);
+     final String logLocation = args[3];
+     final int SLEEP_LONGER_COUNT = 5;
+@@ -110,8 +107,7 @@ class Child {
+         "; from file=" + jobTokenFile);
+     
+     Token<JobTokenIdentifier> jt = TokenCache.getJobToken(credentials);
+-    jt.setService(new Text(address.getAddress().getHostAddress() + ":"
+-        + address.getPort()));
++    SecurityUtil.setTokenService(jt, address);
+     UserGroupInformation current = UserGroupInformation.getCurrentUser();
+     current.addToken(jt);
+ 
+diff --git a/src/mapred/org/apache/hadoop/mapred/JobClient.java b/src/mapred/org/apache/hadoop/mapred/JobClient.java
+index 8cc77cb..166868f 100644
+--- a/src/mapred/org/apache/hadoop/mapred/JobClient.java
++++ b/src/mapred/org/apache/hadoop/mapred/JobClient.java
+@@ -520,8 +520,7 @@ public class JobClient extends Configured implements MRConstants, Tool  {
+     @Override
+     public long renew(Token<?> token, Configuration conf
+                       ) throws IOException, InterruptedException {
+-      InetSocketAddress addr = 
+-          NetUtils.createSocketAddr(token.getService().toString());
++      InetSocketAddress addr = SecurityUtil.getTokenServiceAddr(token);
+       JobSubmissionProtocol jt = createRPCProxy(addr, conf);
+       return jt.renewDelegationToken((Token<DelegationTokenIdentifier>) token);
+     }
+@@ -530,8 +529,7 @@ public class JobClient extends Configured implements MRConstants, Tool  {
+     @Override
+     public void cancel(Token<?> token, Configuration conf
+                        ) throws IOException, InterruptedException {
+-      InetSocketAddress addr = 
+-          NetUtils.createSocketAddr(token.getService().toString());
++      InetSocketAddress addr = SecurityUtil.getTokenServiceAddr(token);
+       JobSubmissionProtocol jt = createRPCProxy(addr, conf);
+       jt.cancelDelegationToken((Token<DelegationTokenIdentifier>) token);
+     }
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/security/TokenCache.java b/src/mapred/org/apache/hadoop/mapreduce/security/TokenCache.java
+index 55799d5..68fea30 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/security/TokenCache.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/security/TokenCache.java
+@@ -131,7 +131,6 @@ public class TokenCache {
+         Token<?> token = fs.getDelegationToken(delegTokenRenewer);
+         if (token != null) {
+           Text fsNameText = new Text(fsName);
+-          token.setService(fsNameText);
+           credentials.addToken(fsNameText, token);
+           LOG.info("Got dt for " + p + ";uri="+ fsName + 
+                    ";t.service="+token.getService());
+diff --git a/src/test/org/apache/hadoop/fs/TestLocalFileSystem.java b/src/test/org/apache/hadoop/fs/TestLocalFileSystem.java
+index c5fd3e8..2179e5b 100644
+--- a/src/test/org/apache/hadoop/fs/TestLocalFileSystem.java
++++ b/src/test/org/apache/hadoop/fs/TestLocalFileSystem.java
+@@ -158,6 +158,6 @@ public class TestLocalFileSystem extends TestCase {
+   public void testGetCanonicalServiceName() throws IOException {
+     Configuration conf = new Configuration();
+     FileSystem fs = FileSystem.getLocal(conf);
+-    assertEquals(fs.getUri().toString(), fs.getCanonicalServiceName());
++    assertNull(fs.getCanonicalServiceName());
+   }
+ }
+diff --git a/src/test/org/apache/hadoop/hdfs/MiniDFSCluster.java b/src/test/org/apache/hadoop/hdfs/MiniDFSCluster.java
+index 8a9ebd4..b8a1a63 100644
+--- a/src/test/org/apache/hadoop/hdfs/MiniDFSCluster.java
++++ b/src/test/org/apache/hadoop/hdfs/MiniDFSCluster.java
+@@ -424,6 +424,8 @@ public class MiniDFSCluster {
+         NetUtils.addStaticResolution(hosts[i - curDatanodesNum], "localhost");
+       }
+       DataNode dn = DataNode.instantiateDataNode(dnArgs, dnConf);
++      //NOTE: the following is true if and only if:
++      //      hadoop.security.token.service.use_ip=true
+       //since the HDFS does things based on IP:port, we need to add the mapping
+       //for IP:port to rackId
+       String ipAddr = dn.getSelfAddr().getAddress().getHostAddress();
+@@ -855,7 +857,7 @@ public class MiniDFSCluster {
+     if (nameNode == null) {
+       return;
+     }
+-    InetSocketAddress addr = new InetSocketAddress("localhost",
++    InetSocketAddress addr = NetUtils.makeSocketAddr("localhost",
+                                                    getNameNodePort());
+     DFSClient client = new DFSClient(addr, conf);
+ 
+diff --git a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+index 18c8985..b15cf4e 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
++++ b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+@@ -18,215 +18,193 @@
+ 
+ package org.apache.hadoop.hdfs;
+ 
+-import java.io.IOException;
+-import java.net.URISyntaxException;
+-import java.net.URL;
+-import java.net.HttpURLConnection;
+-import java.util.Random;
++import static org.junit.Assert.assertEquals;
+ 
+-import org.junit.Test;
+-import org.junit.BeforeClass;
+-import org.junit.AfterClass;
+-import static org.junit.Assert.*;
++import java.io.IOException;
++import java.net.URI;
+ 
+-import org.apache.commons.logging.impl.Log4JLogger;
+ import org.apache.hadoop.conf.Configuration;
+-import org.apache.hadoop.fs.BlockLocation;
+-import org.apache.hadoop.fs.FSDataInputStream;
+-import org.apache.hadoop.fs.FSDataOutputStream;
+-import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
+-import org.apache.hadoop.fs.Path;
+-import org.apache.hadoop.hdfs.server.datanode.DataNode;
+-import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+-import org.apache.hadoop.util.ServletUtil;
+-import org.apache.log4j.Level;
++import org.junit.Before;
++import org.junit.Test;
+ 
+ public class TestHftpFileSystem {
+-  private static final Random RAN = new Random();
+   
+-  private static Configuration config = null;
+-  private static MiniDFSCluster cluster = null;
+-  private static FileSystem hdfs = null;
+-  private static HftpFileSystem hftpFs = null;
+-
+-  private static Path[] TEST_PATHS = new Path[] {
+-      // URI does not encode, Request#getPathInfo returns /foo
+-      new Path("/foo;bar"),
+-
+-      // URI does not encode, Request#getPathInfo returns verbatim
+-      new Path("/foo+"),
+-      new Path("/foo+bar/foo+bar"),
+-      new Path("/foo=bar/foo=bar"),
+-      new Path("/foo,bar/foo,bar"),
+-      new Path("/foo@bar/foo@bar"),
+-      new Path("/foo&bar/foo&bar"),
+-      new Path("/foo$bar/foo$bar"),
+-      new Path("/foo_bar/foo_bar"),
+-      new Path("/foo~bar/foo~bar"),
+-      new Path("/foo.bar/foo.bar"),
+-      new Path("/foo../bar/foo../bar"),
+-      new Path("/foo.../bar/foo.../bar"),
+-      new Path("/foo'bar/foo'bar"),
+-      new Path("/foo#bar/foo#bar"),
+-      new Path("/foo!bar/foo!bar"),
+-      // HDFS file names may not contain ":"
+-
+-      // URI percent encodes, Request#getPathInfo decodes
+-      new Path("/foo bar/foo bar"),
+-      new Path("/foo?bar/foo?bar"),
+-      new Path("/foo\">bar/foo\">bar"),
+-    };
+-
+-  @BeforeClass
+-  public static void setUp() throws IOException {
+-    ((Log4JLogger)HftpFileSystem.LOG).getLogger().setLevel(Level.ALL);
+-
+-    final long seed = RAN.nextLong();
+-    System.out.println("seed=" + seed);
+-    RAN.setSeed(seed);
+-
+-    config = new Configuration();
+-    config.set("slave.host.name", "localhost");
+-
+-    cluster = new MiniDFSCluster(config, 2, true, null);
+-    hdfs = cluster.getFileSystem();
+-    final String hftpuri = "hftp://" + config.get("dfs.http.address"); 
+-    hftpFs = (HftpFileSystem) new Path(hftpuri).getFileSystem(config);
++  @Before
++  public void resetFileSystem() throws IOException {
++    // filesystem caching has a quirk/bug that it caches based on the user's
++    // given uri.  the result is if a filesystem is instantiated with no port,
++    // it gets the default port.  then if the default port is changed,
++    // and another filesystem is instantiated with no port, the prior fs
++    // is returned, not a new one using the changed port.  so let's flush
++    // the cache between tests...
++    FileSystem.closeAll();
+   }
+   
+-  @AfterClass
+-  public static void tearDown() throws IOException {
+-    hdfs.close();
+-    hftpFs.close();
+-    cluster.shutdown();
+-  }
+-
+-  /**
+-   * Test file creation and access with file names that need encoding. 
+-   */
+   @Test
+-  public void testFileNameEncoding() throws IOException, URISyntaxException {
+-    for (Path p : TEST_PATHS) {
+-      // Create and access the path (data and streamFile servlets)
+-      FSDataOutputStream out = hdfs.create(p, true);
+-      out.writeBytes("0123456789");
+-      out.close();
+-      FSDataInputStream in = hftpFs.open(p);
+-      assertEquals('0', in.read());
+-
+-      // Check the file status matches the path. Hftp returns a FileStatus
+-      // with the entire URI, extract the path part.
+-      assertEquals(p, new Path(hftpFs.getFileStatus(p).getPath().toUri().getPath()));
+-
+-      // Test list status (listPath servlet)
+-      assertEquals(1, hftpFs.listStatus(p).length);
+-
+-      // Test content summary (contentSummary servlet)
+-      assertNotNull("No content summary", hftpFs.getContentSummary(p));
+-
+-      // Test checksums (fileChecksum and getFileChecksum servlets)
+-      assertNotNull("No file checksum", hftpFs.getFileChecksum(p));
+-    }
++  public void testHftpDefaultPorts() throws IOException {
++    Configuration conf = new Configuration();
++    URI uri = URI.create("hftp://localhost");
++    HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
++
++    assertEquals(HftpFileSystem.DEFAULT_PORT, fs.getDefaultPort());
++    assertEquals(HftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultSecurePort());
++
++    URI fsUri = fs.getUri();
++    assertEquals(uri.getHost(), fsUri.getHost());
++    assertEquals(HftpFileSystem.DEFAULT_PORT, fsUri.getPort());
++    
++    assertEquals(
++        "127.0.0.1:"+HftpFileSystem.DEFAULT_SECURE_PORT,
++        fs.getCanonicalServiceName()
++    );
+   }
++  
++  @Test
++  public void testHftpCustomDefaultPorts() throws IOException {
++    Configuration conf = new Configuration();
++    conf.setInt("dfs.http.port", 123);
++    conf.setInt("dfs.https.port", 456);
+ 
+-  private void testDataNodeRedirect(Path path) throws IOException {
+-    // Create the file
+-    if (hdfs.exists(path)) {
+-      hdfs.delete(path, true);
+-    }
+-    FSDataOutputStream out = hdfs.create(path, (short)1);
+-    out.writeBytes("0123456789");
+-    out.close();
+-
+-    // Get the path's block location so we can determine
+-    // if we were redirected to the right DN.
+-    FileStatus status = hdfs.getFileStatus(path);
+-    BlockLocation[] locations =
+-        hdfs.getFileBlockLocations(status, 0, 10);
+-    String locationName = locations[0].getNames()[0];
+-
+-    // Connect to the NN to get redirected
+-
+-    HttpURLConnection conn = hftpFs.openConnection(
+-        "/data" + ServletUtil.encodePath(path.toUri().getPath()),
+-        "ugi=userx,groupy");
+-    HttpURLConnection.setFollowRedirects(true);
+-    conn.connect();
+-    conn.getInputStream();
+-
+-    boolean checked = false;
+-    // Find the datanode that has the block according to locations
+-    // and check that the URL was redirected to this DN's info port
+-    for (DataNode node : cluster.getDataNodes()) {
+-      DatanodeRegistration dnR = node.dnRegistration;
+-      if (dnR.getName().equals(locationName)) {
+-        checked = true;
+-        assertEquals(dnR.getInfoPort(), conn.getURL().getPort());
+-      }
+-    }
+-    assertTrue("The test never checked that location of " +
+-               "the block and hftp desitnation are the same", checked);
++    URI uri = URI.create("hftp://localhost");
++    HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
++
++    assertEquals(123, fs.getDefaultPort());
++    assertEquals(456, fs.getDefaultSecurePort());
++    
++    URI fsUri = fs.getUri();
++    assertEquals(uri.getHost(), fsUri.getHost());
++    assertEquals(123, fsUri.getPort());
++    
++    assertEquals(
++        "127.0.0.1:456",
++        fs.getCanonicalServiceName()
++    );
+   }
+ 
+-  /**
+-   * Test that clients are redirected to the appropriate DN.
+-   */
+   @Test
+-  public void testDataNodeRedirect() throws IOException {
+-    for (Path p : TEST_PATHS) {
+-      testDataNodeRedirect(p);
+-    }
++  public void testHftpCustomUriPortWithDefaultPorts() throws IOException {
++    Configuration conf = new Configuration();
++    URI uri = URI.create("hftp://localhost:123");
++    HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
++
++    assertEquals(HftpFileSystem.DEFAULT_PORT, fs.getDefaultPort());
++    assertEquals(HftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultSecurePort());
++
++    URI fsUri = fs.getUri();
++    assertEquals(uri.getHost(), fsUri.getHost());
++    assertEquals(uri.getPort(), fsUri.getPort());
++    
++    assertEquals(
++        "127.0.0.1:"+HftpFileSystem.DEFAULT_SECURE_PORT,
++        fs.getCanonicalServiceName()
++    );
+   }
+ 
+-  /**
+-   * Tests getPos() functionality.
+-   */
+   @Test
+-  public void testGetPos() throws IOException {
+-    final Path testFile = new Path("/testfile+1");
+-    // Write a test file.
+-    FSDataOutputStream out = hdfs.create(testFile, true);
+-    out.writeBytes("0123456789");
+-    out.close();
++  public void testHftpCustomUriPortWithCustomDefaultPorts() throws IOException {
++    Configuration conf = new Configuration();
++    conf.setInt("dfs.http.port", 123);
++    conf.setInt("dfs.https.port", 456);
++
++    URI uri = URI.create("hftp://localhost:789");
++    HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
++
++    assertEquals(123, fs.getDefaultPort());
++    assertEquals(456, fs.getDefaultSecurePort());
+     
+-    FSDataInputStream in = hftpFs.open(testFile);
++    URI fsUri = fs.getUri();
++    assertEquals(uri.getHost(), fsUri.getHost());
++    assertEquals(789, fsUri.getPort());
+     
+-    // Test read().
+-    for (int i = 0; i < 5; ++i) {
+-      assertEquals(i, in.getPos());
+-      in.read();
+-    }
++    assertEquals(
++        "127.0.0.1:456",
++        fs.getCanonicalServiceName()
++    );
++  }
++
++  ///
++
++  @Test
++  public void testHsftpDefaultPorts() throws IOException {
++    Configuration conf = new Configuration();
++    URI uri = URI.create("hsftp://localhost");
++    HsftpFileSystem fs = (HsftpFileSystem) FileSystem.get(uri, conf);
++
++    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultPort());
++    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultSecurePort());
++
++    URI fsUri = fs.getUri();
++    assertEquals(uri.getHost(), fsUri.getHost());
++    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fsUri.getPort());
++    
++    assertEquals(
++        "127.0.0.1:"+HsftpFileSystem.DEFAULT_SECURE_PORT,
++        fs.getCanonicalServiceName()
++    );
++  }
++
++  @Test
++  public void testHsftpCustomDefaultPorts() throws IOException {
++    Configuration conf = new Configuration();
++    conf.setInt("dfs.http.port", 123);
++    conf.setInt("dfs.https.port", 456);
++
++    URI uri = URI.create("hsftp://localhost");
++    HsftpFileSystem fs = (HsftpFileSystem) FileSystem.get(uri, conf);
++
++    assertEquals(456, fs.getDefaultPort());
++    assertEquals(456, fs.getDefaultSecurePort());
+     
+-    // Test read(b, off, len).
+-    assertEquals(5, in.getPos());
+-    byte[] buffer = new byte[10];
+-    assertEquals(2, in.read(buffer, 0, 2));
+-    assertEquals(7, in.getPos());
++    URI fsUri = fs.getUri();
++    assertEquals(uri.getHost(), fsUri.getHost());
++    assertEquals(456, fsUri.getPort());
+     
+-    // Test read(b).
+-    int bytesRead = in.read(buffer);
+-    assertEquals(7 + bytesRead, in.getPos());
++    assertEquals(
++        "127.0.0.1:456",
++        fs.getCanonicalServiceName()
++    );
++  }
++
++  @Test
++  public void testHsftpCustomUriPortWithDefaultPorts() throws IOException {
++    Configuration conf = new Configuration();
++    URI uri = URI.create("hsftp://localhost:123");
++    HsftpFileSystem fs = (HsftpFileSystem) FileSystem.get(uri, conf);
++
++    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultPort());
++    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultSecurePort());
++
++    URI fsUri = fs.getUri();
++    assertEquals(uri.getHost(), fsUri.getHost());
++    assertEquals(uri.getPort(), fsUri.getPort());
+     
+-    // Test EOF.
+-    for (int i = 0; i < 100; ++i) {
+-      in.read();
+-    }
+-    assertEquals(10, in.getPos());
+-    in.close();
++    assertEquals(
++        "127.0.0.1:123",
++        fs.getCanonicalServiceName()
++    );
+   }
+ 
+-  /**
+-   * Tests seek().
+-   */
+   @Test
+-  public void testSeek() throws IOException {
+-    final Path testFile = new Path("/testfile+1");
+-    FSDataOutputStream out = hdfs.create(testFile, true);
+-    out.writeBytes("0123456789");
+-    out.close();
+-    FSDataInputStream in = hftpFs.open(testFile);
+-    in.seek(7);
+-    assertEquals('7', in.read());
++  public void testHsftpCustomUriPortWithCustomDefaultPorts() throws IOException {
++    Configuration conf = new Configuration();
++    conf.setInt("dfs.http.port", 123);
++    conf.setInt("dfs.https.port", 456);
++
++    URI uri = URI.create("hsftp://localhost:789");
++    HsftpFileSystem fs = (HsftpFileSystem) FileSystem.get(uri, conf);
++
++    assertEquals(456, fs.getDefaultPort());
++    assertEquals(456, fs.getDefaultSecurePort());
++    
++    URI fsUri = fs.getUri();
++    assertEquals(uri.getHost(), fsUri.getHost());
++    assertEquals(789, fsUri.getPort());
++    
++    assertEquals(
++        "127.0.0.1:789",
++        fs.getCanonicalServiceName()
++    );
+   }
+ }
++
+diff --git a/src/test/org/apache/hadoop/hdfs/server/namenode/TestJspHelper.java b/src/test/org/apache/hadoop/hdfs/server/namenode/TestJspHelper.java
+index b87b7fc..6c94209 100644
+--- a/src/test/org/apache/hadoop/hdfs/server/namenode/TestJspHelper.java
++++ b/src/test/org/apache/hadoop/hdfs/server/namenode/TestJspHelper.java
+@@ -30,6 +30,7 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+@@ -81,13 +82,12 @@ public class TestJspHelper {
+     UserGroupInformation.setConfiguration(conf);
+ 
+     InetSocketAddress serviceAddr = NameNode.getAddress(conf);
+-    Text tokenService = new Text(serviceAddr.getAddress().getHostAddress()
+-        + ":" + serviceAddr.getPort());
++    Text tokenService = SecurityUtil.buildTokenService(serviceAddr);
+ 
+     UserGroupInformation ugi = JspHelper.getUGI(request, conf);
+     Token<? extends TokenIdentifier> tokenInUgi = ugi.getTokens().iterator()
+         .next();
+-    Assert.assertEquals(tokenInUgi.getService(), tokenService);
++    Assert.assertEquals(tokenService, tokenInUgi.getService());
+   }
+   
+   @Test
+diff --git a/src/test/org/apache/hadoop/ipc/TestSaslRPC.java b/src/test/org/apache/hadoop/ipc/TestSaslRPC.java
+index 7b81764..68c393d 100644
+--- a/src/test/org/apache/hadoop/ipc/TestSaslRPC.java
++++ b/src/test/org/apache/hadoop/ipc/TestSaslRPC.java
+@@ -24,9 +24,9 @@ import static org.junit.Assert.*;
+ import java.io.DataInput;
+ import java.io.DataOutput;
+ import java.io.IOException;
++import java.lang.reflect.Method;
+ import java.net.InetSocketAddress;
+ import java.security.PrivilegedExceptionAction;
+-import java.util.Collection;
+ import java.util.Set;
+ 
+ import junit.framework.Assert;
+@@ -41,10 +41,10 @@ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.KerberosInfo;
+ import org.apache.hadoop.security.token.SecretManager;
+ import org.apache.hadoop.security.token.Token;
+-import org.apache.hadoop.security.token.TokenIdentifier;
+ import org.apache.hadoop.security.token.TokenInfo;
+-import org.apache.hadoop.security.token.TokenSelector;
+ import org.apache.hadoop.security.token.SecretManager.InvalidToken;
++import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenIdentifier;
++import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
+ import org.apache.hadoop.security.SaslInputStream;
+ import org.apache.hadoop.security.SaslRpcClient;
+ import org.apache.hadoop.security.SaslRpcServer;
+@@ -54,11 +54,12 @@ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
+ 
+ import org.apache.log4j.Level;
++import org.junit.BeforeClass;
+ import org.junit.Test;
+ 
+ /** Unit tests for using Sasl over RPC. */
+ public class TestSaslRPC {
+-  private static final String ADDRESS = "0.0.0.0";
++  private static final String ADDRESS = "localhost";
+ 
+   public static final Log LOG =
+     LogFactory.getLog(TestSaslRPC.class);
+@@ -85,7 +86,19 @@ public class TestSaslRPC {
+     ((Log4JLogger) SecurityUtil.LOG).getLogger().setLevel(Level.ALL);
+   }
+ 
+-  public static class TestTokenIdentifier extends TokenIdentifier {
++  static Method setUseIpMethod;
++  
++  @BeforeClass
++  public static void exposeUseIp() throws Exception {
++    setUseIpMethod = SecurityUtil.class.getDeclaredMethod("setTokenServiceUseIp", boolean.class);
++    setUseIpMethod.setAccessible(true);
++  }
++  
++  private void setTokenServiceUseIp(boolean flag) throws Exception {
++    setUseIpMethod.invoke(setUseIpMethod.getClass(), flag);
++  }
++
++  public static class TestTokenIdentifier extends AbstractDelegationTokenIdentifier {
+     private Text tokenid;
+     private Text realUser;
+     final static Text KIND_NAME = new Text("test.token");
+@@ -152,22 +165,10 @@ public class TestSaslRPC {
+     }
+   }
+ 
+-  public static class TestTokenSelector implements
+-      TokenSelector<TestTokenIdentifier> {
+-    @SuppressWarnings("unchecked")
+-    @Override
+-    public Token<TestTokenIdentifier> selectToken(Text service,
+-        Collection<Token<? extends TokenIdentifier>> tokens) {
+-      if (service == null) {
+-        return null;
+-      }
+-      for (Token<? extends TokenIdentifier> token : tokens) {
+-        if (TestTokenIdentifier.KIND_NAME.equals(token.getKind())
+-            && service.equals(token.getService())) {
+-          return (Token<TestTokenIdentifier>) token;
+-        }
+-      }
+-      return null;
++  public static class TestTokenSelector extends
++  AbstractDelegationTokenSelector<TestTokenIdentifier> {
++    TestTokenSelector() {
++      super(TestTokenIdentifier.KIND_NAME);
+     }
+   }
+   
+@@ -354,8 +355,9 @@ public class TestSaslRPC {
+     System.out.println("Test is successful.");
+   }
+   
+-  @Test
+-  public void testDigestAuthMethod() throws Exception {
++  public void testDigestAuthMethod(boolean useIp) throws Exception {
++    setTokenServiceUseIp(useIp);
++
+     TestTokenSecretManager sm = new TestTokenSecretManager();
+     Server server = RPC.getServer(
+         new TestSaslImpl(), ADDRESS, 0, 5, true, conf, sm);
+@@ -369,6 +371,19 @@ public class TestSaslRPC {
+         sm);
+     SecurityUtil.setTokenService(token, addr);
+     LOG.info("Service IP address for token is " + token.getService());
++
++    InetSocketAddress tokenAddr = SecurityUtil.getTokenServiceAddr(token);
++    String expectedHost, gotHost;
++    if (useIp) {
++      expectedHost = addr.getAddress().getHostAddress();
++      gotHost = tokenAddr.getAddress().getHostAddress();
++    } else {
++      gotHost = tokenAddr.getHostName();
++      expectedHost = ADDRESS;
++    }
++    Assert.assertEquals(expectedHost, gotHost);
++    Assert.assertEquals(expectedHost+":"+addr.getPort(), token.getService().toString());
++    
+     current.addToken(token);
+ 
+     current.doAs(new PrivilegedExceptionAction<Object>() {
+@@ -388,7 +403,17 @@ public class TestSaslRPC {
+     });
+     server.stop();
+   }
++
++  @Test
++  public void testDigestAuthMethodIpBasedToken() throws Exception {
++    testDigestAuthMethod(true);
++  }
+   
++  @Test
++  public void testDigestAuthMethodHostBasedToken() throws Exception {
++    testDigestAuthMethod(false);
++  }
++
+   public static void main(String[] args) throws Exception {
+     System.out.println("Testing Kerberos authentication over RPC");
+     if (args.length != 2) {
+diff --git a/src/test/org/apache/hadoop/mapreduce/security/TestTokenCache.java b/src/test/org/apache/hadoop/mapreduce/security/TestTokenCache.java
+index fc08806..73ec08e 100644
+--- a/src/test/org/apache/hadoop/mapreduce/security/TestTokenCache.java
++++ b/src/test/org/apache/hadoop/mapreduce/security/TestTokenCache.java
+@@ -54,7 +54,6 @@ import org.apache.hadoop.mapred.OutputCollector;
+ import org.apache.hadoop.mapred.Reporter;
+ import org.apache.hadoop.mapreduce.JobContext;
+ import org.apache.hadoop.security.Credentials;
+-import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+ import org.apache.hadoop.tools.HadoopArchives;
+@@ -267,9 +266,8 @@ public class TestTokenCache {
+     Credentials credentials = new Credentials();
+     TokenCache.obtainTokensForNamenodesInternal(credentials, new Path [] {p1, p2},
+                                         jConf);
+-    // this token is keyed by hostname:port key.
+-    String fs_addr = 
+-      SecurityUtil.buildDTServiceName(p1.toUri(), NameNode.DEFAULT_PORT); 
++    // this filesystem's token is keyed by the canonical service
++    String fs_addr = fs.getCanonicalServiceName();
+     Token<DelegationTokenIdentifier> nnt =
+       TokenCache.getDelegationToken(credentials, fs_addr);
+ 
+diff --git a/src/test/org/apache/hadoop/net/TestNetUtils.java b/src/test/org/apache/hadoop/net/TestNetUtils.java
+index bf56104..15f6b32 100644
+--- a/src/test/org/apache/hadoop/net/TestNetUtils.java
++++ b/src/test/org/apache/hadoop/net/TestNetUtils.java
+@@ -18,19 +18,32 @@
+ package org.apache.hadoop.net;
+ 
+ import org.junit.Assume;
++import org.junit.Before;
++import org.junit.BeforeClass;
+ import org.junit.Test;
+ import static org.junit.Assert.*;
+ 
+ import java.io.IOException;
++import java.net.InetAddress;
++import java.net.ConnectException;
++import java.net.InetSocketAddress;
+ import java.net.ServerSocket;
+ import java.net.Socket;
++import java.net.SocketException;
+ import java.net.SocketTimeoutException;
+-import java.net.ConnectException;
+-import java.net.InetSocketAddress;
++import java.net.UnknownHostException;
++import java.util.HashMap;
++import java.util.LinkedList;
++import java.util.List;
++import java.util.Map;
+ import java.util.concurrent.TimeUnit;
+ 
++import org.apache.commons.lang.StringUtils;
+ import org.apache.hadoop.conf.Configuration;
++
+ import org.apache.hadoop.io.IOUtils;
++import org.apache.hadoop.net.NetUtils.QualifiedHostResolver;
++
+ 
+ public class TestNetUtils {
+ 
+@@ -139,4 +152,217 @@ public class TestNetUtils {
+     assertTrue("Expected " + expectedMillis + "ms, but took " + millis,
+         Math.abs(millis - expectedMillis) < TIME_FUDGE_MILLIS);
+   }
+-} 
++
++  static TestNetUtilsResolver resolver;
++  
++  @BeforeClass
++  public static void setupResolver() {
++    resolver = new TestNetUtilsResolver();
++    resolver.setSearchDomains("a.b", "b", "c");
++    resolver.addResolvedHost("host.a.b.", "1.1.1.1");
++    resolver.addResolvedHost("b-host.b.", "2.2.2.2");
++    resolver.addResolvedHost("simple.", "3.3.3.3");    
++    NetUtils.setHostResolver(resolver);
++  }
++  
++  @Before
++  public void resetResolver() {
++    resolver.reset();
++  }
++
++  // getByExactName
++  
++  private void verifyGetByExactNameSearch(String host, String ... searches) {
++    assertNull(resolver.getByExactName(host));
++    assertBetterArrayEquals(searches, resolver.getHostSearches());
++  }
++
++  @Test
++  public void testResolverGetByExactNameUnqualified() {
++    verifyGetByExactNameSearch("unknown", "unknown.");
++  }
++
++  @Test
++  public void testResolverGetByExactNameUnqualifiedWithDomain() {
++    verifyGetByExactNameSearch("unknown.domain", "unknown.domain.");
++  }
++
++  @Test
++  public void testResolverGetByExactNameQualified() {
++    verifyGetByExactNameSearch("unknown.", "unknown.");
++  }
++  
++  @Test
++  public void testResolverGetByExactNameQualifiedWithDomain() {
++    verifyGetByExactNameSearch("unknown.domain.", "unknown.domain.");
++  }
++
++  // getByNameWithSearch
++  
++  private void verifyGetByNameWithSearch(String host, String ... searches) {
++    assertNull(resolver.getByNameWithSearch(host));
++    assertBetterArrayEquals(searches, resolver.getHostSearches());
++  }
++
++  @Test
++  public void testResolverGetByNameWithSearchUnqualified() {
++    String host = "unknown";
++    verifyGetByNameWithSearch(host, host+".a.b.", host+".b.", host+".c.");
++  }
++
++  @Test
++  public void testResolverGetByNameWithSearchUnqualifiedWithDomain() {
++    String host = "unknown.domain";
++    verifyGetByNameWithSearch(host, host+".a.b.", host+".b.", host+".c.");
++  }
++
++  @Test
++  public void testResolverGetByNameWithSearchQualified() {
++    String host = "unknown.";
++    verifyGetByNameWithSearch(host, host);
++  }
++
++  @Test
++  public void testResolverGetByNameWithSearchQualifiedWithDomain() {
++    String host = "unknown.domain.";
++    verifyGetByNameWithSearch(host, host);
++  }
++
++  // getByName
++
++  private void verifyGetByName(String host, String ... searches) {
++    InetAddress addr = null;
++    try {
++      addr = resolver.getByName(host);
++    } catch (UnknownHostException e) {} // ignore
++    assertNull(addr);
++    assertBetterArrayEquals(searches, resolver.getHostSearches());
++  }
++  
++  @Test
++  public void testResolverGetByNameQualified() {
++    String host = "unknown.";
++    verifyGetByName(host, host);
++  }
++
++  @Test
++  public void testResolverGetByNameQualifiedWithDomain() {
++    verifyGetByName("unknown.domain.", "unknown.domain.");
++  }
++
++  @Test
++  public void testResolverGetByNameUnqualified() {
++    String host = "unknown";
++    verifyGetByName(host, host+".a.b.", host+".b.", host+".c.", host+".");
++  }
++
++  @Test
++  public void testResolverGetByNameUnqualifiedWithDomain() {
++    String host = "unknown.domain";
++    verifyGetByName(host, host+".", host+".a.b.", host+".b.", host+".c.");
++  }
++  
++  // resolving of hosts
++
++  private InetAddress verifyResolve(String host, String ... searches) {
++    InetAddress addr = null;
++    try {
++      addr = resolver.getByName(host);
++    } catch (UnknownHostException e) {} // ignore
++    assertNotNull(addr);
++    assertBetterArrayEquals(searches, resolver.getHostSearches());
++    return addr;
++  }
++
++  private void
++  verifyInetAddress(InetAddress addr, String host, String ip) {
++    assertNotNull(addr);
++    assertEquals(host, addr.getHostName());
++    assertEquals(ip, addr.getHostAddress());
++  }
++  
++  @Test
++  public void testResolverUnqualified() {
++    String host = "host";
++    InetAddress addr = verifyResolve(host, host+".a.b.");
++    verifyInetAddress(addr, "host.a.b", "1.1.1.1");
++  }
++
++  @Test
++  public void testResolverUnqualifiedWithDomain() {
++    String host = "host.a";
++    InetAddress addr = verifyResolve(host, host+".", host+".a.b.", host+".b.");
++    verifyInetAddress(addr, "host.a.b", "1.1.1.1");
++  }
++
++  @Test
++  public void testResolverUnqualifedFull() {
++    String host = "host.a.b";
++    InetAddress addr = verifyResolve(host, host+".");
++    verifyInetAddress(addr, host, "1.1.1.1");
++  }
++  
++  @Test
++  public void testResolverQualifed() {
++    String host = "host.a.b.";
++    InetAddress addr = verifyResolve(host, host);
++    verifyInetAddress(addr, host, "1.1.1.1");
++  }
++  
++  // localhost
++  
++  @Test
++  public void testResolverLoopback() {
++    String host = "Localhost";
++    InetAddress addr = verifyResolve(host); // no lookup should occur
++    verifyInetAddress(addr, "Localhost", "127.0.0.1");
++  }
++
++  @Test
++  public void testResolverIP() {
++    String host = "1.1.1.1";
++    InetAddress addr = verifyResolve(host); // no lookup should occur for ips
++    verifyInetAddress(addr, host, host);
++  }
++
++  //
++
++  static class TestNetUtilsResolver extends QualifiedHostResolver {
++    Map<String, InetAddress> resolvedHosts = new HashMap<String, InetAddress>();
++    List<String> hostSearches = new LinkedList<String>();
++    
++    void addResolvedHost(String host, String ip) {
++      InetAddress addr;
++      try {
++        addr = InetAddress.getByName(ip);
++        addr = InetAddress.getByAddress(host, addr.getAddress());
++      } catch (UnknownHostException e) {
++        throw new IllegalArgumentException("not an ip:"+ip);
++      }
++      resolvedHosts.put(host, addr);
++    }
++    
++    InetAddress getInetAddressByName(String host) throws UnknownHostException {
++      hostSearches.add(host);
++      if (!resolvedHosts.containsKey(host)) {
++        throw new UnknownHostException(host);
++      }
++      return resolvedHosts.get(host);
++    }
++
++    String[] getHostSearches() {
++      return hostSearches.toArray(new String[0]);
++    }
++
++    void reset() {
++      hostSearches.clear();
++    }
++  }
++  
++  private <T> void assertBetterArrayEquals(T[] expect, T[]got) {
++    String expectStr = StringUtils.join(expect, ", ");
++    String gotStr = StringUtils.join(got, ", ");
++    assertEquals(expectStr, gotStr);
++  }
++}
++
+diff --git a/src/test/org/apache/hadoop/security/TestSecurityUtil.java b/src/test/org/apache/hadoop/security/TestSecurityUtil.java
+index ee0533c..dd0a3a4 100644
+--- a/src/test/org/apache/hadoop/security/TestSecurityUtil.java
++++ b/src/test/org/apache/hadoop/security/TestSecurityUtil.java
+@@ -20,11 +20,20 @@ import static org.junit.Assert.*;
+ 
+ import java.io.IOException;
+ import java.net.InetAddress;
++import java.net.InetSocketAddress;
++import java.net.URI;
+ 
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.io.Text;
++import org.apache.hadoop.net.NetUtils;
++import org.apache.hadoop.security.token.Token;
+ import org.junit.Test;
+ import org.mockito.Mockito;
+ 
+ public class TestSecurityUtil {
++  public static final Log LOG = LogFactory.getLog(TestSecurityUtil.class);
++
+   @Test
+   public void isOriginalTGTReturnsCorrectValues() {
+     assertTrue(SecurityUtil.isOriginalTGT("krbtgt/foo@foo"));
+@@ -82,4 +91,221 @@ public class TestSecurityUtil {
+     assertEquals("hdfs/" + local + "@REALM", SecurityUtil.getServerPrincipal(
+         "hdfs/_HOST@REALM", "0.0.0.0"));
+   }
++  
++  @Test
++  public void testGetHostFromPrincipal() {
++    assertEquals("host", 
++        SecurityUtil.getHostFromPrincipal("service/host@realm"));
++    assertEquals(null,
++        SecurityUtil.getHostFromPrincipal("service@realm"));
++  }
++
++  @Test
++  public void testBuildDTServiceName() {
++    assertEquals("127.0.0.1:123",
++        SecurityUtil.buildDTServiceName(URI.create("test://LocalHost"), 123)
++    );
++    assertEquals("127.0.0.1:123",
++        SecurityUtil.buildDTServiceName(URI.create("test://LocalHost:123"), 456)
++    );
++    assertEquals("127.0.0.1:123",
++        SecurityUtil.buildDTServiceName(URI.create("test://127.0.0.1"), 123)
++    );
++    assertEquals("127.0.0.1:123",
++        SecurityUtil.buildDTServiceName(URI.create("test://127.0.0.1:123"), 456)
++    );
++  }
++  
++  @Test
++  public void testBuildTokenServiceSockAddr() {
++    assertEquals("127.0.0.1:123",
++        SecurityUtil.buildTokenService(new InetSocketAddress("LocalHost", 123)).toString()
++    );
++    assertEquals("127.0.0.1:123",
++        SecurityUtil.buildTokenService(new InetSocketAddress("127.0.0.1", 123)).toString()
++    );
++    // what goes in, comes out
++    assertEquals("127.0.0.1:123",
++        SecurityUtil.buildTokenService(NetUtils.createSocketAddr("127.0.0.1", 123)).toString()
++    );
++  }
++
++  @Test
++  public void testGoodHostsAndPorts() {
++    InetSocketAddress compare = NetUtils.makeSocketAddr("localhost", 123);
++    runGoodCases(compare, "localhost", 123);
++    runGoodCases(compare, "localhost:", 123);
++    runGoodCases(compare, "localhost:123", 456);
++  }
++  
++  void runGoodCases(InetSocketAddress addr, String host, int port) {
++    assertEquals(addr, NetUtils.createSocketAddr(host, port));
++    assertEquals(addr, NetUtils.createSocketAddr("hdfs://"+host, port));
++    assertEquals(addr, NetUtils.createSocketAddr("hdfs://"+host+"/path", port));
++  }
++  
++  @Test
++  public void testBadHostsAndPorts() {
++    runBadCases("", true);
++    runBadCases(":", false);
++    runBadCases("hdfs/", false);
++    runBadCases("hdfs:/", false);
++    runBadCases("hdfs://", true);
++  }
++  
++  void runBadCases(String prefix, boolean validIfPosPort) {
++    runBadPortPermutes(prefix, false);
++    runBadPortPermutes(prefix+"*", false);
++    runBadPortPermutes(prefix+"localhost", validIfPosPort);
++    runBadPortPermutes(prefix+"localhost:-1", false);
++    runBadPortPermutes(prefix+"localhost:-123", false);
++    runBadPortPermutes(prefix+"localhost:xyz", false);
++    runBadPortPermutes(prefix+"localhost/xyz", validIfPosPort);
++    runBadPortPermutes(prefix+"localhost/:123", validIfPosPort);
++    runBadPortPermutes(prefix+":123", false);
++    runBadPortPermutes(prefix+":xyz", false);
++  }
++
++  void runBadPortPermutes(String arg, boolean validIfPosPort) {
++    int ports[] = { -123, -1, 123 };
++    boolean bad = false;
++    try {
++      NetUtils.createSocketAddr(arg);
++    } catch (IllegalArgumentException e) {
++      bad = true;
++    } finally {
++      assertTrue("should be bad: '"+arg+"'", bad);
++    }
++    for (int port : ports) {
++      if (validIfPosPort && port > 0) continue;
++      
++      bad = false;
++      try {
++        NetUtils.createSocketAddr(arg, port);
++      } catch (IllegalArgumentException e) {
++        bad = true;
++      } finally {
++        assertTrue("should be bad: '"+arg+"' (default port:"+port+")", bad);
++      }
++    }
++  }
++
++  // check that the socket addr has:
++  // 1) the InetSocketAddress has the correct hostname, ie. exact host/ip given
++  // 2) the address is resolved, ie. has an ip
++  // 3,4) the socket's InetAddress has the same hostname, and the correct ip
++  // 5) the port is correct
++  private void
++  verifyValues(InetSocketAddress addr, String host, String ip, int port) {
++    assertTrue(!addr.isUnresolved());
++    // don't know what the standard resolver will return for hostname.
++    // should be host for host; host or ip for ip is ambiguous
++    if (!SecurityUtil.getTokenServiceUseIp()) {
++      assertEquals(host, addr.getHostName());
++      assertEquals(host, addr.getAddress().getHostName());
++    }
++    assertEquals(ip, addr.getAddress().getHostAddress());
++    assertEquals(port, addr.getPort());    
++  }
++
++  // check:
++  // 1) buildTokenService honors use_ip setting
++  // 2) setTokenService & getService works
++  // 3) getTokenServiceAddr decodes to the identical socket addr
++  private void
++  verifyTokenService(InetSocketAddress addr, String host, String ip, int port, boolean useIp) {
++    LOG.info("address:"+addr+" host:"+host+" ip:"+ip+" port:"+port);
++
++    SecurityUtil.setTokenServiceUseIp(useIp);
++    String serviceHost = useIp ? ip : host.toLowerCase();
++    
++    Token token = new Token();
++    Text service = new Text(serviceHost+":"+port);
++    
++    assertEquals(service, SecurityUtil.buildTokenService(addr));
++    SecurityUtil.setTokenService(token, addr);
++    assertEquals(service, token.getService());
++    
++    InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
++    assertNotNull(serviceAddr);
++    verifyValues(serviceAddr, serviceHost, ip, port);
++  }
++
++  // check:
++  // 1) socket addr is created with fields set as expected
++  // 2) token service with ips
++  // 3) token service with the given host or ip
++  private void
++  verifyAddress(InetSocketAddress addr, String host, String ip, int port) {
++    verifyValues(addr, host, ip, port);
++    LOG.info("test that token service uses ip");
++    verifyTokenService(addr, host, ip, port, true);    
++    LOG.info("test that token service uses host");
++    verifyTokenService(addr, host, ip, port, false);
++  }
++
++  // check:
++  // 1-4) combinations of host and port
++  // this will construct a socket addr, verify all the fields, build the
++  // service to verify the use_ip setting is honored, set the token service
++  // based on addr and verify the token service is set correctly, decode
++  // the token service and ensure all the fields of the decoded addr match
++  private void verifyServiceAddr(String host, String ip) {
++    InetSocketAddress addr;
++    int port = 123;
++
++    // test host, port tuple
++    LOG.info("test tuple ("+host+","+port+")");
++    addr = NetUtils.makeSocketAddr(host, port);
++    verifyAddress(addr, host, ip, port);
++
++    // test authority with no default port
++    LOG.info("test authority '"+host+":"+port+"'");
++    addr = NetUtils.createSocketAddr(host+":"+port);
++    verifyAddress(addr, host, ip, port);
++
++    // test authority with a default port, make sure default isn't used
++    LOG.info("test authority '"+host+":"+port+"' with ignored default port");
++    addr = NetUtils.createSocketAddr(host+":"+port, port+1);
++    verifyAddress(addr, host, ip, port);
++
++    // test host-only authority, using port as default port
++    LOG.info("test host:"+host+" port:"+port);
++    addr = NetUtils.createSocketAddr(host, port);
++    verifyAddress(addr, host, ip, port);
++  }
++
++  @Test
++  public void testSocketAddrWithName() {
++    String staticHost = "my";
++    NetUtils.addStaticResolution(staticHost, "localhost");
++    verifyServiceAddr("LocalHost", "127.0.0.1");
++  }
++
++  @Test
++  public void testSocketAddrWithIP() {
++    verifyServiceAddr("127.0.0.1", "127.0.0.1");
++  }
++
++  @Test
++  public void testSocketAddrWithNameToStaticName() {
++    String staticHost = "host1";
++    NetUtils.addStaticResolution(staticHost, "localhost");
++    verifyServiceAddr(staticHost, "127.0.0.1");
++  }
++
++  @Test
++  public void testSocketAddrWithNameToStaticIP() {
++    String staticHost = "host3";
++    NetUtils.addStaticResolution(staticHost, "255.255.255.255");
++    verifyServiceAddr(staticHost, "255.255.255.255");
++  }
++
++  // this is a bizarre case, but it's if a test tries to remap an ip address
++  @Test
++  public void testSocketAddrWithIPToStaticIP() {
++    String staticHost = "1.2.3.4";
++    NetUtils.addStaticResolution(staticHost, "255.255.255.255");
++    verifyServiceAddr(staticHost, "255.255.255.255");
++  }
+ }
+-- 
+1.7.0.4
+

@@ -1,0 +1,40 @@
+From df43ad28d41413b5c171e9bc33884c9ef7ad7719 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@apache.org>
+Date: Mon, 23 Jul 2012 21:18:51 +0000
+Subject: [PATCH 1331/1344] HADOOP-8612. Backport HADOOP-8599 to branch-1 (Non empty response when read beyond eof). Contributed by Andrey Klochkov
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1364801 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 44c2a2f937286cccc28f209d1c1c5aab819d2aa1)
+---
+ src/core/org/apache/hadoop/fs/FileSystem.java      |    2 +-
+ .../hadoop/fs/TestGetFileBlockLocations.java       |    1 +
+ 2 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/fs/FileSystem.java b/src/core/org/apache/hadoop/fs/FileSystem.java
+index 77c82ab..94dbdbd 100644
+--- a/src/core/org/apache/hadoop/fs/FileSystem.java
++++ b/src/core/org/apache/hadoop/fs/FileSystem.java
+@@ -454,7 +454,7 @@ public abstract class FileSystem extends Configured implements Closeable {
+       throw new IllegalArgumentException("Invalid start or len parameter");
+     }
+ 
+-    if (file.getLen() < start) {
++    if (file.getLen() <= start) {
+       return new BlockLocation[0];
+ 
+     }
+diff --git a/src/test/org/apache/hadoop/fs/TestGetFileBlockLocations.java b/src/test/org/apache/hadoop/fs/TestGetFileBlockLocations.java
+index c85cc98..ccf98ac 100644
+--- a/src/test/org/apache/hadoop/fs/TestGetFileBlockLocations.java
++++ b/src/test/org/apache/hadoop/fs/TestGetFileBlockLocations.java
+@@ -122,6 +122,7 @@ public class TestGetFileBlockLocations extends TestCase {
+     oneTest(0, (int) status.getLen() * 2, status);
+     oneTest((int) status.getLen() * 2, (int) status.getLen() * 4, status);
+     oneTest((int) status.getLen() / 2, (int) status.getLen() * 3, status);
++    oneTest((int) status.getLen(), (int) status.getLen() * 2, status);
+     for (int i = 0; i < 10; ++i) {
+       oneTest((int) status.getLen() * i / 10, (int) status.getLen() * (i + 1)
+           / 10, status);
+-- 
+1.7.0.4
+

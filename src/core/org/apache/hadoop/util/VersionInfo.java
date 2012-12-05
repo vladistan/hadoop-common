@@ -56,7 +56,15 @@ public class VersionInfo {
   public static String getRevision() {
     return version != null ? version.revision() : "Unknown";
   }
-  
+
+  /**
+   * Get the branch on which this originated.
+   * @return The branch name, e.g. "trunk" or "branches/branch-0.20"
+   */
+  public static String getBranch() {
+    return version != null ? version.branch() : "Unknown";
+  }
+
   /**
    * The date that Hadoop was compiled.
    * @return the compilation date in unix date format
@@ -79,21 +87,31 @@ public class VersionInfo {
   public static String getUrl() {
     return version != null ? version.url() : "Unknown";
   }
+
+  /**
+   * Get the checksum of the source files from which Hadoop was
+   * built.
+   **/
+  public static String getSrcChecksum() {
+    return version != null ? version.srcChecksum() : "Unknown";
+  }
   
   /**
-   * Returns the buildVersion which includes version, 
-   * revision, user and date. 
+   * Returns the full version string containing version,
+   * revision, user and source checksum. 
    */
   public static String getBuildVersion(){
     return VersionInfo.getVersion() + 
     " from " + VersionInfo.getRevision() +
     " by " + VersionInfo.getUser() + 
-    " on " + VersionInfo.getDate();
+    " source checksum " + VersionInfo.getSrcChecksum();
   }
   
   public static void main(String[] args) {
     System.out.println("Hadoop " + getVersion());
     System.out.println("Subversion " + getUrl() + " -r " + getRevision());
     System.out.println("Compiled by " + getUser() + " on " + getDate());
+    System.out.println("From source with checksum " + getSrcChecksum());
+
   }
 }

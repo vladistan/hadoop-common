@@ -1,0 +1,289 @@
+From 6a6276c2bba8ebca9888e023b05dadba2a6c1626 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@apache.org>
+Date: Sat, 9 Jun 2012 00:43:07 +0000
+Subject: [PATCH 1192/1344] HDFS-3479. Port HDFS-3335 to branch-1. Contributed by Colin Patrick McCabe
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1348286 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 7aff280dbb73910201d7f0af6187603535d573df)
+---
+ .../hadoop/hdfs/server/namenode/FSEditLog.java     |   43 ++++++-
+ .../hdfs/server/namenode/TestNameNodeRecovery.java |  141 +++++++++++++++++---
+ 2 files changed, 164 insertions(+), 20 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSEditLog.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSEditLog.java
+index 4614a0f..e134405 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSEditLog.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSEditLog.java
+@@ -83,6 +83,7 @@ public class FSEditLog {
+   private static final byte OP_UPDATE_MASTER_KEY = 18; //update master key
+ 
+   private static int sizeFlushBuffer = 512*1024;
++  private static final int PREALLOCATION_LENGTH = 1024 * 1024;
+ 
+   private ArrayList<EditLogOutputStream> editStreams = null;
+   private FSImage fsimage = null;
+@@ -130,7 +131,8 @@ public class FSEditLog {
+     private FileChannel fc;         // channel of the file stream for sync
+     private DataOutputBuffer bufCurrent;  // current buffer for writing
+     private DataOutputBuffer bufReady;    // buffer ready for flushing
+-    static ByteBuffer fill = ByteBuffer.allocateDirect(1024 * 1024); // preallocation, 1MB
++    static final ByteBuffer fill =
++        ByteBuffer.allocateDirect(PREALLOCATION_LENGTH);
+ 
+     static {
+       fill.position(0);
+@@ -536,6 +538,44 @@ public class FSEditLog {
+     return false;
+   }
+ 
++  static void verifyEndOfLog(PositionTrackingInputStream tracker,
++      DataInputStream in, MetaRecoveryContext recovery, long editsLength)
++          throws IOException {
++    /** The end of the edit log should contain only 0x00 or 0xff bytes.
++     * If it contains other bytes, the log itself may be corrupt.
++     * It is important to check this; if we don't, a stray OP_INVALID byte 
++     * could make us stop reading the edit log halfway through, and we'd never
++     * know that we had lost data.
++     *
++     * We don't check the very last part of the edit log, in case the
++     * NameNode crashed while writing to the edit log.
++     */
++    byte[] buf = new byte[4096];
++    while (true) {
++      long amt = (editsLength - PREALLOCATION_LENGTH) - tracker.getPos();
++      if (amt <= 0) {
++        return;
++      } else if (amt > buf.length) {
++        amt = buf.length;
++      }
++      int numRead = in.read(buf, 0, (int)amt);
++      if (numRead <= 0) {
++          MetaRecoveryContext.editLogLoaderPrompt("Unexpected short read " +
++              "at the end of the edit log!  Current position is " + 
++              tracker.getPos(), recovery);
++          break;
++      }
++      for (int i = 0; i < numRead; i++) {
++        if ((buf[i] != (byte)0) && (buf[i] != (byte)-1)) {
++          MetaRecoveryContext.editLogLoaderPrompt("Found garbage at the end " +
++              "of the edit log!  Current position is " + tracker.getPos(),
++              recovery);
++          break;
++        }
++      }
++    }
++  }
++  
+   /**
+    * Load an edit log, and apply the changes to the in-memory structure
+    * This is where we apply edits that we've been writing to disk all
+@@ -599,6 +639,7 @@ public class FSEditLog {
+         try {
+           opcode = in.readByte();
+           if (opcode == OP_INVALID) {
++            verifyEndOfLog(tracker, in, recovery, edits.length());
+             FSNamesystem.LOG.info("Invalid opcode, reached end of edit log " +
+                        "Number of transactions found: " + numEdits + ".  " +
+                        "Bytes read: " + tracker.getPos());
+diff --git a/src/test/org/apache/hadoop/hdfs/server/namenode/TestNameNodeRecovery.java b/src/test/org/apache/hadoop/hdfs/server/namenode/TestNameNodeRecovery.java
+index 066a498..c737fa2 100644
+--- a/src/test/org/apache/hadoop/hdfs/server/namenode/TestNameNodeRecovery.java
++++ b/src/test/org/apache/hadoop/hdfs/server/namenode/TestNameNodeRecovery.java
+@@ -20,7 +20,6 @@ package org.apache.hadoop.hdfs.server.namenode;
+ 
+ import java.io.File;
+ import java.io.IOException;
+-import java.io.PrintWriter;
+ import java.io.RandomAccessFile;
+ import java.util.List;
+ 
+@@ -49,13 +48,86 @@ public class TestNameNodeRecovery {
+     recoverStartOpt.setForce(MetaRecoveryContext.FORCE_ALL);
+   }
+ 
+-  /** Test that we can successfully recover from a situation where the last
+-   * entry in the edit log has been truncated. */
+-  @Test(timeout=180000)
+-  public void testRecoverTruncatedEditLog() throws IOException {
++  static interface Corruptor {
++    public void corrupt(File editFile) throws IOException;
++    public boolean fatalCorruption();
++  }
++    
++  static class TruncatingCorruptor implements Corruptor {
++    @Override
++    public void corrupt(File editFile) throws IOException {
++      // Corrupt the last edit
++      long fileLen = editFile.length();
++      RandomAccessFile rwf = new RandomAccessFile(editFile, "rw");
++      rwf.setLength(fileLen - 1);
++      rwf.close();
++    }
++    
++    @Override
++    public boolean fatalCorruption() {
++      return true;
++    }
++  }
++
++  static final void pad(RandomAccessFile rwf, byte b, int amt)
++      throws IOException {
++    byte buf[] = new byte[1024];
++    for (int i = 0; i < buf.length; i++) {
++      buf[i] = 0;
++    }
++    while (amt > 0) {
++      int len = (amt < buf.length) ? amt : buf.length;
++      rwf.write(buf, 0, len);
++      amt -= len;
++    }
++  }
++  
++  static class PaddingCorruptor implements Corruptor {
++    @Override
++    public void corrupt(File editFile) throws IOException {
++      // Add junk to the end of the file
++      RandomAccessFile rwf = new RandomAccessFile(editFile, "rw");
++      rwf.seek(editFile.length());
++      pad(rwf, (byte)0, 2098176);
++      rwf.write(0x44);
++      rwf.close();
++    }
++    
++    @Override
++    public boolean fatalCorruption() {
++      return true;
++    }
++  }
++  
++  static class SafePaddingCorruptor implements Corruptor {
++    private byte padByte;
++    
++    public SafePaddingCorruptor(byte padByte) {
++      this.padByte = padByte;
++      assert ((this.padByte == 0) || (this.padByte == -1));
++    }
++
++    @Override
++    public void corrupt(File editFile) throws IOException {
++      // Add junk to the end of the file
++      RandomAccessFile rwf = new RandomAccessFile(editFile, "rw");
++      rwf.seek(editFile.length());
++      rwf.write((byte)-1);
++      pad(rwf, padByte, 2098176);
++      rwf.close();
++    }
++    
++    @Override
++    public boolean fatalCorruption() {
++      return false;
++    }
++  }
++  
++  static void testNameNodeRecoveryImpl(Corruptor corruptor) throws IOException
++  {
+     final String TEST_PATH = "/test/path/dir";
+     final String TEST_PATH2 = "/alt/test/path";
+-
++  
+     // Start up the mini dfs cluster
+     Configuration conf = new Configuration();
+     MiniDFSCluster cluster;
+@@ -65,34 +137,35 @@ public class TestNameNodeRecovery {
+     FileSystem fileSys = cluster.getFileSystem();
+     fileSys.mkdirs(new Path(TEST_PATH));
+     fileSys.mkdirs(new Path(TEST_PATH2));
+-
++  
+     List<File> nameEditsDirs =
+         (List<File>)FSNamesystem.getNamespaceEditsDirs(conf);
+     cluster.shutdown();
+-
++  
+     File dir = nameEditsDirs.get(0); //has only one
+     File editFile = new File(new File(dir, "current"),
+         NameNodeFile.EDITS.getName());
+     assertTrue("Should exist: " + editFile, editFile.exists());
+-
+-    // Corrupt the last edit
+-    long fileLen = editFile.length();
+-    RandomAccessFile rwf = new RandomAccessFile(editFile, "rw");
+-    rwf.setLength(fileLen - 1);
+-    rwf.close();
+-
+-    // Make sure that we can't start the cluster normally before recovery
++  
++    corruptor.corrupt(editFile);
++  
++    // Check how our corruption affected NameNode startup.
+     try {
+       LOG.debug("trying to start normally (this should fail)...");
+       cluster = new MiniDFSCluster(0, conf, 0, false, true, false,
+           StartupOption.REGULAR, null, null, null);
+       cluster.waitActive();
+-      fail("expected the truncated edit log to prevent normal startup");
++      if (corruptor.fatalCorruption()) {
++        fail("expected the truncated edit log to prevent normal startup");
++      }
+     } catch (IOException e) {
++      if (!corruptor.fatalCorruption()) {
++        fail("expected to be able to start up normally, but couldn't.");
++      }
+     } finally {
+       cluster.shutdown();
+     }
+-
++  
+     // Perform recovery
+     try {
+       LOG.debug("running recovery...");
+@@ -106,7 +179,7 @@ public class TestNameNodeRecovery {
+     } finally {
+       cluster.shutdown();
+     }
+-
++  
+     // Make sure that we can start the cluster normally after recovery
+     try {
+       cluster = new MiniDFSCluster(0, conf, 0, false, true, false,
+@@ -118,7 +191,37 @@ public class TestNameNodeRecovery {
+     } finally {
+       cluster.shutdown();
+     }
++  }
++ 
++  /** Test that we can successfully recover from a situation where the last
++   * entry in the edit log has been truncated. */
++  @Test(timeout=180000)
++  public void testRecoverTruncatedEditLog() throws IOException {
++    testNameNodeRecoveryImpl(new TruncatingCorruptor());
+     LOG.debug("testRecoverTruncatedEditLog: successfully recovered the " +
+         "truncated edit log");
+   }
++
++  /** Test that we can successfully recover from a situation where garbage
++   * bytes have been added to the end of the file. */
++  @Test(timeout=180000)
++  public void testRecoverPaddedEditLog() throws IOException {
++    testNameNodeRecoveryImpl(new PaddingCorruptor());
++    LOG.debug("testRecoverPaddedEditLog: successfully recovered the " +
++        "padded edit log");
++  }
++
++  /** Test that we can successfully recover from a situation where 0
++   * bytes have been added to the end of the file. */
++  @Test(timeout=180000)
++  public void testRecoverZeroPaddedEditLog() throws IOException {
++    testNameNodeRecoveryImpl(new SafePaddingCorruptor((byte)0));
++  }
++
++  /** Test that we can successfully recover from a situation where -1
++   * bytes have been added to the end of the file. */
++  @Test(timeout=180000)
++  public void testRecoverNegativeOnePaddedEditLog() throws IOException {
++    testNameNodeRecoveryImpl(new SafePaddingCorruptor((byte)-1));
++  }
+ }
+-- 
+1.7.0.4
+

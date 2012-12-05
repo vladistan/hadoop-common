@@ -97,7 +97,7 @@ int write_config_file(char *file_name) {
     fprintf(file, "," TEST_ROOT "/local-%d", i);
   }
   fprintf(file, "\n");
-  fprintf(file, "hadoop.log.dir=" TEST_ROOT "/logs\n");
+  fprintf(file, "hadoop.log.dir=" TEST_ROOT "/logs");
   fclose(file);
   return 0;
 }
@@ -780,7 +780,10 @@ int main(int argc, char **argv) {
   int my_username = 0;
 
   // clean up any junk from previous run
-  system("chmod -R u=rwx " TEST_ROOT "; rm -fr " TEST_ROOT);
+  if (system("chmod -R u=rwx " TEST_ROOT "; rm -fr " TEST_ROOT)) {
+    perror("Warning, couldn't clean " TEST_ROOT);
+    // but maybe it just didn't exist, so keep going.
+  }
   
   if (mkdirs(TEST_ROOT "/logs/userlogs", 0755) != 0) {
     exit(1);
@@ -795,7 +798,7 @@ int main(int argc, char **argv) {
 
   if (getuid() == 0 && argc == 2) {
     username = argv[1];
-  } else {
+  } else if ((username = getenv("TC_TEST_USERNAME")) == NULL) {
     username = strdup(getpwuid(getuid())->pw_name);
     my_username = 1;
   }

@@ -1,0 +1,378 @@
+From 1a4ea79d7e6bccfdd907fe30b01edc7f59d29a6f Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Wed, 27 Jun 2012 23:27:53 +0000
+Subject: [PATCH 1279/1344] HDFS-3551. WebHDFS CREATE should use client location for HTTP redirection.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1354773 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 2b335e0312614b6c48b8950a6c1012e7f0e36a3b)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../hadoop/hdfs/server/namenode/FSNamesystem.java  |   19 +++
+ .../hadoop/hdfs/server/namenode/Host2NodesMap.java |   10 ++
+ .../web/resources/NamenodeWebHdfsMethods.java      |   37 ++++--
+ .../hdfs/server/namenode/NameNodeAdapter.java      |   11 ++
+ .../web/resources/TestWebHdfsDataLocality.java     |  136 ++++++++++++++++++++
+ .../apache/hadoop/hdfs/web/WebHdfsTestUtil.java    |    7 +
+ 6 files changed, 210 insertions(+), 10 deletions(-)
+ create mode 100644 src/test/org/apache/hadoop/hdfs/server/namenode/web/resources/TestWebHdfsDataLocality.java
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index f43f138..78954b4 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -3062,6 +3062,20 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+     return true;
+   }
+ 
++  /** Choose a datanode near to the given address. */ 
++  public DatanodeInfo chooseDatanode(String address, long blocksize) {
++    final DatanodeDescriptor clientNode = host2DataNodeMap.getDatanodeByHost(
++        address);
++    if (clientNode != null) {
++      final DatanodeDescriptor[] datanodes = replicator.chooseTarget(
++          1, clientNode, null, blocksize);
++      if (datanodes.length > 0) {
++        return datanodes[0];
++      }
++    }
++    return null;
++  }
++
+   /**
+    * Parse the data-nodes the block belongs to and choose one,
+    * which will be the replication source.
+@@ -5937,4 +5951,9 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+       } 
+     }
+   }
++
++  @Override
++  public String toString() {
++    return getClass().getSimpleName() + ": " + host2DataNodeMap;
++  }
+ }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/Host2NodesMap.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/Host2NodesMap.java
+index a00022d..8ed2cf4 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/Host2NodesMap.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/Host2NodesMap.java
+@@ -185,4 +185,14 @@ class Host2NodesMap {
+       hostmapLock.readLock().unlock();
+     }
+   }
++  
++  @Override
++  public String toString() {
++    final StringBuilder b = new StringBuilder(getClass().getSimpleName())
++        .append("[");
++    for(Map.Entry<String, DatanodeDescriptor[]> e : map.entrySet()) {
++      b.append("\n  " + e.getKey() + " => " + Arrays.asList(e.getValue()));
++    }
++    return b.append("\n]").toString();
++  }
+ }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index 6916001..9a38cea 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -54,6 +54,7 @@ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager;
++import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+ import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.web.JsonUtil;
+@@ -107,6 +108,11 @@ public class NamenodeWebHdfsMethods {
+     return REMOTE_ADDRESS.get();
+   }
+ 
++  /** Set the remote client address. */
++  static void setRemoteAddress(String remoteAddress) {
++    REMOTE_ADDRESS.set(remoteAddress);
++  }
++
+   private @Context ServletContext context;
+   private @Context HttpServletRequest request;
+   private @Context HttpServletResponse response;
+@@ -126,12 +132,21 @@ public class NamenodeWebHdfsMethods {
+     response.setContentType(null);
+   }
+ 
+-  private static DatanodeInfo chooseDatanode(final NameNode namenode,
+-      final String path, final HttpOpParam.Op op, final long openOffset
+-      ) throws IOException {
+-    if (op == GetOpParam.Op.OPEN
++  static DatanodeInfo chooseDatanode(final NameNode namenode,
++      final String path, final HttpOpParam.Op op, final long openOffset,
++      final long blocksize) throws IOException {
++    final FSNamesystem ns = namenode.getNamesystem();
++
++    if (op == PutOpParam.Op.CREATE) {
++      //choose a datanode near to client
++      final DatanodeInfo dn = ns.chooseDatanode(getRemoteAddress(), blocksize);
++      if (dn != null) {
++        return dn;
++      }
++    } else if (op == GetOpParam.Op.OPEN
+         || op == GetOpParam.Op.GETFILECHECKSUM
+         || op == PostOpParam.Op.APPEND) {
++      //choose a datanode containing a replica
+       final HdfsFileStatus status = namenode.getFileInfo(path);
+       if (status == null) {
+         throw new FileNotFoundException("File " + path + " not found.");
+@@ -155,7 +170,7 @@ public class NamenodeWebHdfsMethods {
+       }
+     } 
+ 
+-    return namenode.getNamesystem().getRandomDatanode();
++    return ns.getRandomDatanode();
+   }
+ 
+   private Token<? extends TokenIdentifier> generateDelegationToken(
+@@ -173,8 +188,10 @@ public class NamenodeWebHdfsMethods {
+       final UserGroupInformation ugi, final DelegationParam delegation,
+       final UserParam username, final DoAsParam doAsUser,
+       final String path, final HttpOpParam.Op op, final long openOffset,
++      final long blocksize,
+       final Param<?, ?>... parameters) throws URISyntaxException, IOException {
+-    final DatanodeInfo dn = chooseDatanode(namenode, path, op, openOffset);
++    final DatanodeInfo dn = chooseDatanode(namenode, path, op, openOffset,
++        blocksize);
+ 
+     final String delegationQuery;
+     if (!UserGroupInformation.isSecurityEnabled()) {
+@@ -302,7 +319,7 @@ public class NamenodeWebHdfsMethods {
+     case CREATE:
+     {
+       final URI uri = redirectURI(namenode, ugi, delegation, username, doAsUser,
+-          fullpath, op.getValue(), -1L,
++          fullpath, op.getValue(), -1L, blockSize.getValue(conf),
+           permission, overwrite, bufferSize, replication, blockSize);
+       return Response.temporaryRedirect(uri).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     } 
+@@ -425,7 +442,7 @@ public class NamenodeWebHdfsMethods {
+     case APPEND:
+     {
+       final URI uri = redirectURI(namenode, ugi, delegation, username, doAsUser,
+-          fullpath, op.getValue(), -1L, bufferSize);
++          fullpath, op.getValue(), -1L, -1L, bufferSize);
+       return Response.temporaryRedirect(uri).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     default:
+@@ -507,7 +524,7 @@ public class NamenodeWebHdfsMethods {
+     case OPEN:
+     {
+       final URI uri = redirectURI(namenode, ugi, delegation, username, doAsUser,
+-          fullpath, op.getValue(), offset.getValue(), offset, length, bufferSize);
++          fullpath, op.getValue(), offset.getValue(), -1L, offset, length, bufferSize);
+       return Response.temporaryRedirect(uri).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     case GET_BLOCK_LOCATIONS:
+@@ -543,7 +560,7 @@ public class NamenodeWebHdfsMethods {
+     case GETFILECHECKSUM:
+     {
+       final URI uri = redirectURI(namenode, ugi, delegation, username, doAsUser,
+-          fullpath, op.getValue(), -1L);
++          fullpath, op.getValue(), -1L, -1L);
+       return Response.temporaryRedirect(uri).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
+     case GETDELEGATIONTOKEN:
+diff --git a/src/test/org/apache/hadoop/hdfs/server/namenode/NameNodeAdapter.java b/src/test/org/apache/hadoop/hdfs/server/namenode/NameNodeAdapter.java
+index cc03803..00aa102 100644
+--- a/src/test/org/apache/hadoop/hdfs/server/namenode/NameNodeAdapter.java
++++ b/src/test/org/apache/hadoop/hdfs/server/namenode/NameNodeAdapter.java
+@@ -17,10 +17,21 @@
+  */
+ package org.apache.hadoop.hdfs.server.namenode;
+ import java.io.IOException;
++
+ import org.apache.hadoop.hdfs.protocol.Block;
+ import org.apache.hadoop.ipc.Server;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
+ 
+ public abstract class NameNodeAdapter {
++  /**
++   * Get block locations within the specified range.
++   */
++  public static LocatedBlocks getBlockLocations(NameNode namenode,
++      String src, long offset, long length) throws IOException {
++    return namenode.getNamesystem().getBlockLocations(
++        src, offset, length, false, true, true);
++  }
++
+   public static boolean checkFileProgress(FSNamesystem fsn, String path, boolean checkall) throws IOException {
+     INodeFile f = fsn.dir.getFileINode(path);
+     return fsn.checkFileProgress(f, checkall);
+diff --git a/src/test/org/apache/hadoop/hdfs/server/namenode/web/resources/TestWebHdfsDataLocality.java b/src/test/org/apache/hadoop/hdfs/server/namenode/web/resources/TestWebHdfsDataLocality.java
+new file mode 100644
+index 0000000..fad3631
+--- /dev/null
++++ b/src/test/org/apache/hadoop/hdfs/server/namenode/web/resources/TestWebHdfsDataLocality.java
+@@ -0,0 +1,136 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.server.namenode.web.resources;
++
++import java.util.Arrays;
++import java.util.List;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.commons.logging.impl.Log4JLogger;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.DFSConfigKeys;
++import org.apache.hadoop.hdfs.DistributedFileSystem;
++import org.apache.hadoop.hdfs.MiniDFSCluster;
++import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.server.datanode.DataNode;
++import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
++import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
++import org.apache.hadoop.hdfs.server.namenode.NameNode;
++import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
++import org.apache.hadoop.hdfs.web.WebHdfsTestUtil;
++import org.apache.hadoop.hdfs.web.resources.GetOpParam;
++import org.apache.hadoop.hdfs.web.resources.PostOpParam;
++import org.apache.hadoop.hdfs.web.resources.PutOpParam;
++import org.apache.log4j.Level;
++import org.junit.Assert;
++import org.junit.Test;
++
++/**
++ * Test WebHDFS which provides data locality using HTTP redirection.
++ */
++public class TestWebHdfsDataLocality {
++  static final Log LOG = LogFactory.getLog(TestWebHdfsDataLocality.class);
++  {
++    ((Log4JLogger)NameNode.stateChangeLog).getLogger().setLevel(Level.OFF);
++    ((Log4JLogger)LeaseManager.LOG).getLogger().setLevel(Level.OFF);
++    ((Log4JLogger)LogFactory.getLog(FSNamesystem.class)).getLogger().setLevel(Level.OFF);
++  }
++  
++  private static final String RACK0 = "/rack0";
++  private static final String RACK1 = "/rack1";
++  private static final String RACK2 = "/rack2";
++
++  @Test
++  public void testDataLocality() throws Exception {
++    final Configuration conf = WebHdfsTestUtil.createConf();
++    final String[] racks = {RACK0, RACK0, RACK1, RACK1, RACK2, RACK2};
++    final int nDataNodes = racks.length;
++    LOG.info("nDataNodes=" + nDataNodes + ", racks=" + Arrays.asList(racks));
++
++    final MiniDFSCluster cluster = new MiniDFSCluster(
++        conf, nDataNodes, true, racks);
++    try {
++      cluster.waitActive();
++
++      final DistributedFileSystem dfs = (DistributedFileSystem)cluster.getFileSystem();
++      final NameNode namenode = cluster.getNameNode();
++      final FSNamesystem ns = namenode.getNamesystem();
++      LOG.info("ns=" + ns);
++  
++      final long blocksize = DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT;
++      final String f = "/foo";
++
++      { //test CREATE
++        for(int i = 0; i < nDataNodes; i++) {
++          //set client address to a particular datanode
++          final DataNode dn = cluster.getDataNodes().get(i);
++          final String host = ns.getDatanode(dn.dnRegistration).getHost();
++          NamenodeWebHdfsMethods.setRemoteAddress(host);
++
++          //The chosen datanode must be the same as the client address
++          final DatanodeInfo chosen = NamenodeWebHdfsMethods.chooseDatanode(
++              namenode, f, PutOpParam.Op.CREATE, -1L, blocksize);
++          Assert.assertEquals(host, chosen.getHost());
++        }
++      }
++  
++      //create a file with one replica.
++      final Path p = new Path(f);
++      final FSDataOutputStream out = dfs.create(p, (short)1);
++      out.write(1);
++      out.close();
++  
++      //get replica location.
++      final LocatedBlocks locatedblocks = NameNodeAdapter.getBlockLocations(
++          namenode, f, 0, 1);
++      final List<LocatedBlock> lb = locatedblocks.getLocatedBlocks();
++      Assert.assertEquals(1, lb.size());
++      final DatanodeInfo[] locations = lb.get(0).getLocations();
++      Assert.assertEquals(1, locations.length);
++      final DatanodeInfo expected = locations[0];
++      
++      //For GETFILECHECKSUM, OPEN and APPEND,
++      //the chosen datanode must be the same as the replica location.
++
++      { //test GETFILECHECKSUM
++        final DatanodeInfo chosen = NamenodeWebHdfsMethods.chooseDatanode(
++            namenode, f, GetOpParam.Op.GETFILECHECKSUM, -1L, blocksize);
++        Assert.assertEquals(expected, chosen);
++      }
++  
++      { //test OPEN
++        final DatanodeInfo chosen = NamenodeWebHdfsMethods.chooseDatanode(
++            namenode, f, GetOpParam.Op.OPEN, 0, blocksize);
++        Assert.assertEquals(expected, chosen);
++      }
++
++      { //test APPEND
++        final DatanodeInfo chosen = NamenodeWebHdfsMethods.chooseDatanode(
++            namenode, f, PostOpParam.Op.APPEND, -1L, blocksize);
++        Assert.assertEquals(expected, chosen);
++      }
++    } finally {
++      cluster.shutdown();
++    }
++  }
++}
+\ No newline at end of file
+diff --git a/src/test/org/apache/hadoop/hdfs/web/WebHdfsTestUtil.java b/src/test/org/apache/hadoop/hdfs/web/WebHdfsTestUtil.java
+index f7b5e1a..96fd20c 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/WebHdfsTestUtil.java
++++ b/src/test/org/apache/hadoop/hdfs/web/WebHdfsTestUtil.java
+@@ -31,6 +31,7 @@ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
+ import org.apache.hadoop.hdfs.web.resources.Param;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -39,6 +40,12 @@ import org.junit.Assert;
+ public class WebHdfsTestUtil {
+   public static final Log LOG = LogFactory.getLog(WebHdfsTestUtil.class);
+ 
++  public static Configuration createConf() {
++    final Configuration conf = new Configuration();
++    conf.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
++    return conf;
++  }
++
+   public static WebHdfsFileSystem getWebHdfsFileSystem(final Configuration conf
+       ) throws IOException, URISyntaxException {
+     final String uri = WebHdfsFileSystem.SCHEME  + "://"
+-- 
+1.7.0.4
+

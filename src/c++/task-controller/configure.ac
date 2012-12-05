@@ -20,22 +20,22 @@
 AC_PREREQ(2.59)
 AC_INIT(linux-task-controller, 1.0.0, mapreduce-dev@hadoop.apache.org)
 AC_GNU_SOURCE
-AC_SYS_LARGEFILE
 
 AM_INIT_AUTOMAKE([subdir-objects foreign no-dist])
+
+# Dont generate rules to re-automake if timestamps are off
+# since we check in the generated files and revision control
+# doesn't track timestamps
+AM_MAINTAINER_MODE
 
 AC_CONFIG_SRCDIR([impl/task-controller.c])
 AC_CONFIG_FILES([Makefile])
 
 AC_PREFIX_DEFAULT(`pwd`/../install)
 
-CHECK_INSTALL_CFLAG
-HADOOP_UTILS_SETUP
-
 # Checks for programs.
 AC_PROG_CC
 AM_PROG_CC_C_O
-AC_PROG_LIBTOOL
 
 # Checks for libraries.
 

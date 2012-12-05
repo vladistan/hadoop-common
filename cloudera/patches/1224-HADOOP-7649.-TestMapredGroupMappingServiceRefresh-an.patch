@@ -1,0 +1,51 @@
+From 4e98add7ef6abd0010463ed8a3143756df09fe7e Mon Sep 17 00:00:00 2001
+From: Jitendra Nath Pandey <jitendra@apache.org>
+Date: Thu, 22 Sep 2011 19:13:34 +0000
+Subject: [PATCH 1224/1344] HADOOP-7649. TestMapredGroupMappingServiceRefresh and TestRefreshUserMappings fail after HADOOP-7625.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1174326 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit c23029752b577d0d71415eef982f402a2039cffe)
+
+Author: Jitendra Pandey
+Ref: CDH-4806
+---
+ .../TestMapredGroupMappingServiceRefresh.java      |    5 ++---
+ .../hadoop/security/TestRefreshUserMappings.java   |    6 ++----
+ 2 files changed, 4 insertions(+), 7 deletions(-)
+
+diff --git a/src/test/org/apache/hadoop/security/TestMapredGroupMappingServiceRefresh.java b/src/test/org/apache/hadoop/security/TestMapredGroupMappingServiceRefresh.java
+index b508b21..71ce345 100644
+--- a/src/test/org/apache/hadoop/security/TestMapredGroupMappingServiceRefresh.java
++++ b/src/test/org/apache/hadoop/security/TestMapredGroupMappingServiceRefresh.java
+@@ -246,9 +246,8 @@ public class TestMapredGroupMappingServiceRefresh {
+   private void addNewConfigResource(String rsrcName, String keyGroup,
+       String groups, String keyHosts, String hosts)  throws FileNotFoundException {
+     // location for temp resource should be in CLASSPATH
+-    URL url = config.getResource("mapred-default.xml");
+-    Path p = new Path(url.getPath());
+-    Path dir = p.getParent();
++    String dir = System.getProperty("test.build.extraconf", 
++        "build/test/extraconf");
+     tempResource = dir.toString() + "/" + rsrcName;
+ 
+ 
+diff --git a/src/test/org/apache/hadoop/security/TestRefreshUserMappings.java b/src/test/org/apache/hadoop/security/TestRefreshUserMappings.java
+index d149a6f..0c7c163 100644
+--- a/src/test/org/apache/hadoop/security/TestRefreshUserMappings.java
++++ b/src/test/org/apache/hadoop/security/TestRefreshUserMappings.java
+@@ -227,10 +227,8 @@ public class TestRefreshUserMappings {
+   private void addNewConfigResource(String rsrcName, String keyGroup,
+       String groups, String keyHosts, String hosts)  throws FileNotFoundException {
+     // location for temp resource should be in CLASSPATH
+-    Configuration conf = new Configuration();
+-    URL url = conf.getResource("hdfs-default.xml");
+-    Path p = new Path(url.getPath());
+-    Path dir = p.getParent();
++    String dir = System.getProperty("test.build.extraconf", 
++        "build/test/extraconf");
+     tempResource = dir.toString() + "/" + rsrcName;
+ 
+ 
+-- 
+1.7.0.4
+

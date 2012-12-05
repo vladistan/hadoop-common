@@ -160,9 +160,8 @@ abstract public class Task implements Writable, Configurable {
   protected org.apache.hadoop.mapreduce.OutputFormat<?,?> outputFormat;
   protected org.apache.hadoop.mapreduce.OutputCommitter committer;
   protected final Counters.Counter spilledRecordsCounter;
-  private int numSlotsRequired;
-  private String pidFile = "";
   protected TaskUmbilicalProtocol umbilical;
+  private int numSlotsRequired;
   protected SecretKey tokenSecret;
   protected JvmContext jvmContext;
 

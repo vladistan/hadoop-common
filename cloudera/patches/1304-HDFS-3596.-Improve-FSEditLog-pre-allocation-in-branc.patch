@@ -1,0 +1,178 @@
+From 515f92ec05f4fc948f1c804207bb42c99ab5f4ef Mon Sep 17 00:00:00 2001
+From: Matthew J. Foley <mattf@apache.org>
+Date: Mon, 9 Jul 2012 06:33:55 +0000
+Subject: [PATCH 1304/1344] HDFS-3596. Improve FSEditLog pre-allocation in branch-1. Contributed by Colin Patrick McCabe.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1358932 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit cdf96ddd1d2143807b43db4ea9374ca5daa7d4b9)
+
+Implement HDFS-3510 in branch-1. This will improve FSEditLog
+preallocation to decrease the incidence of corrupted logs after disk
+full conditions. (See HDFS-3510 for a longer description.)
+
+Reason: Bug
+Author: Colin McCabe
+Ref: CDH-6162
+---
+ .../hadoop/hdfs/server/namenode/FSEditLog.java     |   55 ++++++++++++--------
+ .../hadoop/hdfs/server/namenode/TestEditLog.java   |   31 +++++++++++
+ 2 files changed, 64 insertions(+), 22 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSEditLog.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSEditLog.java
+index e134405..a9b2f24 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSEditLog.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSEditLog.java
+@@ -83,7 +83,8 @@ public class FSEditLog {
+   private static final byte OP_UPDATE_MASTER_KEY = 18; //update master key
+ 
+   private static int sizeFlushBuffer = 512*1024;
+-  private static final int PREALLOCATION_LENGTH = 1024 * 1024;
++  /** Preallocation length in bytes for writing edit log. */
++  static final int MIN_PREALLOCATION_LENGTH = 1024 * 1024;
+ 
+   private ArrayList<EditLogOutputStream> editStreams = null;
+   private FSImage fsimage = null;
+@@ -126,20 +127,21 @@ public class FSEditLog {
+    * which stores edits in a local file.
+    */
+   static class EditLogFileOutputStream extends EditLogOutputStream {
++    /** Preallocation buffer, padded with OP_INVALID */
++    private static final ByteBuffer PREALLOCATION_BUFFER
++        = ByteBuffer.allocateDirect(MIN_PREALLOCATION_LENGTH);
++    static {
++      PREALLOCATION_BUFFER.position(0).limit(MIN_PREALLOCATION_LENGTH);
++      for(int i = 0; i < PREALLOCATION_BUFFER.capacity(); i++) {
++        PREALLOCATION_BUFFER.put(OP_INVALID);
++      }
++    }
++
+     private File file;
+     private FileOutputStream fp;    // file stream for storing edit logs 
+     private FileChannel fc;         // channel of the file stream for sync
+     private DataOutputBuffer bufCurrent;  // current buffer for writing
+     private DataOutputBuffer bufReady;    // buffer ready for flushing
+-    static final ByteBuffer fill =
+-        ByteBuffer.allocateDirect(PREALLOCATION_LENGTH);
+-
+-    static {
+-      fill.position(0);
+-      for (int i = 0; i < fill.capacity(); i++) {
+-        fill.put(OP_INVALID);
+-      }
+-    }
+ 
+     EditLogFileOutputStream(File name) throws IOException {
+       super();
+@@ -228,7 +230,6 @@ public class FSEditLog {
+     @Override
+     void setReadyToFlush() throws IOException {
+       assert bufReady.size() == 0 : "previous data is not flushed yet";
+-      write(OP_INVALID);           // insert end-of-file marker
+       DataOutputBuffer tmp = bufReady;
+       bufReady = bufCurrent;
+       bufCurrent = tmp;
+@@ -245,7 +246,6 @@ public class FSEditLog {
+       bufReady.writeTo(fp);     // write data to file
+       bufReady.reset();         // erase all data in the buffer
+       fc.force(false);          // metadata updates not needed because of preallocation
+-      fc.position(fc.position()-1); // skip back the end-of-file marker
+     }
+ 
+     /**
+@@ -259,15 +259,26 @@ public class FSEditLog {
+ 
+     // allocate a big chunk of data
+     private void preallocate() throws IOException {
+-      long position = fc.position();
+-      if (position + 4096 >= fc.size()) {
+-        FSNamesystem.LOG.debug("Preallocating Edit log, current size " +
+-                                fc.size());
+-        fill.position(0);
+-        int written = fc.write(fill, position);
+-        FSNamesystem.LOG.debug("Edit log size is now " + fc.size() +
+-                              " written " + written + " bytes " +
+-                              " at offset " + position);
++      long size = fc.size();
++      int bufSize = bufReady.getLength();
++      long need = bufSize - (size - fc.position());
++      if (need <= 0) {
++        return;
++      }
++      long oldSize = size;
++      long total = 0;
++      long fillCapacity = PREALLOCATION_BUFFER.capacity();
++      PREALLOCATION_BUFFER.position(0);
++      while (need > 0) {
++        do {
++          size += fc.write(PREALLOCATION_BUFFER, size);
++        } while (PREALLOCATION_BUFFER.remaining() > 0);
++        need -= fillCapacity;
++        total += fillCapacity;
++      }
++      if(FSNamesystem.LOG.isDebugEnabled()) {
++        FSNamesystem.LOG.debug("Preallocated " + total + " bytes at the end of " +
++            "the edit log (offset " + oldSize + ")");
+       }
+     }
+     
+@@ -552,7 +563,7 @@ public class FSEditLog {
+      */
+     byte[] buf = new byte[4096];
+     while (true) {
+-      long amt = (editsLength - PREALLOCATION_LENGTH) - tracker.getPos();
++      long amt = (editsLength - MIN_PREALLOCATION_LENGTH) - tracker.getPos();
+       if (amt <= 0) {
+         return;
+       } else if (amt > buf.length) {
+diff --git a/src/test/org/apache/hadoop/hdfs/server/namenode/TestEditLog.java b/src/test/org/apache/hadoop/hdfs/server/namenode/TestEditLog.java
+index 6bd631a..ad788e6 100644
+--- a/src/test/org/apache/hadoop/hdfs/server/namenode/TestEditLog.java
++++ b/src/test/org/apache/hadoop/hdfs/server/namenode/TestEditLog.java
+@@ -34,6 +34,7 @@ import org.apache.hadoop.hdfs.server.namenode.FSEditLog.EditLogFileInputStream;
+ import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
+ import org.apache.hadoop.hdfs.server.namenode.FSImage.NameNodeDirType;
+ import org.apache.hadoop.hdfs.server.namenode.FSImage.NameNodeFile;
++import org.apache.hadoop.io.BytesWritable;
+ 
+ /**
+  * This class tests the creation and validation of a checkpoint.
+@@ -80,6 +81,36 @@ public class TestEditLog extends TestCase {
+     }
+   }
+ 
++  public void testEditLogPreallocation() throws IOException {
++    final File TEST_DIR =
++        new File(System.getProperty("test.build.data", "/tmp"));
++    final File TEST_EDITS = new File(TEST_DIR, "edit_log");
++    
++    FSEditLog.EditLogFileOutputStream elfos = null;
++    try {
++      elfos = new FSEditLog.EditLogFileOutputStream(TEST_EDITS);
++      byte b[] = new byte[1024];
++      for (int i = 0; i < b.length; i++) {
++        b[i] = 0;
++      }
++      elfos.write(b);
++      elfos.setReadyToFlush();
++      elfos.flushAndSync();
++      assertEquals(FSEditLog.MIN_PREALLOCATION_LENGTH,
++          elfos.getFile().length());
++      for (int i = 0;
++          i < 2 * FSEditLog.MIN_PREALLOCATION_LENGTH / b.length; i++) {
++        elfos.write(b);
++        elfos.setReadyToFlush();
++        elfos.flushAndSync();
++      }
++      assertEquals(3 * FSEditLog.MIN_PREALLOCATION_LENGTH, elfos.getFile().length());
++    } finally {
++      if (elfos != null) elfos.close();
++      if (TEST_EDITS.exists()) TEST_EDITS.delete();
++    }
++  }
++    
+   /**
+    * Tests transaction logging in dfs.
+    */
+-- 
+1.7.0.4
+

@@ -1,0 +1,33 @@
+From d7d1ad18e06ee5ce4362ec3918f6d2be3d651546 Mon Sep 17 00:00:00 2001
+From: Owen O'Malley <omalley@apache.org>
+Date: Wed, 2 May 2012 04:33:30 +0000
+Subject: [PATCH 1272/1344] HADOOP-8338. Fix renew and cancel of RPC HDFS delegation tokens. (omalley)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1332919 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit bbbf0d34335edd27c8c88b4ad75b68ac3b29722f)
+
+Author: Owen O'Malley
+Ref: CDH-4806
+---
+ .../hadoop/hdfs/tools/DelegationTokenFetcher.java  |    5 +++++
+ 1 files changed, 5 insertions(+), 0 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java b/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java
+index a4076f5..8930b22 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/tools/DelegationTokenFetcher.java
+@@ -56,6 +56,11 @@ import org.apache.hadoop.util.GenericOptionsParser;
+  */
+ public class DelegationTokenFetcher {
+   
++  static{
++    Configuration.addDefaultResource("hdfs-default.xml");
++    Configuration.addDefaultResource("hdfs-site.xml");
++  }
++
+   private static final Log LOG = 
+     LogFactory.getLog(DelegationTokenFetcher.class);
+   private static final String WEBSERVICE = "webservice";
+-- 
+1.7.0.4
+

@@ -1,0 +1,54 @@
+From 85a9a0477429240853678e1aee7dc280978de128 Mon Sep 17 00:00:00 2001
+From: Alejandro Abdelnur <tucu@cloudera.com>
+Date: Mon, 25 Jun 2012 16:19:07 -0700
+Subject: [PATCH 1195/1344] CLOUDERA-BUILD. Add log4j as a dependency to hadoop-core POM.
+
+  Reason: Mahout unit tests are failing due to missing log4j
+  Author: Alejandro Abdelnur
+  Ref: CDH-6290
+---
+ cloudera/maven-packaging/hadoop-core/pom.xml |   28 ++++++++++++++++++++++++++
+ 1 files changed, 28 insertions(+), 0 deletions(-)
+
+diff --git a/cloudera/maven-packaging/hadoop-core/pom.xml b/cloudera/maven-packaging/hadoop-core/pom.xml
+index aa270f5..dab8afb 100644
+--- a/cloudera/maven-packaging/hadoop-core/pom.xml
++++ b/cloudera/maven-packaging/hadoop-core/pom.xml
+@@ -151,6 +151,34 @@
+       <artifactId>jackson-core-asl</artifactId>
+       <version>1.5.2</version>
+     </dependency>
++
++    <dependency>
++      <groupId>log4j</groupId>
++      <artifactId>log4j</artifactId>
++      <version>1.2.15</version>
++      <exclusions>
++        <exclusion>
++          <groupId>com.sun.jdmk</groupId>
++          <artifactId>jmxtools</artifactId>
++        </exclusion>
++        <exclusion>
++          <groupId>com.sun.jmx</groupId>
++          <artifactId>jmxri</artifactId>
++        </exclusion>
++        <exclusion>
++          <groupId>javax.mail</groupId>
++          <artifactId>mail</artifactId>
++        </exclusion>
++        <exclusion>
++          <groupId>javax.jms</groupId>
++          <artifactId>jmx</artifactId>
++        </exclusion>
++        <exclusion>
++          <groupId>javax.jms</groupId>
++          <artifactId>jms</artifactId>
++        </exclusion>
++      </exclusions>
++    </dependency>
+   </dependencies>
+   
+   <build>
+-- 
+1.7.0.4
+

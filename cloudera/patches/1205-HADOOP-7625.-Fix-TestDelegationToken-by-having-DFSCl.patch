@@ -1,0 +1,185 @@
+From 9485397d48ba73bab52bc3bfa9225cf5966ba5d2 Mon Sep 17 00:00:00 2001
+From: Owen O'Malley <omalley@apache.org>
+Date: Thu, 15 Sep 2011 19:34:22 +0000
+Subject: [PATCH 1205/1344] HADOOP-7625. Fix TestDelegationToken by having DFSClient set the service
+ correctly and having the test cases use the common jar. (omalley)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1171236 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 194138d0def90761779a17c3196e04340fdd0795)
+
+Author: Owen O'Malley
+Ref: CDH-4806
+---
+ build.xml                                          |    3 ++-
+ .../org/apache/hadoop/security/token/Token.java    |    5 ++++-
+ src/hdfs/org/apache/hadoop/hdfs/DFSClient.java     |    4 ++++
+ .../apache/hadoop/hdfs/DistributedFileSystem.java  |    3 +--
+ .../hadoop/hdfs/security/TestDelegationToken.java  |   13 +++++++++----
+ 5 files changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/build.xml b/build.xml
+index a8b43b6..b608b43 100644
+--- a/build.xml
++++ b/build.xml
+@@ -329,6 +329,7 @@
+       <include name="**/*.jar"/>
+       <exclude name="**/excluded/"/>
+     </fileset>
++    <pathelement location="${hadoop-core.jar}"/>
+     <path refid="classpath"/>
+   </path>
+ 
+@@ -904,7 +905,7 @@
+   <!-- ================================================================== -->
+   <!--                                                                    -->
+   <!-- ================================================================== -->
+-  <target name="jar-test" depends="compile-core-test" description="Make hadoop-test.jar">
++  <target name="jar-test" depends="jar,compile-core-test" description="Make hadoop-test.jar">
+     <jar jarfile="${build.dir}/${test.final.name}.jar"
+          basedir="${test.build.classes}">
+          <manifest>
+diff --git a/src/core/org/apache/hadoop/security/token/Token.java b/src/core/org/apache/hadoop/security/token/Token.java
+index 5cc355c..f4a52ed 100644
+--- a/src/core/org/apache/hadoop/security/token/Token.java
++++ b/src/core/org/apache/hadoop/security/token/Token.java
+@@ -126,8 +126,11 @@ public class Token<T extends TokenIdentifier> implements Writable {
+    * @param newKind
+    */
+   //@InterfaceAudience.Private
+-  public void setKind(Text newKind) {
++  public synchronized void setKind(Text newKind) {
+     kind = newKind;
++    // removed the cached renewer so that it will be looked up with the new
++    // kind.
++    renewer = null;
+   }
+ 
+   /**
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+index ca91991..f8ef858 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+@@ -42,6 +42,7 @@ import org.apache.hadoop.hdfs.server.namenode.LeaseExpiredException;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.server.namenode.NotReplicatedYetException;
+ import org.apache.hadoop.security.AccessControlException;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.SecretManager.InvalidToken;
+@@ -80,6 +81,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+   private static final int TCP_WINDOW_SIZE = 128 * 1024; // 128 KB
+   public final ClientProtocol namenode;
+   private final ClientProtocol rpcNamenode;
++  private final InetSocketAddress nnAddress;
+   final UserGroupInformation ugi;
+   volatile boolean clientRunning = true;
+   Random r = new Random();
+@@ -228,6 +230,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+     throws IOException {
+     this.conf = conf;
+     this.stats = stats;
++    this.nnAddress = nameNodeAddr;
+     this.socketTimeout = conf.getInt("dfs.socket.timeout", 
+                                      HdfsConstants.READ_TIMEOUT);
+     this.datanodeWriteTimeout = conf.getInt("dfs.datanode.socket.write.timeout",
+@@ -356,6 +359,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+       throws IOException {
+     Token<DelegationTokenIdentifier> result =
+       namenode.getDelegationToken(renewer);
++    SecurityUtil.setTokenService(result, nnAddress);
+     LOG.info("Created " + stringifyToken(result));
+     return result;
+   }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+index 769d95f..047771e 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+@@ -604,7 +604,6 @@ public class DistributedFileSystem extends FileSystem {
+                                                       ) throws IOException {
+     Token<DelegationTokenIdentifier> result =
+       dfs.getDelegationToken(renewer == null ? null : new Text(renewer));
+-    result.setService(new Text(getCanonicalServiceName()));
+     return result;
+   }
+ 
+@@ -624,7 +623,7 @@ public class DistributedFileSystem extends FileSystem {
+   @Deprecated
+   public Token<DelegationTokenIdentifier> getDelegationToken(Text renewer)
+       throws IOException {
+-    return dfs.getDelegationToken(renewer);
++    return getDelegationToken(renewer.toString());
+   }
+ 
+   /**
+diff --git a/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java b/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java
+index 6733f25..113657d 100644
+--- a/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java
++++ b/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java
+@@ -27,6 +27,8 @@ import java.security.PrivilegedExceptionAction;
+ 
+ import junit.framework.Assert;
+ 
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
+@@ -42,9 +44,9 @@ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretMan
+ import org.junit.After;
+ import org.junit.Before;
+ import org.junit.Test;
+-import org.mortbay.log.Log;
+ 
+ public class TestDelegationToken {
++  private static final Log LOG = LogFactory.getLog(TestDelegationToken.class);
+   private MiniDFSCluster cluster;
+   Configuration config;
+   
+@@ -99,7 +101,7 @@ public class TestDelegationToken {
+     identifier.readFields(new DataInputStream(
+              new ByteArrayInputStream(tokenId)));
+     Assert.assertTrue(null != dtSecretManager.retrievePassword(identifier));
+-    Log.info("Sleep to expire the token");
++    LOG.info("Sleep to expire the token");
+ 	  Thread.sleep(6000);
+ 	  //Token should be expired
+ 	  try {
+@@ -110,7 +112,7 @@ public class TestDelegationToken {
+ 	    //Success
+ 	  }
+ 	  dtSecretManager.renewToken(token, "JobTracker");
+-	  Log.info("Sleep beyond the max lifetime");
++	  LOG.info("Sleep beyond the max lifetime");
+ 	  Thread.sleep(5000);
+ 	  try {
+   	  dtSecretManager.renewToken(token, "JobTracker");
+@@ -152,7 +154,7 @@ public class TestDelegationToken {
+     byte[] tokenId = token.getIdentifier();
+     identifier.readFields(new DataInputStream(
+              new ByteArrayInputStream(tokenId)));
+-    Log.info("A valid token should have non-null password, and should be renewed successfully");
++    LOG.info("A valid token should have non-null password, and should be renewed successfully");
+     Assert.assertTrue(null != dtSecretManager.retrievePassword(identifier));
+     dtSecretManager.renewToken(token, "JobTracker");
+   }
+@@ -166,6 +168,8 @@ public class TestDelegationToken {
+         .createRemoteUser("JobTracker/foo.com@FOO.COM");
+     final UserGroupInformation shortUgi = UserGroupInformation
+         .createRemoteUser("JobTracker");
++    LOG.info("cluster at: " + dfs.getUri() + 
++             " token for: " + token.getService());
+     longUgi.doAs(new PrivilegedExceptionAction<Object>() {
+       public Object run() throws IOException {
+         final DistributedFileSystem dfs = (DistributedFileSystem) cluster
+@@ -174,6 +178,7 @@ public class TestDelegationToken {
+           //try renew with long name
+           dfs.renewDelegationToken(token);
+         } catch (IOException e) {
++          LOG.error("caught unexpected exception out of renew", e);
+           Assert.fail("Could not renew delegation token for user "+longUgi);
+         }
+         return null;
+-- 
+1.7.0.4
+

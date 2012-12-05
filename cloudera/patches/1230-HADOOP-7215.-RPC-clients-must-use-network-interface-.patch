@@ -1,0 +1,160 @@
+From bc3981b54ee201e0f60358de0c423e61a1913463 Mon Sep 17 00:00:00 2001
+From: Suresh Srinivas <suresh@apache.org>
+Date: Fri, 1 Apr 2011 20:06:22 +0000
+Subject: [PATCH 1230/1344] HADOOP-7215. RPC clients must use network interface corresponding to the host in the client's kerberos principal key. Contributed by Suresh Srinivas.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1087875 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit dd677faa44130de61c4fe0c67573583af0814fb8)
+
+Author: Suresh Srinivas
+Ref: CDH-4806
+---
+ src/core/org/apache/hadoop/ipc/Client.java         |   24 ++++++++++++
+ src/core/org/apache/hadoop/net/NetUtils.java       |   40 ++++++++++++++++++-
+ .../org/apache/hadoop/security/SecurityUtil.java   |    9 ++++
+ 3 files changed, 70 insertions(+), 3 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/ipc/Client.java b/src/core/org/apache/hadoop/ipc/Client.java
+index 607d10a..a6849bb 100644
+--- a/src/core/org/apache/hadoop/ipc/Client.java
++++ b/src/core/org/apache/hadoop/ipc/Client.java
+@@ -18,8 +18,11 @@
+ 
+ package org.apache.hadoop.ipc;
+ 
++import java.net.InetAddress;
++import java.net.NetworkInterface;
+ import java.net.Socket;
+ import java.net.InetSocketAddress;
++import java.net.SocketException;
+ import java.net.SocketTimeoutException;
+ import java.net.UnknownHostException;
+ import java.net.ConnectException;
+@@ -440,6 +443,27 @@ public class Client {
+         try {
+           this.socket = socketFactory.createSocket();
+           this.socket.setTcpNoDelay(tcpNoDelay);
++          
++          /*
++           * Bind the socket to the host specified in the principal name of the
++           * client, to ensure Server matching address of the client connection
++           * to host name in principal passed.
++           */
++          if (UserGroupInformation.isSecurityEnabled()) {
++            KerberosInfo krbInfo = 
++              remoteId.getProtocol().getAnnotation(KerberosInfo.class);
++            if (krbInfo != null && krbInfo.clientPrincipal() != null) {
++              String host = 
++                SecurityUtil.getHostFromPrincipal(remoteId.getTicket().getUserName());
++              
++              // If host name is a valid local address then bind socket to it
++              InetAddress localAddr = NetUtils.getLocalInetAddress(host);
++              if (localAddr != null) {
++                this.socket.bind(new InetSocketAddress(localAddr, 0));
++              }
++            }
++          }
++          
+           // connection time out is 20s
+           NetUtils.connect(this.socket, remoteId.getAddress(), 20000);
+           if (rpcTimeout > 0) {
+diff --git a/src/core/org/apache/hadoop/net/NetUtils.java b/src/core/org/apache/hadoop/net/NetUtils.java
+index 0ffbb8c..2ee91ed 100644
+--- a/src/core/org/apache/hadoop/net/NetUtils.java
++++ b/src/core/org/apache/hadoop/net/NetUtils.java
+@@ -476,6 +476,17 @@ public class NetUtils {
+    * Same as <code>getInputStream(socket, socket.getSoTimeout()).</code>
+    * <br><br>
+    * 
++   * From documentation for {@link #getInputStream(Socket, long)}:<br>
++   * Returns InputStream for the socket. If the socket has an associated
++   * SocketChannel then it returns a 
++   * {@link SocketInputStream} with the given timeout. If the socket does not
++   * have a channel, {@link Socket#getInputStream()} is returned. In the later
++   * case, the timeout argument is ignored and the timeout set with 
++   * {@link Socket#setSoTimeout(int)} applies for reads.<br><br>
++   *
++   * Any socket created using socket factories returned by {@link NetUtils},
++   * must use this interface instead of {@link Socket#getInputStream()}.
++   *     
+    * @see #getInputStream(Socket, long)
+    */
+   public static InputStream getInputStream(Socket socket) 
+@@ -490,7 +501,7 @@ public class NetUtils {
+    * {@link SocketInputStream} will be created which reads with the configured
+    * timeout.
+    * 
+-   * Any socket created using socket factories returned by {@link #NetUtils},
++   * Any socket created using socket factories returned by {@link NetUtils},
+    * must use this interface instead of {@link Socket#getInputStream()}.
+    *
+    * In general, this should be called only once on each socket: see the note
+@@ -525,7 +536,7 @@ public class NetUtils {
+    * case, the timeout argument is ignored and the write will wait until 
+    * data is available.<br><br>
+    * 
+-   * Any socket created using socket factories returned by {@link #NetUtils},
++   * Any socket created using socket factories returned by {@link NetUtils},
+    * must use this interface instead of {@link Socket#getOutputStream()}.
+    * 
+    * @see #getOutputStream(Socket, long)
+@@ -547,7 +558,7 @@ public class NetUtils {
+    * case, the timeout argument is ignored and the write will wait until 
+    * data is available.<br><br>
+    * 
+-   * Any socket created using socket factories returned by {@link #NetUtils},
++   * Any socket created using socket factories returned by {@link NetUtils},
+    * must use this interface instead of {@link Socket#getOutputStream()}.
+    * 
+    * @see Socket#getChannel()
+@@ -676,6 +687,29 @@ public class NetUtils {
+   }
+ 
+   /**
++   * Checks if {@code host} is a local host name and return {@link InetAddress}
++   * corresponding to that address.
++   * 
++   * @param host the specified host
++   * @return a valid local {@link InetAddress} or null
++   * @throws SocketException if an I/O error occurs
++   */
++  public static InetAddress getLocalInetAddress(String host)
++      throws SocketException {
++    if (host == null) {
++      return null;
++    }
++    InetAddress addr = null;
++    try {
++      addr = InetAddress.getByName(host);
++      if (NetworkInterface.getByInetAddress(addr) == null) {
++        addr = null; // Not a local address
++      }
++    } catch (UnknownHostException ignore) { }
++    return addr;
++  }
++
++  /**
+    * @return true if the given string is a subnet specified
+    *     using CIDR notation, false otherwise
+    */
+diff --git a/src/core/org/apache/hadoop/security/SecurityUtil.java b/src/core/org/apache/hadoop/security/SecurityUtil.java
+index d6167de..19a2740 100644
+--- a/src/core/org/apache/hadoop/security/SecurityUtil.java
++++ b/src/core/org/apache/hadoop/security/SecurityUtil.java
+@@ -339,4 +339,13 @@ public class SecurityUtil {
+       throw new RuntimeException(ex);
+     }
+   }
++  
++  /**
++   * Get the host name from the principal name of format <service>/host@realm.
++   * @param principalName principal name of format as described above
++   * @return host name if the the string conforms to the above format, else null
++   */
++  public static String getHostFromPrincipal(String principalName) {
++    return new KerberosName(principalName).getHostName();
++  }
+ }
+-- 
+1.7.0.4
+

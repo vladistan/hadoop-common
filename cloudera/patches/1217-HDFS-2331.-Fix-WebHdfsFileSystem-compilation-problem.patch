@@ -1,0 +1,30 @@
+From 8bd1209e9e8fe0e18928058f5ef7cd65f006fdf4 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Thu, 15 Sep 2011 08:07:25 +0000
+Subject: [PATCH 1217/1344] HDFS-2331. Fix WebHdfsFileSystem compilation problems for a bug in JDK version < 1.6.0_26.  Contributed by Abhijit Suresh Shingate
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1170997 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit c14ed9e0d3e7fb16e1d44fe8f1233524bfa6c946)
+
+Author: Abhijit Suresh Shingate
+Ref: CDH-4806
+---
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 78a7568..c5c14e3 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -201,7 +201,7 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+     final HttpURLConnection conn = httpConnect(op, fspath, parameters);
+     validateResponse(op, conn);
+     try {
+-      return jsonParse(conn.getInputStream());
++      return WebHdfsFileSystem.<T>jsonParse(conn.getInputStream());
+     } finally {
+       conn.disconnect();
+     }
+-- 
+1.7.0.4
+

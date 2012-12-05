@@ -1,0 +1,32 @@
+From b505a91ed5061468a468e14a022f8e27d0c68059 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Fri, 18 May 2012 14:52:49 -0700
+Subject: [PATCH 1183/1344] HADOOP-8329. Build fails with Java 7.
+
+Reason: Bug
+Author: Eli Collins
+Ref: CDH-5926
+---
+ .../org/apache/hadoop/mapred/gridmix/Gridmix.java  |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/Gridmix.java b/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/Gridmix.java
+index a7b9d32..32e182b 100644
+--- a/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/Gridmix.java
++++ b/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/Gridmix.java
+@@ -393,10 +393,10 @@ public class Gridmix extends Configured implements Tool {
+     }
+   }
+ 
+-  private <T> String getEnumValues(Enum<? extends T>[] e) {
++  private String getEnumValues(Enum<?>[] e) {
+     StringBuilder sb = new StringBuilder();
+     String sep = "";
+-    for (Enum<? extends T> v : e) {
++    for (Enum<?> v : e) {
+       sb.append(sep);
+       sb.append(v.name());
+       sep = "|";
+-- 
+1.7.0.4
+

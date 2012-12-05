@@ -1,0 +1,1046 @@
+From 4689e1e15e62780d489d5261e7a857ac1ce5e7e9 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Wed, 5 Oct 2011 02:03:20 +0000
+Subject: [PATCH 1233/1344] HDFS-2385. Support renew and cancel delegation tokens in webhdfs.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1179036 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 0b27f092cc787d9359728f1cc3d1760e3c976b63)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ build.xml                                          |    1 +
+ src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java |    8 +-
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |  191 +++-----------------
+ .../token/delegation/DelegationTokenRenewer.java   |  151 +++++++++++++++
+ .../delegation/DelegationTokenSecretManager.java   |    1 -
+ .../token/delegation/DelegationTokenSelector.java  |   33 ++++
+ .../web/resources/NamenodeWebHdfsMethods.java      |   22 ++-
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |  198 +++++++++++++++++++-
+ .../hadoop/hdfs/web/resources/PutOpParam.java      |    3 +
+ .../org/apache/hadoop/hdfs/TestHftpFileSystem.java |   33 ++--
+ 10 files changed, 443 insertions(+), 198 deletions(-)
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java
+
+diff --git a/build.xml b/build.xml
+index b608b43..7e0ebef 100644
+--- a/build.xml
++++ b/build.xml
+@@ -749,6 +749,7 @@
+         <provider classname="org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier$Renewer"/>
+         <provider classname="org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier$Renewer"/>
+         <provider classname="org.apache.hadoop.hdfs.HftpFileSystem$TokenManager"/>
++        <provider classname="org.apache.hadoop.hdfs.web.WebHdfsFileSystem$DtRenewer"/>
+       </service>
+       <fileset dir="${conf.dir}" includes="${jar.properties.list}" />
+       <fileset file="${jar.extra.properties.list}" />
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+index e67e71e..395171d 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+@@ -64,8 +64,10 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
+   public static final String  DFS_DATANODE_USE_DN_HOSTNAME = "dfs.datanode.use.datanode.hostname";
+   public static final boolean DFS_DATANODE_USE_DN_HOSTNAME_DEFAULT = false;
+   
++  public static final String  DFS_NAMENODE_HTTP_PORT_KEY = "dfs.http.port";
++  public static final int     DFS_NAMENODE_HTTP_PORT_DEFAULT = 50070;
+   public static final String  DFS_NAMENODE_HTTP_ADDRESS_KEY = "dfs.namenode.http-address";
+-  public static final String  DFS_NAMENODE_HTTP_ADDRESS_DEFAULT = "0.0.0.0:50070";
++  public static final String  DFS_NAMENODE_HTTP_ADDRESS_DEFAULT = "0.0.0.0:" + DFS_NAMENODE_HTTP_PORT_DEFAULT;
+   public static final String  DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY = "dfs.namenode.servicerpc-address";
+   public static final String  DFS_NAMENODE_MAX_OBJECTS_KEY = "dfs.namenode.max.objects";
+   public static final long    DFS_NAMENODE_MAX_OBJECTS_DEFAULT = 0;
+@@ -123,8 +125,10 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
+ 
+   //Following keys have no defaults
+   public static final String  DFS_DATANODE_DATA_DIR_KEY = "dfs.datanode.data.dir";
++  public static final String  DFS_NAMENODE_HTTPS_PORT_KEY = "dfs.https.port";
++  public static final int     DFS_NAMENODE_HTTPS_PORT_DEFAULT = 50470;
+   public static final String  DFS_NAMENODE_HTTPS_ADDRESS_KEY = "dfs.namenode.https-address";
+-  public static final String  DFS_NAMENODE_HTTPS_ADDRESS_DEFAULT = "0.0.0.0:50470";
++  public static final String  DFS_NAMENODE_HTTPS_ADDRESS_DEFAULT = "0.0.0.0:" + DFS_NAMENODE_HTTPS_PORT_DEFAULT;
+   public static final String  DFS_NAMENODE_NAME_DIR_KEY = "dfs.namenode.name.dir";
+   public static final String  DFS_NAMENODE_EDITS_DIR_KEY = "dfs.namenode.edits.dir";
+   public static final String  DFS_CLIENT_READ_PREFETCH_SIZE_KEY = "dfs.client.read.prefetch.size"; 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index 6f73272..d5a1535 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -21,7 +21,6 @@ package org.apache.hadoop.hdfs;
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
+ import java.io.InputStream;
+-import java.lang.ref.WeakReference;
+ import java.net.HttpURLConnection;
+ import java.net.InetSocketAddress;
+ import java.net.URI;
+@@ -32,9 +31,6 @@ import java.text.ParseException;
+ import java.text.SimpleDateFormat;
+ import java.util.ArrayList;
+ import java.util.TimeZone;
+-import java.util.concurrent.DelayQueue;
+-import java.util.concurrent.Delayed;
+-import java.util.concurrent.TimeUnit;
+ 
+ //import org.apache.hadoop.classification.InterfaceAudience;
+ import org.apache.hadoop.conf.Configuration;
+@@ -49,9 +45,9 @@ import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenRenewer;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSelector;
+ import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+-import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.server.namenode.StreamFile;
+ import org.apache.hadoop.hdfs.tools.DelegationTokenFetcher;
+ import org.apache.hadoop.io.Text;
+@@ -79,13 +75,16 @@ import org.xml.sax.helpers.XMLReaderFactory;
+  * @see org.apache.hadoop.hdfs.server.namenode.ListPathsServlet
+  * @see org.apache.hadoop.hdfs.server.namenode.FileDataServlet
+  */
+-public class HftpFileSystem extends FileSystem {
++public class HftpFileSystem extends FileSystem
++    implements DelegationTokenRenewer.Renewable {
++  private static final DelegationTokenRenewer<HftpFileSystem> dtRenewer
++      = new DelegationTokenRenewer<HftpFileSystem>(HftpFileSystem.class);
++
+   static {
+     HttpURLConnection.setFollowRedirects(true);
++    dtRenewer.start();
+   }
+ 
+-  public static final int DEFAULT_PORT = 50070;
+-  public static final int DEFAULT_SECURE_PORT = 50470;
+   public static final Text TOKEN_KIND = new Text("HFTP delegation");
+   
+   protected UserGroupInformation ugi; 
+@@ -96,16 +95,12 @@ public class HftpFileSystem extends FileSystem {
+ 
+   public static final String HFTP_TIMEZONE = "UTC";
+   public static final String HFTP_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssZ";
++
+   private Token<?> delegationToken;
+   private Token<?> renewToken;
+-  public static final String HFTP_SERVICE_NAME_KEY = "hdfs.service.host_";
+-
+   private static final HftpDelegationTokenSelector hftpTokenSelector =
+       new HftpDelegationTokenSelector();
+ 
+-  private static final DelegationTokenSelector hdfsTokenSelector =
+-      new DelegationTokenSelector();
+-
+   public static final SimpleDateFormat getDateFormat() {
+     final SimpleDateFormat df = new SimpleDateFormat(HFTP_DATE_FORMAT);
+     df.setTimeZone(TimeZone.getTimeZone(HFTP_TIMEZONE));
+@@ -121,11 +116,13 @@ public class HftpFileSystem extends FileSystem {
+ 
+   @Override
+   protected int getDefaultPort() {
+-    return getConf().getInt("dfs.http.port", DEFAULT_PORT);
++    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_KEY,
++        DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT);
+   }
+ 
+   protected int getDefaultSecurePort() {
+-    return getConf().getInt("dfs.https.port", DEFAULT_SECURE_PORT);
++    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_KEY,
++        DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT);
+   }
+ 
+   protected InetSocketAddress getNamenodeAddr(URI uri) {
+@@ -178,7 +175,7 @@ public class HftpFileSystem extends FileSystem {
+     if (token != null) {
+       setDelegationToken(token);
+       if (createdToken) {
+-        renewer.addTokenToRenew(this);
++        dtRenewer.addRenewAction(this);
+         LOG.debug("Created new DT for " + token.getService());
+       } else {
+         LOG.debug("Found existing DT for " + token.getService());        
+@@ -192,26 +189,8 @@ public class HftpFileSystem extends FileSystem {
+   }
+   
+   protected Token<DelegationTokenIdentifier> selectHdfsDelegationToken() {
+-    // this guesses the remote cluster's rpc service port.
+-    // the current token design assumes it's the same as the local cluster's
+-    // rpc port unless a config key is set.  there should be a way to automatic
+-    // and correctly determine the value
+-    String key = HftpFileSystem.HFTP_SERVICE_NAME_KEY+
+-        SecurityUtil.buildTokenService(nnSecureAddr);
+-    String nnServiceName = getConf().get(key);
+-    LOG.debug("Trying to find DT for " + getUri() + " using key=" + key + 
+-        "; conf=" + nnServiceName);
+-    
+-    int nnRpcPort = NameNode.DEFAULT_PORT;
+-    if (nnServiceName != null) {
+-      nnRpcPort = NetUtils.createSocketAddr(nnServiceName, nnRpcPort).getPort(); 
+-    }
+-    
+-    InetSocketAddress addr = 
+-        NetUtils.makeSocketAddr(nnAddr.getHostName(), nnRpcPort);
+-    Text serviceName = SecurityUtil.buildTokenService(addr);
+-    
+-    return hdfsTokenSelector.selectToken(serviceName, ugi.getTokens());
++    return  DelegationTokenSelector.selectHdfsDelegationToken(
++        nnAddr, ugi, getConf());
+   }
+   
+   private static URI createUri(String scheme, InetSocketAddress addr) {
+@@ -224,7 +203,13 @@ public class HftpFileSystem extends FileSystem {
+     return uri;
+   }
+ 
+-  protected <T extends TokenIdentifier> void setDelegationToken(Token<T> token) {
++  @Override
++  public Token<?> getRenewToken() {
++    return renewToken;
++  }
++
++  @Override
++  public <T extends TokenIdentifier> void setDelegationToken(Token<T> token) {
+     renewToken = token;
+     // emulate the 203 usage of the tokens
+     // by setting the kind and service as if they were hdfs tokens
+@@ -677,138 +662,6 @@ public class HftpFileSystem extends FileSystem {
+     return cs != null? cs: super.getContentSummary(f);
+   }
+   
+-  /**
+-   * An action that will renew and replace the hftp file system's delegation 
+-   * tokens automatically.
+-   */
+-  private static class RenewAction implements Delayed {
+-    // when should the renew happen
+-    private long timestamp;
+-    // a weak reference to the file system so that it can be garbage collected
+-    private final WeakReference<HftpFileSystem> weakFs;
+-
+-    RenewAction(long timestamp, HftpFileSystem fs) {
+-      this.timestamp = timestamp;
+-      this.weakFs = new WeakReference<HftpFileSystem>(fs);
+-    }
+- 
+-    /**
+-     * Get the delay until this event should happen.
+-     */
+-    @Override
+-    public long getDelay(TimeUnit unit) {
+-      long millisLeft = timestamp - System.currentTimeMillis();
+-      return unit.convert(millisLeft, TimeUnit.MILLISECONDS);
+-    }
+-
+-    /**
+-     * Compare two events in the same queue.
+-     */
+-    @Override
+-    public int compareTo(Delayed o) {
+-      if (o.getClass() != RenewAction.class) {
+-        throw new IllegalArgumentException
+-                  ("Illegal comparision to non-RenewAction");
+-      }
+-      RenewAction other = (RenewAction) o;
+-      return timestamp < other.timestamp ? -1 :
+-        (timestamp == other.timestamp ? 0 : 1);
+-    }
+-    
+-    /**
+-     * Set a new time for the renewal. Can only be called when the action
+-     * is not in the queue.
+-     * @param newTime the new time
+-     */
+-    public void setNewTime(long newTime) {
+-      timestamp = newTime;
+-    }
+-
+-    /**
+-     * Renew or replace the delegation token for this file system.
+-     * @return
+-     * @throws IOException
+-     */
+-    public boolean renew() throws IOException, InterruptedException {
+-      final HftpFileSystem fs = weakFs.get();
+-      if (fs != null) {
+-        synchronized (fs) {
+-          try {
+-            fs.renewToken.renew(fs.getConf());
+-          } catch (IOException ie) {
+-            try {
+-              fs.setDelegationToken(fs.getDelegationToken(null));
+-            } catch (IOException ie2) {
+-              throw new IOException("Can't renew or get new delegation token ", 
+-                                    ie);
+-            }
+-          }
+-        }
+-      }
+-      return fs != null;
+-    }
+-    
+-    public String toString() {
+-      StringBuilder result = new StringBuilder();
+-      HftpFileSystem fs = weakFs.get();
+-      if (fs == null) {
+-        return "evaporated token renew";
+-      }
+-      synchronized (fs) {
+-        result.append(fs.delegationToken);
+-      }
+-      result.append(" renew in ");
+-      result.append(getDelay(TimeUnit.SECONDS));
+-      result.append(" secs");
+-      return result.toString();
+-    }
+-  }
+-
+-  /**
+-   * A daemon thread that waits for the next file system to renew.
+-   */
+-  private static class RenewerThread extends Thread {
+-    private DelayQueue<RenewAction> queue = new DelayQueue<RenewAction>();
+-    // wait for 95% of a day between renewals
+-    private final int RENEW_CYCLE = (int) (0.95 * 24 * 60 * 60 * 1000);
+-
+-    public RenewerThread() {
+-      super("HFTP Delegation Token Renewer");
+-      setDaemon(true);
+-    }
+-
+-    public void addTokenToRenew(HftpFileSystem fs) {
+-      queue.add(new RenewAction(RENEW_CYCLE + System.currentTimeMillis(), fs));
+-    }
+-
+-    public void run() {
+-      RenewAction action = null;
+-        while (true) {
+-          try {
+-            action = queue.take();
+-            if (action.renew()) {
+-              action.setNewTime(RENEW_CYCLE + System.currentTimeMillis());
+-              queue.add(action);
+-            }
+-            action = null;
+-          } catch (InterruptedException ie) {
+-            return;
+-          } catch (Exception ie) {
+-            if (action != null) {
+-              LOG.warn("Failure to renew token " + action, ie);
+-            } else {
+-              LOG.warn("Failure in renew queue", ie);
+-            }
+-          }
+-        }
+-    }
+-  }
+-
+-  private static RenewerThread renewer = new RenewerThread();
+-  static {
+-    renewer.start();
+-  }
+-  
+   //@InterfaceAudience.Private
+   public static class TokenManager extends TokenRenewer {
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java
+new file mode 100644
+index 0000000..17c96d0
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java
+@@ -0,0 +1,151 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.hdfs.security.token.delegation;
++
++import java.io.IOException;
++import java.lang.ref.WeakReference;
++import java.util.concurrent.DelayQueue;
++import java.util.concurrent.Delayed;
++import java.util.concurrent.TimeUnit;
++
++import org.apache.hadoop.classification.InterfaceAudience;
++import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.security.token.Token;
++import org.apache.hadoop.security.token.TokenIdentifier;
++
++/**
++ * A daemon thread that waits for the next file system to renew.
++ */
++@InterfaceAudience.Private
++public class DelegationTokenRenewer<T extends FileSystem & DelegationTokenRenewer.Renewable>
++    extends Thread {
++  /** The renewable interface used by the renewer. */
++  public interface Renewable {
++    /** @return the renew token. */
++    public Token<?> getRenewToken();
++
++    /** Set delegation token. */
++    public <T extends TokenIdentifier> void setDelegationToken(Token<T> token);
++  }
++
++  /**
++   * An action that will renew and replace the file system's delegation 
++   * tokens automatically.
++   */
++  private static class RenewAction<T extends FileSystem & Renewable>
++      implements Delayed {
++    /** when should the renew happen */
++    private long renewalTime;
++    /** a weak reference to the file system so that it can be garbage collected */
++    private final WeakReference<T> weakFs;
++
++    private RenewAction(final T fs) {
++      this.weakFs = new WeakReference<T>(fs);
++      updateRenewalTime();
++    }
++ 
++    /** Get the delay until this event should happen. */
++    @Override
++    public long getDelay(final TimeUnit unit) {
++      final long millisLeft = renewalTime - System.currentTimeMillis();
++      return unit.convert(millisLeft, TimeUnit.MILLISECONDS);
++    }
++
++    @Override
++    public int compareTo(final Delayed delayed) {
++      final RenewAction<?> that = (RenewAction<?>)delayed;
++      return this.renewalTime < that.renewalTime? -1
++          : this.renewalTime == that.renewalTime? 0: 1;
++    }
++    
++    /**
++     * Set a new time for the renewal.
++     * It can only be called when the action is not in the queue.
++     * @param newTime the new time
++     */
++    private void updateRenewalTime() {
++      renewalTime = RENEW_CYCLE + System.currentTimeMillis();
++    }
++
++    /**
++     * Renew or replace the delegation token for this file system.
++     * @return
++     * @throws IOException
++     */
++    private boolean renew() throws IOException, InterruptedException {
++      final T fs = weakFs.get();
++      final boolean b = fs != null;
++      if (b) {
++        synchronized(fs) {
++          try {
++            fs.getRenewToken().renew(fs.getConf());
++          } catch (IOException ie) {
++            try {
++              fs.setDelegationToken(fs.getDelegationToken(null));
++            } catch (IOException ie2) {
++              throw new IOException("Can't renew or get new delegation token ", ie);
++            }
++          }
++        }
++      }
++      return b;
++    }
++
++    @Override
++    public String toString() {
++      Renewable fs = weakFs.get();
++      return fs == null? "evaporated token renew"
++          : "The token will be renewed in " + getDelay(TimeUnit.SECONDS)
++            + " secs, renewToken=" + fs.getRenewToken();
++    }
++  }
++
++  /** Wait for 95% of a day between renewals */
++  private static final int RENEW_CYCLE = 24 * 60 * 60 * 950;
++
++  private DelayQueue<RenewAction<T>> queue = new DelayQueue<RenewAction<T>>();
++
++  public DelegationTokenRenewer(final Class<?> clazz) {
++    super(clazz.getSimpleName() + "-" + DelegationTokenRenewer.class.getSimpleName());
++    setDaemon(true);
++  }
++
++  /** Add a renew action to the queue. */
++  public void addRenewAction(final T fs) {
++    queue.add(new RenewAction<T>(fs));
++  }
++
++  @Override
++  public void run() {
++    for(;;) {
++      RenewAction<T> action = null;
++      try {
++        action = queue.take();
++        if (action.renew()) {
++          action.updateRenewalTime();
++          queue.add(action);
++        }
++      } catch (InterruptedException ie) {
++        return;
++      } catch (Exception ie) {
++        T.LOG.warn("Failed to renew token, action=" + action, ie);
++      }
++    }
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenSecretManager.java b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenSecretManager.java
+index bff98d8..e40daeb 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenSecretManager.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenSecretManager.java
+@@ -22,7 +22,6 @@ package org.apache.hadoop.hdfs.security.token.delegation;
+ import java.io.DataInputStream;
+ import java.io.DataOutputStream;
+ import java.io.IOException;
+-import java.net.InetSocketAddress;
+ import java.util.Iterator;
+ 
+ import org.apache.commons.logging.Log;
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenSelector.java b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenSelector.java
+index 028cdcd..9973ab3 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenSelector.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenSelector.java
+@@ -18,6 +18,15 @@
+ package org.apache.hadoop.hdfs.security.token.delegation;
+ 
+ //import org.apache.hadoop.classification.InterfaceAudience;
++import java.net.InetSocketAddress;
++
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hdfs.server.namenode.NameNode;
++import org.apache.hadoop.io.Text;
++import org.apache.hadoop.net.NetUtils;
++import org.apache.hadoop.security.SecurityUtil;
++import org.apache.hadoop.security.UserGroupInformation;
++import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
+ 
+ /**
+@@ -26,6 +35,30 @@ import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelect
+ //@InterfaceAudience.Private
+ public class DelegationTokenSelector
+     extends AbstractDelegationTokenSelector<DelegationTokenIdentifier>{
++  private static final String SERVICE_NAME_KEY = "hdfs.service.host_";
++
++  private static final DelegationTokenSelector INSTANCE = new DelegationTokenSelector();
++
++  /** Select the delegation token for hdfs from the ugi. */
++  public static Token<DelegationTokenIdentifier> selectHdfsDelegationToken(
++      final InetSocketAddress nnAddr, final UserGroupInformation ugi,
++      final Configuration conf) {
++    // this guesses the remote cluster's rpc service port.
++    // the current token design assumes it's the same as the local cluster's
++    // rpc port unless a config key is set.  there should be a way to automatic
++    // and correctly determine the value
++    final String key = SERVICE_NAME_KEY + SecurityUtil.buildTokenService(nnAddr);
++    final String nnServiceName = conf.get(key);
++    
++    int nnRpcPort = NameNode.DEFAULT_PORT;
++    if (nnServiceName != null) {
++      nnRpcPort = NetUtils.createSocketAddr(nnServiceName, nnRpcPort).getPort(); 
++    }
++    
++    final Text serviceName = SecurityUtil.buildTokenService(
++        NetUtils.makeSocketAddr(nnAddr.getHostName(), nnRpcPort));
++    return INSTANCE.selectToken(serviceName, ugi.getTokens());
++  }
+ 
+   public DelegationTokenSelector() {
+     super(DelegationTokenIdentifier.HDFS_DELEGATION_KIND);
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index cfdd46d..6730956 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -50,6 +50,7 @@ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager;
+ import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+@@ -79,7 +80,6 @@ import org.apache.hadoop.hdfs.web.resources.RenewerParam;
+ import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
+ import org.apache.hadoop.hdfs.web.resources.UriFsPathParam;
+ import org.apache.hadoop.hdfs.web.resources.UserParam;
+-import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.security.Credentials;
+ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -137,9 +137,8 @@ public class NamenodeWebHdfsMethods {
+     final Credentials c = DelegationTokenSecretManager.createCredentials(
+         namenode, ugi, request.getUserPrincipal().getName());
+     final Token<? extends TokenIdentifier> t = c.getAllTokens().iterator().next();
+-    t.setService(new Text(SecurityUtil.buildDTServiceName(
+-        NameNode.getUri(namenode.getNameNodeAddress()),
+-        NameNode.DEFAULT_PORT)));
++    t.setKind(WebHdfsFileSystem.TOKEN_KIND);
++    SecurityUtil.setTokenService(t, namenode.getNameNodeAddress());
+     return t;
+   }
+ 
+@@ -267,6 +266,21 @@ public class NamenodeWebHdfsMethods {
+       namenode.setTimes(fullpath, modificationTime.getValue(), accessTime.getValue());
+       return Response.ok().type(MediaType.APPLICATION_JSON).build();
+     }
++    case RENEWDELEGATIONTOKEN:
++    {
++      final Token<DelegationTokenIdentifier> token = new Token<DelegationTokenIdentifier>();
++      token.decodeFromUrlString(delegation.getValue());
++      final long expiryTime = namenode.renewDelegationToken(token);
++      final String js = JsonUtil.toJsonString(PutOpParam.Op.RENEWDELEGATIONTOKEN, expiryTime);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++    }
++    case CANCELDELEGATIONTOKEN:
++    {
++      final Token<DelegationTokenIdentifier> token = new Token<DelegationTokenIdentifier>();
++      token.decodeFromUrlString(delegation.getValue());
++      namenode.cancelDelegationToken(token);
++      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++    }
+     default:
+       throw new UnsupportedOperationException(op + " is not supported");
+     }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 7fdd639..0d909e6 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -24,8 +24,11 @@ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.InputStreamReader;
+ import java.net.HttpURLConnection;
++import java.net.InetSocketAddress;
+ import java.net.URI;
++import java.net.URISyntaxException;
+ import java.net.URL;
++import java.security.PrivilegedExceptionAction;
+ import java.util.Map;
+ 
+ import org.apache.hadoop.conf.Configuration;
+@@ -34,16 +37,20 @@ import org.apache.hadoop.fs.ContentSummary;
+ import org.apache.hadoop.fs.FSDataInputStream;
+ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.FileStatus;
++import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.ByteRangeInputStream;
++import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.DFSUtil;
+-import org.apache.hadoop.hdfs.HftpFileSystem;
+ import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+ import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenRenewer;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSelector;
++import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+ import org.apache.hadoop.hdfs.server.namenode.SafeModeException;
+ import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
+ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+@@ -66,28 +73,46 @@ import org.apache.hadoop.hdfs.web.resources.RecursiveParam;
+ import org.apache.hadoop.hdfs.web.resources.RenewerParam;
+ import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
+ import org.apache.hadoop.hdfs.web.resources.UserParam;
++import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.ipc.RemoteException;
++import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.AccessControlException;
+ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.authentication.client.AuthenticatedURL;
+ import org.apache.hadoop.security.authentication.client.AuthenticationException;
+ import org.apache.hadoop.security.token.Token;
++import org.apache.hadoop.security.token.TokenIdentifier;
++import org.apache.hadoop.security.token.TokenRenewer;
++import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
+ import org.apache.hadoop.util.Progressable;
+ import org.mortbay.util.ajax.JSON;
+ 
+ /** A FileSystem for HDFS over the web. */
+-public class WebHdfsFileSystem extends HftpFileSystem {
++public class WebHdfsFileSystem extends FileSystem
++    implements DelegationTokenRenewer.Renewable {
+   /** File System URI: {SCHEME}://namenode:port/path/to/file */
+   public static final String SCHEME = "webhdfs";
+   /** Http URI: http://namenode:port/{PATH_PREFIX}/path/to/file */
+   public static final String PATH_PREFIX = SCHEME;
+ 
++  /** SPNEGO authenticator */
+   private static final KerberosUgiAuthenticator AUTH = new KerberosUgiAuthenticator();
++  /** Delegation token kind */
++  public static final Text TOKEN_KIND = new Text("WEBHDFS delegation");
++
++  private static final DelegationTokenRenewer<WebHdfsFileSystem> dtRenewer
++      = new DelegationTokenRenewer<WebHdfsFileSystem>(WebHdfsFileSystem.class);
++  static {
++    dtRenewer.start();
++  }
+ 
+   private final UserGroupInformation ugi;
++  private InetSocketAddress nnAddr;
++  private Token<?> delegationToken;
++  private Token<?> renewToken;
+   private final AuthenticatedURL.Token authToken = new AuthenticatedURL.Token();
+-  protected Path workingDir;
++  private Path workingDir;
+ 
+   {
+     try {
+@@ -103,7 +128,57 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+     super.initialize(uri, conf);
+     setConf(conf);
+ 
++    this.nnAddr = NetUtils.createSocketAddr(uri.getAuthority(), getDefaultPort());
+     this.workingDir = getHomeDirectory();
++
++    if (UserGroupInformation.isSecurityEnabled()) {
++      initDelegationToken();
++    }
++  }
++
++  protected void initDelegationToken() throws IOException {
++    // look for webhdfs token, then try hdfs
++    final Text serviceName = SecurityUtil.buildTokenService(nnAddr);
++    Token<?> token = webhdfspTokenSelector.selectToken(
++        serviceName, ugi.getTokens());      
++    if (token == null) {
++      token = DelegationTokenSelector.selectHdfsDelegationToken(
++          nnAddr, ugi, getConf());
++    }
++
++    //since we don't already have a token, go get one
++    boolean createdToken = false;
++    if (token == null) {
++      token = getDelegationToken(null);
++      createdToken = (token != null);
++    }
++
++    // security might be disabled
++    if (token != null) {
++      setDelegationToken(token);
++      if (createdToken) {
++        dtRenewer.addRenewAction(this);
++        LOG.debug("Created new DT for " + token.getService());
++      } else {
++        LOG.debug("Found existing DT for " + token.getService());        
++      }
++    }
++  }
++
++  @Override
++  protected int getDefaultPort() {
++    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_KEY,
++        DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT);
++  }
++
++  @Override
++  public URI getUri() {
++    try {
++      return new URI(SCHEME, null, nnAddr.getHostName(), nnAddr.getPort(),
++          null, null, null);
++    } catch (URISyntaxException e) {
++      return null;
++    }
+   }
+ 
+   @Override
+@@ -168,7 +243,7 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+    * @return namenode URL referring to the given path
+    * @throws IOException on error constructing the URL
+    */
+-  protected URL getNamenodeURL(String path, String query) throws IOException {
++  private URL getNamenodeURL(String path, String query) throws IOException {
+     final URL url = new URL("http", nnAddr.getHostName(),
+           nnAddr.getPort(), path + '?' + query);
+     if (LOG.isTraceEnabled()) {
+@@ -177,6 +252,18 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+     return url;
+   }
+ 
++  private String addDt2Query(String query) throws IOException {
++    if (UserGroupInformation.isSecurityEnabled()) {
++      synchronized (this) {
++        if (delegationToken != null) {
++          final String encoded = delegationToken.encodeToUrlString();
++          return query + JspHelper.getDelegationTokenUrlParam(encoded);
++        } // else we are talking to an insecure cluster
++      }
++    }
++    return query;
++  }
++
+   URL toUrl(final HttpOpParam.Op op, final Path fspath,
+       final Param<?,?>... parameters) throws IOException {
+     //initialize URI path and query
+@@ -185,7 +272,7 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+     final String query = op.toQueryString()
+         + '&' + new UserParam(ugi)
+         + Param.toSortedString("&", parameters);
+-    final URL url = getNamenodeURL(path, updateQuery(query));
++    final URL url = getNamenodeURL(path, addDt2Query(query));
+     if (LOG.isTraceEnabled()) {
+       LOG.trace("url=" + url);
+     }
+@@ -369,6 +456,11 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+   }
+ 
+   @Override
++  public boolean delete(final Path f) throws IOException {
++    return delete(f, true);
++  }
++
++  @Override
+   public boolean delete(Path f, boolean recursive) throws IOException {
+     final HttpOpParam.Op op = DeleteOpParam.Op.DELETE;
+     final Map<String, Object> json = run(op, f, new RecursiveParam(recursive));
+@@ -412,6 +504,41 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+   }
+ 
+   @Override
++  public Token<?> getRenewToken() {
++    return renewToken;
++  }
++
++  @Override
++  public synchronized <T extends TokenIdentifier> void setDelegationToken(
++      final Token<T> token) {
++    renewToken = token;
++    // emulate the 203 usage of the tokens
++    // by setting the kind and service as if they were hdfs tokens
++    delegationToken = new Token<T>(token);
++    // NOTE: the remote nn must be configured to use hdfs
++    delegationToken.setKind(DelegationTokenIdentifier.HDFS_DELEGATION_KIND);
++    // no need to change service because we aren't exactly sure what it
++    // should be.  we can guess, but it might be wrong if the local conf
++    // value is incorrect.  the service is a client side field, so the remote
++    // end does not care about the value
++  }
++
++  private synchronized long renewDelegationToken(final Token<?> token
++      ) throws IOException {
++    delegationToken = token;
++    final HttpOpParam.Op op = PutOpParam.Op.RENEWDELEGATIONTOKEN;
++    final Map<String, Object> m = run(op, null);
++    return (Long)m.get(op.toString());
++  }
++
++  private synchronized void cancelDelegationToken(final Token<?> token
++      ) throws IOException {
++    delegationToken = token;
++    final HttpOpParam.Op op = PutOpParam.Op.CANCELDELEGATIONTOKEN;
++    run(op, null);
++  }
++
++  @Override
+   public BlockLocation[] getFileBlockLocations(final FileStatus status,
+       final long offset, final long length) throws IOException {
+     if (status == null) {
+@@ -444,4 +571,65 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+     final Map<String, Object> m = run(op, p);
+     return JsonUtil.toMD5MD5CRC32FileChecksum(m);
+   }
++
++
++  private static final DtSelector webhdfspTokenSelector = new DtSelector();
++
++  private static class DtSelector
++      extends AbstractDelegationTokenSelector<DelegationTokenIdentifier> {
++    private DtSelector() {
++      super(TOKEN_KIND);
++    }
++  }
++
++  /** Delegation token renewer. */
++  public static class DtRenewer extends TokenRenewer {
++    @Override
++    public boolean handleKind(Text kind) {
++      return kind.equals(TOKEN_KIND);
++    }
++  
++    @Override
++    public boolean isManaged(Token<?> token) throws IOException {
++      return true;
++    }
++  
++    @Override
++    public long renew(final Token<?> token, final Configuration conf
++        ) throws IOException, InterruptedException {
++      final UserGroupInformation ugi = UserGroupInformation.getLoginUser();
++      // update the kerberos credentials, if they are coming from a keytab
++      ugi.checkTGTAndReloginFromKeytab();
++  
++      final String uri = WebHdfsFileSystem.SCHEME  + "://"
++          + conf.get("dfs.http.address");
++      final WebHdfsFileSystem webhdfs = ugi.doAs(new PrivilegedExceptionAction<WebHdfsFileSystem>() {
++        @Override
++        public WebHdfsFileSystem run() throws Exception {
++          return (WebHdfsFileSystem)FileSystem.get(new URI(uri), conf);
++        }
++      });
++      
++      return webhdfs.renewDelegationToken(token);
++    }
++  
++    @Override
++    public void cancel(final Token<?> token, final Configuration conf
++        ) throws IOException, InterruptedException {
++      final UserGroupInformation ugi = UserGroupInformation.getLoginUser();
++      // update the kerberos credentials, if they are coming from a keytab
++      ugi.checkTGTAndReloginFromKeytab();
++
++      final String uri = WebHdfsFileSystem.SCHEME  + "://"
++          + conf.get("dfs.http.address");
++      final WebHdfsFileSystem webhdfs = ugi.doAs(new PrivilegedExceptionAction<WebHdfsFileSystem>() {
++        @Override
++        public WebHdfsFileSystem run() throws Exception {
++          return (WebHdfsFileSystem)FileSystem.get(new URI(uri), conf);
++        }
++      });
++
++      webhdfs.cancelDelegationToken(token);
++    }
++  }
+ }
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java
+index dcfaa6f..45119a9 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java
+@@ -33,6 +33,9 @@ public class PutOpParam extends HttpOpParam<PutOpParam.Op> {
+     SETPERMISSION(false, HttpURLConnection.HTTP_OK),
+     SETTIMES(false, HttpURLConnection.HTTP_OK),
+     
++    RENEWDELEGATIONTOKEN(false, HttpURLConnection.HTTP_OK),
++    CANCELDELEGATIONTOKEN(false, HttpURLConnection.HTTP_OK),
++    
+     NULL(false, HttpURLConnection.HTTP_NOT_IMPLEMENTED);
+ 
+     final boolean doOutput;
+diff --git a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+index ad274e0..ac4fcce 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
++++ b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+@@ -18,8 +18,8 @@
+ 
+ package org.apache.hadoop.hdfs;
+ 
+-import static org.junit.Assert.*;
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
+ 
+ import java.io.IOException;
+ import java.net.URI;
+@@ -28,7 +28,6 @@ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.io.Text;
+-import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+ import org.junit.Before;
+@@ -53,15 +52,15 @@ public class TestHftpFileSystem {
+     URI uri = URI.create("hftp://localhost");
+     HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
+ 
+-    assertEquals(HftpFileSystem.DEFAULT_PORT, fs.getDefaultPort());
+-    assertEquals(HftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultSecurePort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT, fs.getDefaultPort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT, fs.getDefaultSecurePort());
+ 
+     URI fsUri = fs.getUri();
+     assertEquals(uri.getHost(), fsUri.getHost());
+-    assertEquals(HftpFileSystem.DEFAULT_PORT, fsUri.getPort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT, fsUri.getPort());
+     
+     assertEquals(
+-        "127.0.0.1:"+HftpFileSystem.DEFAULT_SECURE_PORT,
++        "127.0.0.1:"+DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT,
+         fs.getCanonicalServiceName()
+     );
+   }
+@@ -94,15 +93,15 @@ public class TestHftpFileSystem {
+     URI uri = URI.create("hftp://localhost:123");
+     HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
+ 
+-    assertEquals(HftpFileSystem.DEFAULT_PORT, fs.getDefaultPort());
+-    assertEquals(HftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultSecurePort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT, fs.getDefaultPort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT, fs.getDefaultSecurePort());
+ 
+     URI fsUri = fs.getUri();
+     assertEquals(uri.getHost(), fsUri.getHost());
+     assertEquals(uri.getPort(), fsUri.getPort());
+     
+     assertEquals(
+-        "127.0.0.1:"+HftpFileSystem.DEFAULT_SECURE_PORT,
++        "127.0.0.1:"+DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT,
+         fs.getCanonicalServiceName()
+     );
+   }
+@@ -137,15 +136,15 @@ public class TestHftpFileSystem {
+     URI uri = URI.create("hsftp://localhost");
+     HsftpFileSystem fs = (HsftpFileSystem) FileSystem.get(uri, conf);
+ 
+-    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultPort());
+-    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultSecurePort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT, fs.getDefaultPort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT, fs.getDefaultSecurePort());
+ 
+     URI fsUri = fs.getUri();
+     assertEquals(uri.getHost(), fsUri.getHost());
+-    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fsUri.getPort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT, fsUri.getPort());
+     
+     assertEquals(
+-        "127.0.0.1:"+HsftpFileSystem.DEFAULT_SECURE_PORT,
++        "127.0.0.1:"+DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT,
+         fs.getCanonicalServiceName()
+     );
+   }
+@@ -178,8 +177,8 @@ public class TestHftpFileSystem {
+     URI uri = URI.create("hsftp://localhost:123");
+     HsftpFileSystem fs = (HsftpFileSystem) FileSystem.get(uri, conf);
+ 
+-    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultPort());
+-    assertEquals(HsftpFileSystem.DEFAULT_SECURE_PORT, fs.getDefaultSecurePort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT, fs.getDefaultPort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT, fs.getDefaultSecurePort());
+ 
+     URI fsUri = fs.getUri();
+     assertEquals(uri.getHost(), fsUri.getHost());
+@@ -235,13 +234,13 @@ public class TestHftpFileSystem {
+     
+     @SuppressWarnings("unchecked")
+     @Override
+-    protected <T extends TokenIdentifier> void setDelegationToken(Token<T> token) {
++    public <T extends TokenIdentifier> void setDelegationToken(Token<T> token) {
+       gotToken = (Token<DelegationTokenIdentifier>) token;
+     }
+   }
+   
+   static Token<DelegationTokenIdentifier> makeDummyToken(String kind) {
+-    Token<DelegationTokenIdentifier> token = new Token();
++    Token<DelegationTokenIdentifier> token = new Token<DelegationTokenIdentifier>();
+     token.setKind(new Text(kind));
+     return token;
+   }
+-- 
+1.7.0.4
+

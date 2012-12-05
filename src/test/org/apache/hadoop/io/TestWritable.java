@@ -96,4 +96,39 @@ public class TestWritable extends TestCase {
     return after;
   }
 	
+  private static class FrobComparator extends WritableComparator {
+    public FrobComparator() { super(Frob.class); }
+    @Override public int compare(byte[] b1, int s1, int l1,
+                                 byte[] b2, int s2, int l2) {
+      return 0;
+    }
+  }
+
+  private static class Frob implements WritableComparable {
+    static {                                     // register default comparator
+      WritableComparator.define(Frob.class, new FrobComparator());
+    }
+    @Override public void write(DataOutput out) throws IOException {}
+    @Override public void readFields(DataInput in) throws IOException {}
+    @Override public int compareTo(Object o) { return 0; }
+  }
+
+  /** Test that comparator is defined. */
+  public static void testGetComparator() throws Exception {
+    assert(WritableComparator.get(Frob.class) instanceof FrobComparator);
+  }
+
+  private static class Foo implements WritableComparable {
+    @Override public void write(DataOutput out) throws IOException {}
+    @Override public void readFields(DataInput in) throws IOException {}
+    @Override public int compareTo(Object o) { return 0; }
+    // No comparator registered
+  }
+  
+  public static void testUnregisteredComparators() throws Exception {
+    WritableComparator firstComparator = WritableComparator.get(Foo.class);
+    WritableComparator secondComparator = WritableComparator.get(Foo.class);
+    assertNotSame("Should create a new comparator instance for unregistered " +
+        "comparators", firstComparator, secondComparator);
+  }
 }

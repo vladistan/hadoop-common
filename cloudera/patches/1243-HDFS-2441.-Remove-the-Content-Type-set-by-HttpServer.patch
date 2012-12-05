@@ -1,0 +1,127 @@
+From 715ab4544db4284ef7f63008f23c1bece1d7999f Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Thu, 13 Oct 2011 20:48:45 +0000
+Subject: [PATCH 1243/1344] HDFS-2441. Remove the Content-Type set by HttpServer.QuotingInputFilter in webhdfs responses.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1183086 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 727985c0e7ef6e8ab7a0bbc61620fea8c12124a5)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../web/resources/DatanodeWebHdfsMethods.java      |   11 +++++++++++
+ .../web/resources/NamenodeWebHdfsMethods.java      |   13 +++++++++++++
+ 2 files changed, 24 insertions(+), 0 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+index 7ca2a5d..c12edcb 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -26,6 +26,7 @@ import java.net.URISyntaxException;
+ import java.security.PrivilegedExceptionAction;
+ 
+ import javax.servlet.ServletContext;
++import javax.servlet.http.HttpServletResponse;
+ import javax.ws.rs.Consumes;
+ import javax.ws.rs.DefaultValue;
+ import javax.ws.rs.GET;
+@@ -76,6 +77,7 @@ public class DatanodeWebHdfsMethods {
+   public static final Log LOG = LogFactory.getLog(DatanodeWebHdfsMethods.class);
+ 
+   private @Context ServletContext context;
++  private @Context HttpServletResponse response;
+ 
+   /** Handle HTTP PUT request. */
+   @PUT
+@@ -106,6 +108,9 @@ public class DatanodeWebHdfsMethods {
+               replication, blockSize));
+     }
+ 
++    //clear content type
++    response.setContentType(null);
++
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException, URISyntaxException {
+@@ -158,6 +163,9 @@ public class DatanodeWebHdfsMethods {
+           + Param.toSortedString(", ", bufferSize));
+     }
+ 
++    //clear content type
++    response.setContentType(null);
++
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException {
+@@ -208,6 +216,9 @@ public class DatanodeWebHdfsMethods {
+           + Param.toSortedString(", ", offset, length, bufferSize));
+     }
+ 
++    //clear content type
++    response.setContentType(null);
++
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index 1c76802..71c8996 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -27,6 +27,7 @@ import java.security.PrivilegedExceptionAction;
+ 
+ import javax.servlet.ServletContext;
+ import javax.servlet.http.HttpServletRequest;
++import javax.servlet.http.HttpServletResponse;
+ import javax.ws.rs.Consumes;
+ import javax.ws.rs.DELETE;
+ import javax.ws.rs.DefaultValue;
+@@ -102,6 +103,7 @@ public class NamenodeWebHdfsMethods {
+ 
+   private @Context ServletContext context;
+   private @Context HttpServletRequest request;
++  private @Context HttpServletResponse response;
+ 
+   private static DatanodeInfo chooseDatanode(final NameNode namenode,
+       final String path, final HttpOpParam.Op op, final long openOffset
+@@ -215,6 +217,9 @@ public class NamenodeWebHdfsMethods {
+               modificationTime, accessTime));
+     }
+ 
++    //clear content type
++    response.setContentType(null);
++
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException, URISyntaxException {
+@@ -312,6 +317,9 @@ public class NamenodeWebHdfsMethods {
+           + Param.toSortedString(", ", bufferSize));
+     }
+ 
++    //clear content type
++    response.setContentType(null);
++
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException, URISyntaxException {
+@@ -389,6 +397,8 @@ public class NamenodeWebHdfsMethods {
+           + Param.toSortedString(", ", offset, length, renewer, bufferSize));
+     }
+ 
++    //clear content type
++    response.setContentType(null);
+ 
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+@@ -516,6 +526,9 @@ public class NamenodeWebHdfsMethods {
+           + Param.toSortedString(", ", recursive));
+     }
+ 
++    //clear content type
++    response.setContentType(null);
++
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+       public Response run() throws IOException {
+-- 
+1.7.0.4
+

@@ -1,0 +1,133 @@
+From a9a16b4ed2b6d56d6d69bd510ee2f80a3389b8bc Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Wed, 26 Oct 2011 18:26:36 +0000
+Subject: [PATCH 1251/1344] HDFS-2494. Close the streams and DFSClient in DatanodeWebHdfsMethods.  Contributed by Uma Maheswara Rao G
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1189361 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 36fd50f57c5f8a0e2738c231c390cc41451c9400)
+
+Author: Uma Maheswara Rao G
+Ref: CDH-4806
+---
+ .../web/resources/DatanodeWebHdfsMethods.java      |   72 +++++++++++++++-----
+ 1 files changed, 55 insertions(+), 17 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+index d20156b..cdd196d 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -149,15 +149,21 @@ public class DatanodeWebHdfsMethods {
+     case CREATE:
+     {
+       final Configuration conf = new Configuration(datanode.getConf());
+-      final DFSClient dfsclient = new DFSClient(conf);
+       final int b = bufferSize.getValue(conf);
+-      final FSDataOutputStream out = new FSDataOutputStream(dfsclient.create(
+-          fullpath, permission.getFsPermission(), overwrite.getValue(),
+-          replication.getValue(conf), blockSize.getValue(conf), null, b), null);
++      DFSClient dfsclient = new DFSClient(conf);
++      FSDataOutputStream out = null;
+       try {
++        out = new FSDataOutputStream(dfsclient.create(
++            fullpath, permission.getFsPermission(), overwrite.getValue(),
++            replication.getValue(conf), blockSize.getValue(conf), null, b), null);
+         IOUtils.copyBytes(in, out, b);
+-      } finally {
+         out.close();
++        out = null;
++        dfsclient.close();
++        dfsclient = null;
++      } finally {
++        IOUtils.cleanup(LOG, out);
++        IOUtils.cleanup(LOG, dfsclient);
+       }
+       final String nnAddr = NameNode.getInfoServer(conf);
+       final URI uri = new URI(WebHdfsFileSystem.SCHEME + "://" + nnAddr + fullpath);
+@@ -220,13 +226,19 @@ public class DatanodeWebHdfsMethods {
+     case APPEND:
+     {
+       final Configuration conf = new Configuration(datanode.getConf());
+-      final DFSClient dfsclient = new DFSClient(conf);
+       final int b = bufferSize.getValue(conf);
+-      final FSDataOutputStream out = dfsclient.append(fullpath, b, null, null);
++      DFSClient dfsclient = new DFSClient(conf);
++      FSDataOutputStream out = null;
+       try {
++        out = dfsclient.append(fullpath, b, null, null);
+         IOUtils.copyBytes(in, out, b);
+-      } finally {
+         out.close();
++        out = null;
++        dfsclient.close();
++        dfsclient = null;
++      } finally {
++        IOUtils.cleanup(LOG, out);
++        IOUtils.cleanup(LOG, dfsclient);
+       }
+       return Response.ok().type(MediaType.APPLICATION_JSON).build();
+     }
+@@ -294,18 +306,36 @@ public class DatanodeWebHdfsMethods {
+     case OPEN:
+     {
+       final int b = bufferSize.getValue(conf);
+-      final DFSDataInputStream in = new DFSClient.DFSDataInputStream(
+-          dfsclient.open(fullpath, b, true, null));
+-      in.seek(offset.getValue());
+-
++      DFSDataInputStream in = null;
++      try {
++        in = new DFSClient.DFSDataInputStream(
++        dfsclient.open(fullpath, b, true, null));
++        in.seek(offset.getValue());
++      } catch(IOException ioe) {
++        IOUtils.cleanup(LOG, in);
++        IOUtils.cleanup(LOG, dfsclient);
++        throw ioe;
++      }
++      final DFSDataInputStream dis = in;
+       final StreamingOutput streaming = new StreamingOutput() {
+         @Override
+         public void write(final OutputStream out) throws IOException {
+           final Long n = length.getValue();
+-          if (n == null) {
+-            IOUtils.copyBytes(in, out, b);
+-          } else {
+-            IOUtils.copyBytes(in, out, n, b, false);
++          DFSDataInputStream dfsin = dis;
++          DFSClient client = dfsclient;
++          try {
++            if (n == null) {
++              IOUtils.copyBytes(dfsin, out, b);
++            } else {
++              IOUtils.copyBytes(dfsin, out, n, b, false);
++            }
++            dfsin.close();
++            dfsin = null;
++            client.close();
++            client = null;
++          } finally {
++            IOUtils.cleanup(LOG, dfsin);
++            IOUtils.cleanup(LOG, client);
+           }
+         }
+       };
+@@ -317,7 +347,15 @@ public class DatanodeWebHdfsMethods {
+     }
+     case GETFILECHECKSUM:
+     {
+-      final MD5MD5CRC32FileChecksum checksum = dfsclient.getFileChecksum(fullpath);
++      MD5MD5CRC32FileChecksum checksum = null;
++      DFSClient client = dfsclient;
++      try {
++        checksum = client.getFileChecksum(fullpath);
++        client.close();
++        client = null;
++      } finally {
++        IOUtils.cleanup(LOG, client);
++      }
+       final String js = JsonUtil.toJsonString(checksum);
+       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
+     }
+-- 
+1.7.0.4
+

@@ -116,7 +116,7 @@ private final UserGroupInformation ugi;
           + ", access=" + access
           + ", subAccess=" + subAccess);
     }
-
+    // check if (parentAccess != null) && file exists, then check sb
     synchronized(root) {
       INode[] inodes = root.getExistingPathINodes(path);
       int ancestorIndex = inodes.length - 2;
@@ -124,6 +124,10 @@ private final UserGroupInformation ugi;
           ancestorIndex--);
       checkTraverse(inodes, ancestorIndex);
 
+      if (parentAccess != null && parentAccess.implies(FsAction.WRITE)
+          && inodes.length > 1 && inodes[inodes.length - 1] != null) {
+        checkStickyBit(inodes[inodes.length - 2], inodes[inodes.length - 1]);
+      }
       if (ancestorAccess != null && inodes.length > 1) {
         check(inodes, ancestorIndex, ancestorAccess);
       }
@@ -198,5 +202,24 @@ private final UserGroupInformation ugi;
     }
     throw new AccessControlException("Permission denied: user=" + user
         + ", access=" + access + ", inode=" + inode);
+  }
+
+  private void checkStickyBit(INode parent, INode inode) throws AccessControlException {
+    if(!parent.getFsPermission().getStickyBit()) {
+      return;
+    }
+
+    // If this user is the directory owner, return
+    if(parent.getUserName().equals(user)) {
+      return;
+    }
+
+    // if this user is the file owner, return
+    if(inode.getUserName().equals(user)) {
+      return;
+    }
+
+    throw new AccessControlException("Permission denied by sticky bit setting:" +
+      " user=" + user + ", inode=" + inode);
   }
 }

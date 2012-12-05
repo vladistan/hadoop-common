@@ -24,6 +24,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.security.PrivilegedExceptionAction;
 import java.util.Iterator;
@@ -33,6 +34,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 
 import org.apache.commons.logging.*;
 
@@ -69,7 +71,7 @@ public abstract class FileSystem extends Configured implements Closeable {
   public static final Log LOG = LogFactory.getLog(FileSystem.class);
 
   /** FileSystem cache */
-  private static final Cache CACHE = new Cache();
+  static final Cache CACHE = new Cache();
 
   /** The key this instance is stored under in the cache. */
   private Cache.Key key;
@@ -106,12 +108,10 @@ public abstract class FileSystem extends Configured implements Closeable {
   public static FileSystem get(final URI uri, final Configuration conf, 
       final String user)
   throws IOException, InterruptedException {
-    UserGroupInformation ugi;
-    if (user == null) {
-      ugi = UserGroupInformation.getCurrentUser();
-    } else {
-      ugi = UserGroupInformation.createRemoteUser(user);
-    }
+    String ticketCachePath =
+      conf.get(CommonConfigurationKeys.KERBEROS_TICKET_CACHE_PATH);
+    UserGroupInformation ugi =
+        UserGroupInformation.getBestUGI(ticketCachePath, user);
     return ugi.doAs(new PrivilegedExceptionAction<FileSystem>() {
       public FileSystem run() throws IOException {
         return get(uri, conf);
@@ -254,16 +254,68 @@ public abstract class FileSystem extends Configured implements Closeable {
     return CACHE.get(uri, conf);
   }
 
-  private static class ClientFinalizer extends Thread {
-    public synchronized void run() {
-      try {
-        FileSystem.closeAll();
-      } catch (IOException e) {
-        LOG.info("FileSystem.closeAll() threw an exception:\n" + e);
+  /**
+   * Returns the FileSystem for this URI's scheme and authority and the 
+   * passed user. Internally invokes {@link #newInstance(URI, Configuration)}
+   * @param uri
+   * @param conf
+   * @param user
+   * @return filesystem instance
+   * @throws IOException
+   * @throws InterruptedException
+   */
+  public static FileSystem newInstance(final URI uri, final Configuration conf,
+      final String user) throws IOException, InterruptedException {
+    String ticketCachePath =
+      conf.get(CommonConfigurationKeys.KERBEROS_TICKET_CACHE_PATH);
+    UserGroupInformation ugi =
+        UserGroupInformation.getBestUGI(ticketCachePath, user);
+    return ugi.doAs(new PrivilegedExceptionAction<FileSystem>() {
+      public FileSystem run() throws IOException {
+        return newInstance(uri,conf); 
+      }
+    });
+  }
+  /** Returns the FileSystem for this URI's scheme and authority.  The scheme
+   * of the URI determines a configuration property name,
+   * <tt>fs.<i>scheme</i>.class</tt> whose value names the FileSystem class.
+   * The entire URI is passed to the FileSystem instance's initialize method.
+   * This always returns a new FileSystem object.
+   */
+  public static FileSystem newInstance(URI uri, Configuration conf) throws IOException {
+    String scheme = uri.getScheme();
+    String authority = uri.getAuthority();
+
+    if (scheme == null) {                       // no scheme: use default FS
+      return newInstance(conf);
+    }
+
+    if (authority == null) {                       // no authority
+      URI defaultUri = getDefaultUri(conf);
+      if (scheme.equals(defaultUri.getScheme())    // if scheme matches default
+          && defaultUri.getAuthority() != null) {  // & default has authority
+        return newInstance(defaultUri, conf);              // return default
       }
     }
+    return CACHE.getUnique(uri, conf);
   }
-  private static final ClientFinalizer clientFinalizer = new ClientFinalizer();
+
+  /** Returns a unique configured filesystem implementation.
+   * This always returns a new FileSystem object. */
+  public static FileSystem newInstance(Configuration conf) throws IOException {
+    return newInstance(getDefaultUri(conf), conf);
+  }
+
+  /**
+   * Get a unique local file system object
+   * @param conf the configuration to configure the file system with
+   * @return a LocalFileSystem
+   * This always returns a new FileSystem object.
+   */
+  public static LocalFileSystem newInstanceLocal(Configuration conf)
+    throws IOException {
+    return (LocalFileSystem)newInstance(LocalFileSystem.NAME, conf);
+  }
 
   /**
    * Close all cached filesystems. Be sure those filesystems are not
@@ -274,7 +326,7 @@ public abstract class FileSystem extends Configured implements Closeable {
   public static void closeAll() throws IOException {
     LOG.debug("Starting clear of FileSystem cache with " + CACHE.size() +
               " elements.");
-    CACHE.closeAll();
+    CACHE.closeAll(null, false);
     LOG.debug("Done clearing cache");
   }
 
@@ -286,7 +338,7 @@ public abstract class FileSystem extends Configured implements Closeable {
    */
   public static void closeAllForUGI(UserGroupInformation ugi) 
   throws IOException {
-    CACHE.closeAll(ugi);
+    CACHE.closeAll(ugi, false);
   }
 
   /** Make sure that a path specifies a FileSystem. */
@@ -402,7 +454,7 @@ public abstract class FileSystem extends Configured implements Closeable {
       throw new IllegalArgumentException("Invalid start or len parameter");
     }
 
-    if (file.getLen() < start) {
+    if (file.getLen() <= start) {
       return new BlockLocation[0];
 
     }
@@ -828,7 +880,6 @@ public abstract class FileSystem extends Configured implements Closeable {
    * @param f
    *          given path
    * @return the statuses of the files/directories in the given patch
-   *         returns null, if Path f does not exist in the FileSystem
    * @throws IOException
    */
   public abstract FileStatus[] listStatus(Path f) throws IOException;
@@ -1086,6 +1137,127 @@ public abstract class FileSystem extends Configured implements Closeable {
     }
     return globPathsLevel(parents, filePattern, level + 1, hasGlob);
   }
+
+  /* A class that could decide if a string matches the glob or not */
+  private static class GlobFilter implements PathFilter {
+    private PathFilter userFilter = DEFAULT_FILTER;
+    private Pattern regex;
+    private boolean hasPattern = false;
+      
+    /** Default pattern character: Escape any special meaning. */
+    private static final char  PAT_ESCAPE = '\\';
+    /** Default pattern character: Any single character. */
+    private static final char  PAT_ANY = '.';
+    /** Default pattern character: Character set close. */
+    private static final char  PAT_SET_CLOSE = ']';
+      
+    GlobFilter(String filePattern) throws IOException {
+      setRegex(filePattern);
+    }
+      
+    GlobFilter(String filePattern, PathFilter filter) throws IOException {
+      userFilter = filter;
+      setRegex(filePattern);
+    }
+      
+    private boolean isJavaRegexSpecialChar(char pChar) {
+      return pChar == '.' || pChar == '$' || pChar == '(' || pChar == ')' ||
+             pChar == '|' || pChar == '+';
+    }
+    void setRegex(String filePattern) throws IOException {
+      int len;
+      int setOpen;
+      int curlyOpen;
+      boolean setRange;
+
+      StringBuilder fileRegex = new StringBuilder();
+
+      // Validate the pattern
+      len = filePattern.length();
+      if (len == 0)
+        return;
+
+      setOpen = 0;
+      setRange = false;
+      curlyOpen = 0;
+
+      for (int i = 0; i < len; i++) {
+        char pCh;
+          
+        // Examine a single pattern character
+        pCh = filePattern.charAt(i);
+        if (pCh == PAT_ESCAPE) {
+          fileRegex.append(pCh);
+          i++;
+          if (i >= len)
+            error("An escaped character does not present", filePattern, i);
+          pCh = filePattern.charAt(i);
+        } else if (isJavaRegexSpecialChar(pCh)) {
+          fileRegex.append(PAT_ESCAPE);
+        } else if (pCh == '*') {
+          fileRegex.append(PAT_ANY);
+          hasPattern = true;
+        } else if (pCh == '?') {
+          pCh = PAT_ANY;
+          hasPattern = true;
+        } else if (pCh == '{') {
+          fileRegex.append('(');
+          pCh = '(';
+          curlyOpen++;
+          hasPattern = true;
+        } else if (pCh == ',' && curlyOpen > 0) {
+          fileRegex.append(")|");
+          pCh = '(';
+        } else if (pCh == '}' && curlyOpen > 0) {
+          // End of a group
+          curlyOpen--;
+          fileRegex.append(")");
+          pCh = ')';
+        } else if (pCh == '[' && setOpen == 0) {
+          setOpen++;
+          hasPattern = true;
+        } else if (pCh == '^' && setOpen > 0) {
+        } else if (pCh == '-' && setOpen > 0) {
+          // Character set range
+          setRange = true;
+        } else if (pCh == PAT_SET_CLOSE && setRange) {
+          // Incomplete character set range
+          error("Incomplete character set range", filePattern, i);
+        } else if (pCh == PAT_SET_CLOSE && setOpen > 0) {
+          // End of a character set
+          if (setOpen < 2)
+            error("Unexpected end of set", filePattern, i);
+          setOpen = 0;
+        } else if (setOpen > 0) {
+          // Normal character, or the end of a character set range
+          setOpen++;
+          setRange = false;
+        }
+        fileRegex.append(pCh);
+      }
+        
+      // Check for a well-formed pattern
+      if (setOpen > 0 || setRange || curlyOpen > 0) {
+        // Incomplete character set or character range
+        error("Expecting set closure character or end of range, or }", 
+            filePattern, len);
+      }
+      regex = Pattern.compile(fileRegex.toString());
+    }
+      
+    boolean hasPattern() {
+      return hasPattern;
+    }
+      
+    public boolean accept(Path path) {
+      return regex.matcher(path.getName()).matches() && userFilter.accept(path);
+    }
+      
+    private void error(String s, String pattern, int pos) throws IOException {
+      throw new IOException("Illegal file pattern: "
+                            +s+ " for glob "+ pattern + " at " + pos);
+    }
+  }
     
   /** Return the current user's home directory in this filesystem.
    * The default implementation returns "/user/$USER/".
@@ -1275,17 +1447,42 @@ public abstract class FileSystem extends Configured implements Closeable {
     return getFileStatus(f).getBlockSize();
   }
     
-  /** Return the number of bytes that large input files should be optimally
-   * be split into to minimize i/o time. */
+  /**
+   * Return the number of bytes that large input files should be optimally
+   * be split into to minimize i/o time.
+   * @deprecated use {@link #getDefaultBlockSize(Path)} instead
+   */
+  @Deprecated
   public long getDefaultBlockSize() {
     // default to 32MB: large enough to minimize the impact of seeks
     return getConf().getLong("fs.local.block.size", 32 * 1024 * 1024);
   }
+
+  /**
+   * Return the number of bytes that large input files should be optimally
+   * be split into to minimize i/o time.
+   * @param f path of file
+   * @return the default block size for the path's filesystem
+   */
+  public long getDefaultBlockSize(Path f) {
+    return getDefaultBlockSize();
+  }
     
   /**
    * Get the default replication.
+   * @deprecated use {@link #getDefaultReplication(Path)} instead
    */
+  @Deprecated
   public short getDefaultReplication() { return 1; }
+
+  /**
+   * Get the default replication.
+   * @param path of the file
+   * @return default replication for the path's filesystem 
+   */
+  public short getDefaultReplication(Path path) {
+    return getDefaultReplication();
+  }
 
   /**
    * Return a file status object that represents the path.
@@ -1340,6 +1537,34 @@ public abstract class FileSystem extends Configured implements Closeable {
     }
     return results.toArray(new FileStatus[results.size()]);
   }
+  
+  /**
+   * Returns a status object describing the use and capacity of the
+   * file system. If the file system has multiple partitions, the
+   * use and capacity of the root partition is reflected.
+   * 
+   * @return a FsStatus object
+   * @throws IOException
+   *           see specific implementation
+   */
+  public FsStatus getStatus() throws IOException {
+    return getStatus(null);
+  }
+
+  /**
+   * Returns a status object describing the use and capacity of the
+   * file system. If the file system has multiple partitions, the
+   * use and capacity of the partition pointed to by the specified
+   * path is reflected.
+   * @param p Path for which status should be obtained. null means
+   * the default partition. 
+   * @return a FsStatus object
+   * @throws IOException
+   *           see specific implementation
+   */
+  public FsStatus getStatus(Path p) throws IOException {
+    return new FsStatus(Long.MAX_VALUE, 0, Long.MAX_VALUE);
+  }
 
   /**
    * Set permission of a path.
@@ -1389,10 +1614,26 @@ public abstract class FileSystem extends Configured implements Closeable {
 
   /** Caching FileSystem objects */
   static class Cache {
+    private final ClientFinalizer clientFinalizer = new ClientFinalizer();
+
     private final Map<Key, FileSystem> map = new HashMap<Key, FileSystem>();
+    private final Set<Key> toAutoClose = new HashSet<Key>();
+
+    /** A variable that makes all objects in the cache unique */
+    private static AtomicLong unique = new AtomicLong(1);
 
     FileSystem get(URI uri, Configuration conf) throws IOException{
       Key key = new Key(uri, conf);
+      return getInternal(uri, conf, key);
+    }
+
+    /** The objects inserted into the cache using this method are all unique */
+    synchronized FileSystem getUnique(URI uri, Configuration conf) throws IOException{
+      Key key = new Key(uri, conf, unique.getAndIncrement());
+      return getInternal(uri, conf, key);
+    }
+
+    private FileSystem getInternal(URI uri, Configuration conf, Key key) throws IOException{
       FileSystem fs = null;
       synchronized (this) {
         fs = map.get(key);
@@ -1415,6 +1656,10 @@ public abstract class FileSystem extends Configured implements Closeable {
         }
         fs.key = key;
         map.put(key, fs);
+
+        if (conf.getBoolean("fs.automatic.close", true)) {
+          toAutoClose.add(key);
+        }
         return fs;
       }
     }
@@ -1422,6 +1667,7 @@ public abstract class FileSystem extends Configured implements Closeable {
     synchronized void remove(Key key, FileSystem fs) {
       if (map.containsKey(key) && fs == map.get(key)) {
         map.remove(key);
+        toAutoClose.remove(key);
         if (map.isEmpty() && !clientFinalizer.isAlive()) {
           if (!Runtime.getRuntime().removeShutdownHook(clientFinalizer)) {
             LOG.info("Could not cancel cleanup thread, though no " +
@@ -1431,26 +1677,45 @@ public abstract class FileSystem extends Configured implements Closeable {
       }
     }
 
-    synchronized void closeAll() throws IOException {
-      List<IOException> exceptions = new ArrayList<IOException>();
-      for(; !map.isEmpty(); ) {
-        Map.Entry<Key, FileSystem> e = map.entrySet().iterator().next();
-        final Key key = e.getKey();
-        final FileSystem fs = e.getValue();
-
-        //remove from cache
-        remove(key, fs);
-
-        if (fs != null) {
-          try {
-            fs.close();
-          }
-          catch(IOException ioe) {
-            exceptions.add(ioe);
-          }
+    private class ClientFinalizer extends Thread {
+      public synchronized void run() {
+        try {
+          closeAll(null, true);
+        } catch (IOException e) {
+          LOG.info("FileSystem.Cache.closeAll() threw an exception:\n" + e);
         }
       }
+    }
 
+    /**
+     * Close all of the file systems in the cache.
+     * @param ugi Only close filesystems with this UGI - may be null to indicate ignoring UGI
+     * @param onlyAutomatic only close filesystems marked for automatic close
+     */
+    synchronized void closeAll(UserGroupInformation ugi, boolean onlyAutomatic) throws IOException {
+      List<FileSystem> targetFSList = new ArrayList<FileSystem>();
+      //Make a pass over the list and collect the filesystems to close
+      //we cannot close inline since close() removes the entry from the Map
+      for (Map.Entry<Key, FileSystem> entry : map.entrySet()) {
+        final Key key = entry.getKey();
+        final FileSystem fs = entry.getValue();
+        if (fs == null) continue;
+        if (ugi != null && !ugi.equals(key.ugi)) continue;
+        if (onlyAutomatic && !toAutoClose.contains(key)) {
+          continue;
+        }
+        targetFSList.add(fs);   
+      }
+      List<IOException> exceptions = new ArrayList<IOException>();
+      //now make a pass over the target list and close each
+      for (FileSystem fs : targetFSList) {
+        try {
+          fs.close();
+        }
+        catch(IOException ioe) {
+          exceptions.add(ioe);
+        }
+      }
       if (!exceptions.isEmpty()) {
         throw MultipleIOException.createIOException(exceptions);
       }
@@ -1486,17 +1751,23 @@ public abstract class FileSystem extends Configured implements Closeable {
     static class Key {
       final String scheme;
       final String authority;
+      final long unique;
       final UserGroupInformation ugi;
 
       Key(URI uri, Configuration conf) throws IOException {
+        this(uri, conf, 0);
+      }
+
+      Key(URI uri, Configuration conf, long unique) throws IOException {
         scheme = uri.getScheme()==null?"":uri.getScheme().toLowerCase();
         authority = uri.getAuthority()==null?"":uri.getAuthority().toLowerCase();
+        this.unique = unique;
         this.ugi = UserGroupInformation.getCurrentUser();
       }
 
       /** {@inheritDoc} */
       public int hashCode() {
-        return (scheme + authority).hashCode() + ugi.hashCode();
+        return (scheme + authority).hashCode() + (int)unique + ugi.hashCode();
       }
 
       static boolean isEqual(Object a, Object b) {
@@ -1512,7 +1783,8 @@ public abstract class FileSystem extends Configured implements Closeable {
           Key that = (Key)obj;
           return isEqual(this.scheme, that.scheme)
                  && isEqual(this.authority, that.authority)
-                 && isEqual(this.ugi, that.ugi);
+                 && isEqual(this.ugi, that.ugi)
+                 && (this.unique == that.unique);
         }
         return false;        
       }

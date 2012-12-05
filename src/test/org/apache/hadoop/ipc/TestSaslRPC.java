@@ -255,13 +255,13 @@ public class TestSaslRPC {
       Configuration newConf = new Configuration(conf);
       newConf.set(SERVER_PRINCIPAL_KEY, SERVER_PRINCIPAL_1);
       ConnectionId remoteId = ConnectionId.getConnectionId(
-          new InetSocketAddress(0), TestSaslProtocol.class, null, newConf);
+          new InetSocketAddress(0), TestSaslProtocol.class, null, 0, newConf);
       assertEquals(SERVER_PRINCIPAL_1, remoteId.getServerPrincipal());
       // this following test needs security to be off
       newConf.set(HADOOP_SECURITY_AUTHENTICATION, "simple");
       UserGroupInformation.setConfiguration(newConf);
       remoteId = ConnectionId.getConnectionId(new InetSocketAddress(0),
-          TestSaslProtocol.class, null, newConf);
+          TestSaslProtocol.class, null, 0, newConf);
       assertEquals(
           "serverPrincipal should be null when security is turned off", null,
           remoteId.getServerPrincipal());
@@ -364,7 +364,10 @@ public class TestSaslRPC {
     server.start();
 
     final UserGroupInformation current = UserGroupInformation.getCurrentUser();
-    final InetSocketAddress addr = NetUtils.getConnectAddress(server);
+    // don't use what the rpc server claims it's bound to since it's the
+    // client's responsibility to set the service
+    final InetSocketAddress addr = NetUtils.createSocketAddr(
+        ADDRESS, server.getListenerAddress().getPort());
     TestTokenIdentifier tokenId = new TestTokenIdentifier(new Text(current
         .getUserName()));
     Token<TestTokenIdentifier> token = new Token<TestTokenIdentifier>(tokenId,

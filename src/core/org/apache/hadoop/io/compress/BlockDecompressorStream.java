@@ -38,9 +38,10 @@ public class BlockDecompressorStream extends DecompressorStream {
    * @param in input stream
    * @param decompressor decompressor to use
    * @param bufferSize size of buffer
+ * @throws IOException
    */
   public BlockDecompressorStream(InputStream in, Decompressor decompressor, 
-                                 int bufferSize) {
+                                 int bufferSize) throws IOException {
     super(in, decompressor, bufferSize);
   }
   
@@ -49,12 +50,13 @@ public class BlockDecompressorStream extends DecompressorStream {
    * 
    * @param in input stream
    * @param decompressor decompressor to use
+ * @throws IOException
    */
-  public BlockDecompressorStream(InputStream in, Decompressor decompressor) {
+  public BlockDecompressorStream(InputStream in, Decompressor decompressor) throws IOException {
     super(in, decompressor);
   }
 
-  protected BlockDecompressorStream(InputStream in) {
+  protected BlockDecompressorStream(InputStream in) throws IOException {
     super(in);
   }
 
@@ -68,6 +70,12 @@ public class BlockDecompressorStream extends DecompressorStream {
         return -1;
       }
       noUncompressedBytes = 0;
+      // EOF if originalBlockSize is 0
+      // This will occur only when decompressing previous compressed empty file
+      if (originalBlockSize == 0) {
+        eof = true;
+        return -1;
+      }
     }
     
     int n = 0;
@@ -79,9 +87,7 @@ public class BlockDecompressorStream extends DecompressorStream {
         }
       }
       if (decompressor.needsInput()) {
-        int m = getCompressedData();
-        // Send the read data to the decompressor
-        decompressor.setInput(buffer, 0, m);
+        getCompressedData();
       }
     }
     
@@ -91,10 +97,10 @@ public class BlockDecompressorStream extends DecompressorStream {
     return n;
   }
 
-  protected int getCompressedData() throws IOException {
+  protected void getCompressedData() throws IOException {
     checkStream();
 
-    // Get the size of the compressed chunk (always non-negative)
+    // Get the size of the compressed chunk
     int len = rawReadInt();
 
     // Read len bytes from underlying stream 
@@ -105,12 +111,13 @@ public class BlockDecompressorStream extends DecompressorStream {
     while (n < len) {
       int count = in.read(buffer, off + n, len - n);
       if (count < 0) {
-        throw new EOFException("Unexpected end of block in input stream");
+        throw new EOFException();
       }
       n += count;
     }
     
-    return len;
+    // Send the read data to the decompressor
+    decompressor.setInput(buffer, 0, len);
   }
 
   public void resetState() throws IOException {

@@ -60,7 +60,7 @@ public class TestStreamXmlRecordReader extends TestStreaming
     };
   }
 
-  public void testCommandLine() {
+  public void testCommandLine() throws IOException {
     try {
       try {
         FileUtil.fullyDelete(OUTPUT_DIR.getAbsoluteFile());
@@ -73,8 +73,6 @@ public class TestStreamXmlRecordReader extends TestStreaming
       String output = StreamUtil.slurp(outFile);
       outFile.delete();
       assertEquals(input, output);
-    } catch (Exception e) {
-      e.printStackTrace();
     } finally {
       try {
         INPUT_FILE.delete();

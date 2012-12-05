@@ -38,6 +38,7 @@ public interface RefreshUserMappingsProtocol extends VersionedProtocol {
 
   /**
    * Refresh user to group mappings.
+   * @param conf
    * @throws IOException
    */
   public void refreshUserToGroupsMappings() throws IOException;

@@ -46,6 +46,7 @@ public class JobContext {
     "mapreduce.outputformat.class";
   protected static final String PARTITIONER_CLASS_ATTR = 
     "mapreduce.partitioner.class";
+  public static final String JAR_UNPACK_PATTERN = "mapreduce.job.jar.unpack.pattern";
 
   protected final org.apache.hadoop.mapred.JobConf conf;
   protected final Credentials credentials;
@@ -66,6 +67,13 @@ public class JobContext {
     "mapreduce.job.complete.cancel.delegation.tokens";
   public static final String USER_LOG_RETAIN_HOURS = 
     "mapred.userlog.retain.hours";
+  public static final String MAPREDUCE_TASK_CLASSPATH_PRECEDENCE = 
+    "mapreduce.task.classpath.user.precedence";
+  
+  public static final String MAP_MEMORY_PHYSICAL_MB =
+    "mapreduce.map.memory.physical.mb";
+  public static final String REDUCE_MEMORY_PHYSICAL_MB = 
+     "mapreduce.reduce.memory.physical.mb";
   
   /**
    * The UserGroupInformation object that has a reference to the current user
@@ -174,6 +182,16 @@ public class JobContext {
    */
   public String getJobName() {
     return conf.getJobName();
+  }
+  
+  /**
+   * Get the boolean value for the property that specifies which classpath
+   * takes precedence when tasks are launched. True - user's classes takes
+   * precedence. False - system's classes takes precedence.
+   * @return true if user's classes should take precedence
+   */
+  public boolean userClassesTakesPrecedence() {
+    return conf.userClassesTakesPrecedence();
   }
 
   /**

@@ -37,6 +37,8 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.io.MD5Hash;
+import org.apache.hadoop.hdfs.util.DataTransferThrottler;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.StringUtils;
 
@@ -48,6 +50,13 @@ import org.apache.hadoop.util.StringUtils;
 public class GetImageServlet extends HttpServlet {
   private static final long serialVersionUID = -7669068179452648952L;
   private static final Log LOG = LogFactory.getLog(GetImageServlet.class);
+
+  /**
+   * A lock object to prevent multiple 2NNs from simultaneously uploading
+   * fsimage snapshots.
+   */
+  private Object fsImageTransferLock = new Object();
+  
   @SuppressWarnings("unchecked")
   public void doGet(final HttpServletRequest request,
                     final HttpServletResponse response
@@ -58,12 +67,13 @@ public class GetImageServlet extends HttpServlet {
       final FSImage nnImage = (FSImage)context.getAttribute("name.system.image");
       final TransferFsImage ff = new TransferFsImage(pmap, request, response);
       final Configuration conf = (Configuration)getServletContext().getAttribute(JspHelper.CURRENT_CONF);
+
       if(UserGroupInformation.isSecurityEnabled() && 
-          !isValidRequestor(request.getRemoteUser(), conf)) {
+          !isValidRequestor(request.getUserPrincipal().getName(), conf)) {
         response.sendError(HttpServletResponse.SC_FORBIDDEN, 
             "Only Namenode and Secondary Namenode may access this servlet");
         LOG.warn("Received non-NN/SNN request for image or edits from " 
-            + request.getRemoteHost());
+            + request.getUserPrincipal().getName() + " at " + request.getRemoteHost());
         return;
       }
       
@@ -72,26 +82,38 @@ public class GetImageServlet extends HttpServlet {
         @Override
         public Void run() throws Exception {
           if (ff.getImage()) {
+            response.setHeader(TransferFsImage.CONTENT_LENGTH,
+              String.valueOf(nnImage.getFsImageName().length()));
             // send fsImage
             TransferFsImage.getFileServer(response.getOutputStream(),
-                                          nnImage.getFsImageName()); 
+                nnImage.getFsImageName(), getThrottler(conf)); 
           } else if (ff.getEdit()) {
+            response.setHeader(TransferFsImage.CONTENT_LENGTH,
+              String.valueOf(nnImage.getFsEditName().length()));
             // send edits
             TransferFsImage.getFileServer(response.getOutputStream(),
-                                          nnImage.getFsEditName());
+                nnImage.getFsEditName(), getThrottler(conf));
           } else if (ff.putImage()) {
-            // issue a HTTP get request to download the new fsimage 
-            nnImage.validateCheckpointUpload(ff.getToken());
-            reloginIfNecessary().doAs(new PrivilegedExceptionAction<Void>() {
-              @Override
-              public Void run() throws Exception {
-                TransferFsImage.getFileClient(ff.getInfoServer(), "getimage=1", 
-                    nnImage.getFsImageNameCheckpoint());
-                return null;
-              }
-            });
-
-            nnImage.checkpointUploadDone();
+            synchronized (fsImageTransferLock) {
+              final MD5Hash expectedChecksum = ff.getNewChecksum();
+              // issue a HTTP get request to download the new fsimage 
+              nnImage.validateCheckpointUpload(ff.getToken());
+              reloginIfNecessary().doAs(new PrivilegedExceptionAction<Void>() {
+                @Override
+                public Void run() throws Exception {
+                  MD5Hash actualChecksum = TransferFsImage.getFileClient(ff.getInfoServer(),
+                      "getimage=1", nnImage.getFsImageNameCheckpoint(), true);
+                  LOG.info("Downloaded new fsimage with checksum: " + actualChecksum);
+                  if (!actualChecksum.equals(expectedChecksum)) {
+                    throw new IOException("Actual checksum of transferred fsimage: "
+                        + actualChecksum + " does not match expected checksum: "
+                        + expectedChecksum);
+                  }
+                  return null;
+                }
+              });
+              nnImage.checkpointUploadDone();
+            }
           }
           return null;
         }
@@ -110,13 +132,29 @@ public class GetImageServlet extends HttpServlet {
         }
       });
 
-    } catch (Exception ie) {
-      String errMsg = "GetImage failed. " + StringUtils.stringifyException(ie);
+    } catch (Throwable t) {
+      String errMsg = "GetImage failed. " + StringUtils.stringifyException(t);
       response.sendError(HttpServletResponse.SC_GONE, errMsg);
       throw new IOException(errMsg);
     } finally {
       response.getOutputStream().close();
     }
+  }
+
+  /**
+   * Construct a throttler from conf
+   * @param conf configuration
+   * @return a data transfer throttler
+   */
+  private final DataTransferThrottler getThrottler(Configuration conf) {
+    long transferBandwidth = 
+      conf.getLong(DFSConfigKeys.DFS_IMAGE_TRANSFER_RATE_KEY,
+                   DFSConfigKeys.DFS_IMAGE_TRANSFER_RATE_DEFAULT);
+    DataTransferThrottler throttler = null;
+    if (transferBandwidth > 0) {
+      throttler = new DataTransferThrottler(transferBandwidth);
+    }
+    return throttler;
   }
   
   private boolean isValidRequestor(String remoteUser, Configuration conf)
@@ -141,11 +179,11 @@ public class GetImageServlet extends HttpServlet {
     
     for(String v : validRequestors) {
       if(v != null && v.equals(remoteUser)) {
-        if(LOG.isDebugEnabled()) LOG.debug("isValidRequestor is allowing: " + remoteUser);
+        LOG.info("GetImageServlet allowing: " + remoteUser);
         return true;
       }
     }
-    if(LOG.isDebugEnabled()) LOG.debug("isValidRequestor is rejecting: " + remoteUser);
+    LOG.info("GetImageServlet rejecting: " + remoteUser);
     return false;
   }
 }

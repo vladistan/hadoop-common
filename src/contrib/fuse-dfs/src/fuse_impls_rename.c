@@ -23,10 +23,12 @@
 
 int dfs_rename(const char *from, const char *to)
 {
-  TRACE1("rename", from) 
-
- // retrieve dfs specific data
+  struct hdfsConn *conn = NULL;
+  hdfsFS fs;
   dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
+  int ret;
+
+  TRACE1("rename", from) 
 
   // check params and the context var
   assert(from);
@@ -37,27 +39,34 @@ int dfs_rename(const char *from, const char *to)
   assert('/' == *to);
 
   if (is_protected(from) || is_protected(to)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to rename: %s %s", from, to);
+    ERROR("Could not rename %s to %s", from, to);
     return -EACCES;
   }
 
   if (dfs->read_only) {
-    syslog(LOG_ERR,"ERROR: hdfs is configured as read-only, cannot rename the directory %s\n",from);
+    ERROR("HDFS configured read-only, cannot rename directory %s", from);
     return -EACCES;
   }
 
-  hdfsFS userFS;
-  // if not connected, try to connect and fail out if we can't.
-  if ((userFS = doConnectAsUser(dfs->nn_hostname,dfs->nn_port))== NULL) {
-    syslog(LOG_ERR, "ERROR: could not connect to dfs %s:%d\n", __FILE__, __LINE__);
-    return -EIO;
+  ret = fuseConnectAsThreadUid(&conn);
+  if (ret) {
+    fprintf(stderr, "fuseConnectAsThreadUid: failed to open a libhdfs "
+            "connection!  error %d.\n", ret);
+    ret = -EIO;
+    goto cleanup;
   }
-
-  if (hdfsRename(userFS, from, to)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to rename %s to %s",from, to);
-    return -EIO;
+  fs = hdfsConnGetFs(conn);
+  if (hdfsRename(fs, from, to)) {
+    ERROR("Rename %s to %s failed", from, to);
+    ret = (errno > 0) ? -errno : -EIO;
+    goto cleanup;
   }
+  ret = 0;
 
-  return 0;
+cleanup:
+  if (conn) {
+    hdfsConnRelease(conn);
+  }
+  return ret;
 
 }

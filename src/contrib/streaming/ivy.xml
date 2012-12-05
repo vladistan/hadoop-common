@@ -86,10 +86,6 @@
       name="jets3t"
       rev="${jets3t.version}"
       conf="common->master"/>  -->
-<!--    <dependency org="commons-net"
-      name="commons-net"
-      rev="${commons-net.version}"
-      conf="common->master"/>  -->
     <dependency org="commons-codec"
       name="commons-codec"
       rev="${commons-codec.version}"
@@ -101,14 +97,6 @@
     <dependency org="org.codehaus.jackson"
       name="jackson-core-asl"
       rev="${jackson.version}"
-      conf="common->default"/>
-    <dependency org="commons-configuration"
-      name="commons-configuration"
-      rev="${commons-configuration.version}"
-      conf="common->default"/>
-    <dependency org="org.apache.commons"
-      name="commons-math"
-      rev="${commons-math.version}"
       conf="common->default"/>
     </dependencies>
 </ivy-module>

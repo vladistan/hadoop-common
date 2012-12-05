@@ -122,6 +122,11 @@
           <p>At the very least you should specify the
           <code>JAVA_HOME</code> so that it is correctly defined on each
           remote node.</p>
+
+          <p>In most cases you should also specify <code>HADOOP_PID_DIR</code>
+          to point a directory that can only be written to by the users that
+          are going to run the hadoop daemons.  Otherwise there is the
+          potential for a symlink attack.</p>
           
           <p>Administrators can configure individual daemons using the
           configuration options <code>HADOOP_*_OPTS</code>. Various options 
@@ -581,7 +586,7 @@
             
             <p>
             The executable must have specific permissions as follows. The
-            executable should have <em>6050 or --Sr-s---</em> permissions
+            executable should have <em>4754 or -rwsr-xr--</em> permissions
             user-owned by root(super-user) and group-owned by a special group
             of which the TaskTracker's user is the group member and no job
             submitter is. If any job submitter belongs to this special group,
@@ -596,7 +601,7 @@
             another user (job submitter) <em>X</em> as its members, and X does
             not belong to <em>specialGroup</em>. Going by the above
             description, the setuid/setgid executable should be set
-            <em>6050 or --Sr-s---</em> with user-owner as <em>mapred</em> and
+            <em>4754 or -rwsr-xr--</em> with user-owner as <em>mapred</em> and
             group-owner as <em>specialGroup</em> which has
             <em>mapred</em> as its member(and not <em>users</em> which has
             <em>X</em> also as its member besides <em>mapred</em>).
@@ -627,13 +632,6 @@
             be mentioned as simple <em>key=value</em> pairs.
             </p>
             <table><tr><th>Name</th><th>Description</th></tr>
-            <tr>
-            <td>mapred.local.dir</td>
-            <td>Path to mapred local directories. Should be same as the value 
-            which was provided to key in mapred-site.xml. This is required to
-            validate paths passed to the setuid executable in order to prevent
-            arbitrary paths being passed to it.</td>
-            </tr>
             <tr>
             <td>hadoop.log.dir</td>
             <td>Path to hadoop log directory. Should be same as the value which

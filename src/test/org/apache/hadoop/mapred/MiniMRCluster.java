@@ -146,6 +146,7 @@ public class MiniMRCluster {
     String[] localDirs;
     volatile boolean isInitialized = false;
     volatile boolean isDead = false;
+    volatile boolean exited = false;
     int numDir;
 
     TaskTrackerRunner(int trackerId, int numDir, String hostname, 
@@ -192,6 +193,7 @@ public class MiniMRCluster {
             return createTaskTracker(conf);
           }
         });
+
         isInitialized = true;
       } catch (Throwable e) {
         isDead = true;
@@ -203,7 +205,8 @@ public class MiniMRCluster {
     /**
      * Creates a default {@link TaskTracker} using the conf passed. 
      */
-    TaskTracker createTaskTracker(JobConf conf) throws InterruptedException, IOException {
+    TaskTracker createTaskTracker(JobConf conf)
+        throws IOException, InterruptedException {
       return new TaskTracker(conf);
     }
     
@@ -220,8 +223,9 @@ public class MiniMRCluster {
         tt = null;
         LOG.error("task tracker " + trackerId + " crashed", e);
       }
+      exited = true;
     }
-        
+ 
     /**
      * Get the local dir for this TaskTracker.
      * This is there so that we do not break

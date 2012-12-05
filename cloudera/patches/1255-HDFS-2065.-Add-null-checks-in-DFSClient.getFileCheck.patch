@@ -1,0 +1,96 @@
+From fbab1942608e9f84260d4ec79cea9b2206a2e9c7 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Tue, 1 Nov 2011 00:41:10 +0000
+Subject: [PATCH 1255/1344] HDFS-2065. Add null checks in DFSClient.getFileChecksum(..).  Contributed by Uma Maheswara Rao G
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1195737 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit ba9f6b8a6bbd5d993981082d6cb3222141367b81)
+
+Author: Uma Maheswara Rao G
+Ref: CDH-4806
+---
+ src/hdfs/org/apache/hadoop/hdfs/DFSClient.java     |   15 ++++++++++-----
+ .../hadoop/hdfs/TestDistributedFileSystem.java     |   20 ++++++++++++++++++++
+ 2 files changed, 30 insertions(+), 5 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+index c2dcf4d..cfd3580 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+@@ -27,7 +27,6 @@ import org.apache.hadoop.ipc.*;
+ import org.apache.hadoop.fs.FileAlreadyExistsException;
+ import org.apache.hadoop.net.DNS;
+ import org.apache.hadoop.net.NetUtils;
+-import org.apache.hadoop.net.NodeBase;
+ //import org.apache.hadoop.classification.InterfaceAudience;
+ import org.apache.hadoop.conf.*;
+ import org.apache.hadoop.hdfs.protocol.*;
+@@ -996,8 +995,11 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+       ClientProtocol namenode, SocketFactory socketFactory, int socketTimeout,
+       boolean connectToDnViaHostname) throws IOException {
+     //get all block locations
+-    List<LocatedBlock> locatedblocks
+-        = callGetBlockLocations(namenode, src, 0, Long.MAX_VALUE).getLocatedBlocks();
++    LocatedBlocks blockLocations = callGetBlockLocations(namenode, src, 0, Long.MAX_VALUE);
++    if (null == blockLocations) {
++      throw new FileNotFoundException("File does not exist: " + src);
++    }
++    List<LocatedBlock> locatedblocks = blockLocations.getLocatedBlocks();
+     final DataOutputBuffer md5out = new DataOutputBuffer();
+     int bytesPerCRC = 0;
+     long crcPerBlock = 0;
+@@ -1007,8 +1009,11 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+     //get block checksum for each block
+     for(int i = 0; i < locatedblocks.size(); i++) {
+       if (refetchBlocks) {  // refetch to get fresh tokens
+-        locatedblocks = callGetBlockLocations(namenode, src, 0, Long.MAX_VALUE)
+-            .getLocatedBlocks();
++        blockLocations = callGetBlockLocations(namenode, src, 0, Long.MAX_VALUE);
++        if (null == blockLocations) {
++          throw new FileNotFoundException("File does not exist: " + src);
++        }
++        locatedblocks = blockLocations.getLocatedBlocks();
+         refetchBlocks = false;
+       }
+       LocatedBlock lb = locatedblocks.get(i);
+diff --git a/src/test/org/apache/hadoop/hdfs/TestDistributedFileSystem.java b/src/test/org/apache/hadoop/hdfs/TestDistributedFileSystem.java
+index de3a21f..be92847 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestDistributedFileSystem.java
++++ b/src/test/org/apache/hadoop/hdfs/TestDistributedFileSystem.java
+@@ -23,6 +23,7 @@ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertTrue;
+ import static org.junit.Assert.fail;
+ 
++import java.io.FileNotFoundException;
+ import java.io.IOException;
+ import java.net.URI;
+ import java.security.PrivilegedExceptionAction;
+@@ -268,6 +269,25 @@ public class TestDistributedFileSystem {
+     final UserGroupInformation ugi = UserGroupInformation.createUserForTesting(
+         current.getShortUserName() + "x", new String[]{"user"});
+ 
++    try {
++      ((DistributedFileSystem) hdfs).getFileChecksum(new Path(
++          "/test/TestNonExistingFile"));
++      fail("Expecting FileNotFoundException");
++    } catch (FileNotFoundException e) {
++      assertTrue("Not throwing the intended exception message", e.getMessage()
++          .contains("File does not exist: /test/TestNonExistingFile"));
++    }
++
++    try {
++      Path path = new Path("/test/TestExistingDir/");
++      hdfs.mkdirs(path);
++      ((DistributedFileSystem) hdfs).getFileChecksum(path);
++      fail("Expecting FileNotFoundException");
++    } catch (FileNotFoundException e) {
++      assertTrue("Not throwing the intended exception message", e.getMessage()
++          .contains("File does not exist: /test/TestExistingDir"));
++    }
++
+     //hftp
+     final String hftpuri = "hftp://" + nnAddr;
+     System.out.println("hftpuri=" + hftpuri);
+-- 
+1.7.0.4
+

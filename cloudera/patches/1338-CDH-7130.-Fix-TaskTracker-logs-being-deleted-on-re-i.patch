@@ -1,0 +1,200 @@
+From 01e1a01f547c8a8b9619bd5bb9effe6a1928aaf6 Mon Sep 17 00:00:00 2001
+From: Karthik Kambatla <kasha@cloudera.com>
+Date: Thu, 2 Aug 2012 19:43:01 -0700
+Subject: [PATCH 1338/1344] CDH-7130. Fix TaskTracker logs being deleted on re-init.
+
+Reason: Bug fix
+Ref: CDH-7130
+Author: Karthik Kambatla
+---
+ src/mapred/org/apache/hadoop/mapred/TaskLog.java   |   16 ++++
+ .../org/apache/hadoop/mapred/TaskTracker.java      |    5 +-
+ .../org/apache/hadoop/util/MRAsyncDiskService.java |    4 +-
+ .../TestUserlogsRetentionAcrossRestarts.java       |   91 ++++++++++++++++++++
+ 4 files changed, 113 insertions(+), 3 deletions(-)
+ create mode 100644 src/test/org/apache/hadoop/mapred/TestUserlogsRetentionAcrossRestarts.java
+
+diff --git a/src/mapred/org/apache/hadoop/mapred/TaskLog.java b/src/mapred/org/apache/hadoop/mapred/TaskLog.java
+index 0c48ca4..3a25e55 100644
+--- a/src/mapred/org/apache/hadoop/mapred/TaskLog.java
++++ b/src/mapred/org/apache/hadoop/mapred/TaskLog.java
+@@ -40,11 +40,13 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ 
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.ChecksumFileSystem;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.LocalFileSystem;
+ import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileUtil;
+ import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.fs.PathFilter;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.io.SecureIOUtils;
+ import org.apache.hadoop.mapreduce.JobID;
+@@ -82,6 +84,20 @@ public class TaskLog {
+   static AtomicInteger rotor = new AtomicInteger(0);
+ 
+   /**
++   * Path filter that filters out userlogs directory For the time-being, it also
++   * filters out Checksum files. The checksum filtering should be removed once
++   * HADOOP-8649 is committed.
++   */
++  public static final PathFilter USERLOGS_PATH_FILTER = new PathFilter() {
++    @Override
++    public boolean accept(Path path) {
++      boolean userlogsAccept = !path.toString().contains(USERLOGS_DIR_NAME);
++      boolean checksumAccept = !ChecksumFileSystem.isChecksumFile(path);
++      return userlogsAccept && checksumAccept;
++    }
++  };
++
++  /**
+    * Create log directory for the given attempt. This involves creating the
+    * following and setting proper permissions for the new directories
+    * <br>{hadoop.log.dir}/userlogs/<jobid>
+diff --git a/src/mapred/org/apache/hadoop/mapred/TaskTracker.java b/src/mapred/org/apache/hadoop/mapred/TaskTracker.java
+index 08ae54f..f444747 100644
+--- a/src/mapred/org/apache/hadoop/mapred/TaskTracker.java
++++ b/src/mapred/org/apache/hadoop/mapred/TaskTracker.java
+@@ -781,7 +781,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
+                             protocol);
+     }
+   }
+-
++  
+   /**
+    * Delete all of the user directories.
+    * @param conf the TT configuration
+@@ -789,7 +789,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
+    */
+   private void deleteUserDirectories(Configuration conf) throws IOException {
+     for(String root: localStorage.getDirs()) {
+-      for(FileStatus status: localFs.listStatus(new Path(root, SUBDIR))) {
++      for (FileStatus status : localFs.listStatus(new Path(root, SUBDIR),
++          TaskLog.USERLOGS_PATH_FILTER)) {
+         String owner = status.getOwner();
+         String path = status.getPath().getName();
+         if (path.equals(owner)) {
+diff --git a/src/mapred/org/apache/hadoop/util/MRAsyncDiskService.java b/src/mapred/org/apache/hadoop/util/MRAsyncDiskService.java
+index 64cf378..d12bf75 100644
+--- a/src/mapred/org/apache/hadoop/util/MRAsyncDiskService.java
++++ b/src/mapred/org/apache/hadoop/util/MRAsyncDiskService.java
+@@ -30,6 +30,7 @@ import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.mapred.JobConf;
++import org.apache.hadoop.mapred.TaskLog;
+ 
+ /**
+  * This class is a container of multiple thread pools, each for a volume,
+@@ -314,7 +315,8 @@ public class MRAsyncDiskService {
+       // List all files inside the volumes
+       FileStatus[] files = null;
+       try {
+-        files = localFileSystem.listStatus(new Path(volumes[v]));
++        files = localFileSystem.listStatus(new Path(volumes[v]),
++            TaskLog.USERLOGS_PATH_FILTER);
+       } catch (Exception e) {
+         // Ignore exceptions in listStatus
+         // We tolerate missing volumes.
+diff --git a/src/test/org/apache/hadoop/mapred/TestUserlogsRetentionAcrossRestarts.java b/src/test/org/apache/hadoop/mapred/TestUserlogsRetentionAcrossRestarts.java
+new file mode 100644
+index 0000000..42e729c
+--- /dev/null
++++ b/src/test/org/apache/hadoop/mapred/TestUserlogsRetentionAcrossRestarts.java
+@@ -0,0 +1,91 @@
++package org.apache.hadoop.mapred;
++
++import static org.junit.Assert.assertTrue;
++
++import java.io.IOException;
++
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.examples.PiEstimator;
++import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.fs.LocalFileSystem;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.MiniDFSCluster;
++
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++/**
++ * Class for testing invariants across TaskTracker restarts
++ */
++public class TestUserlogsRetentionAcrossRestarts {
++  private Configuration conf = new Configuration();
++  private MiniDFSCluster dfs = null;
++  private MiniMRCluster mr = null;
++
++  private static final int numDir = 1;
++  private static final int numDataNodes = 1;
++  private static final int numTaskTrackers = 1;
++
++  @Before
++  public void startCluster() throws IOException {
++    dfs = new MiniDFSCluster(conf, numDataNodes, true, null);
++    mr = new MiniMRCluster(numTaskTrackers, dfs.getFileSystem().getUri()
++        .toString(), numDir);
++    mr.waitUntilIdle();
++  }
++
++  @After
++  public void stopCluster() {
++    if (dfs != null) {
++      dfs.shutdown();
++    }
++    if (mr != null) {
++      mr.shutdown();
++    }
++  }
++  
++  private void runPiEstimator() throws IOException {
++    JobConf jobConf = mr.createJobConf();
++    PiEstimator.estimate(2, 100, jobConf);
++  }
++
++  private void restartTaskTracker(int id) throws IOException {
++    mr.stopTaskTracker(id);
++    mr.startTaskTracker(null, null, id, numDir);
++    mr.waitUntilIdle();
++  }
++
++  @Test
++  public void testOnTaskTrackerRestart() throws IOException {
++    LocalFileSystem localFs = FileSystem.getLocal(conf);
++    String ttDir = mr.getTaskTrackerLocalDirs(0)[0];
++    Path userlogsPath = new Path(ttDir, TaskLog.USERLOGS_DIR_NAME);
++
++    runPiEstimator();
++    assertTrue("Userlogs should exist before TT shutdown",
++        localFs.exists(userlogsPath));
++
++    restartTaskTracker(0);
++
++    assertTrue("Userlogs should not be deleted on restart",
++        localFs.exists(userlogsPath));
++  }
++
++  @Test
++  public void testOnJobTrackerRestart() throws IOException {
++    LocalFileSystem localFs = FileSystem.getLocal(conf);
++    String ttDir = mr.getTaskTrackerLocalDirs(0)[0];
++    Path userlogsPath = new Path(ttDir, TaskLog.USERLOGS_DIR_NAME);
++
++    runPiEstimator();
++    assertTrue("Userlogs should exist before JT shutdown",
++        localFs.exists(userlogsPath));
++
++    mr.stopJobTracker();
++    mr.startJobTracker(true);
++
++    assertTrue("Userlogs should not be deleted on restart",
++        localFs.exists(userlogsPath));
++  }
++}
+-- 
+1.7.0.4
+

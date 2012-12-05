@@ -57,7 +57,6 @@ public class ZombieJob implements JobStory {
   private JobConf jobConf;
 
   private long seed;
-  private long numRandomSeeds = 0;
   private boolean hasRandomSeed = false;
 
   private Map<LoggedDiscreteCDF, CDFRandomGenerator> interpolatorMap =
@@ -196,8 +195,7 @@ public class ZombieJob implements JobStory {
         if (cluster == null) {
           splitsList.add(new FileSplit(emptyPath, 0, 0, new String[0]));
         } else {
-          MachineNode[] mNodes = cluster.getRandomMachines(avgHostPerSplit,
-                                                           random);
+          MachineNode[] mNodes = cluster.getRandomMachines(avgHostPerSplit);
           String[] hosts = new String[mNodes.length];
           for (int j = 0; j < hosts.length; ++j) {
             hosts[j] = mNodes[j].getName();
@@ -300,8 +298,8 @@ public class ZombieJob implements JobStory {
   private TaskAttemptID maskAttemptID(TaskAttemptID attemptId) {
     JobID jobId = new JobID();
     TaskID taskId = attemptId.getTaskID();
-    return new TaskAttemptID(jobId.getJtIdentifier(), jobId.getId(), taskId
-        .isMap(), taskId.getId(), attemptId.getId());
+    return new TaskAttemptID(jobId.getJtIdentifier(), jobId.getId(),
+        attemptId.isMap(), taskId.getId(), attemptId.getId());
   }
 
   private LoggedTask sanitizeLoggedTask(LoggedTask task) {
@@ -668,7 +666,7 @@ public class ZombieJob implements JobStory {
   private TaskAttemptID makeTaskAttemptID(TaskType taskType, int taskNumber,
       int taskAttemptNumber) {
     return new TaskAttemptID(new TaskID(JobID.forName(job.getJobID()),
-        taskType==TaskType.MAP, taskNumber), taskAttemptNumber);
+        TaskType.MAP == taskType, taskNumber), taskAttemptNumber);
   }
   
   private TaskAttemptInfo makeUpTaskAttemptInfo(TaskType taskType, TaskInfo taskInfo,
@@ -801,13 +799,7 @@ public class ZombieJob implements JobStory {
 
     return makeUpRuntimeCore(loggedDiscreteCDF);
   }
-  
-  private synchronized long getNextRandomSeed() {
-    numRandomSeeds++;
-    return RandomSeedGenerator.getSeed("forZombieJob" + job.getJobID(),
-                                       numRandomSeeds);
-  }
-   
+
   private long makeUpRuntimeCore(LoggedDiscreteCDF loggedDiscreteCDF) {
     CDFRandomGenerator interpolator;
 
@@ -822,7 +814,7 @@ public class ZombieJob implements JobStory {
 
       interpolator =
           hasRandomSeed ? new CDFPiecewiseLinearRandomGenerator(
-              loggedDiscreteCDF, getNextRandomSeed())
+              loggedDiscreteCDF, ++seed)
               : new CDFPiecewiseLinearRandomGenerator(loggedDiscreteCDF);
 
       /*
@@ -875,7 +867,7 @@ public class ZombieJob implements JobStory {
   }
 
   private TaskID getMaskedTaskID(TaskType taskType, int taskNumber) {
-    return new TaskID(new JobID(), taskType==TaskType.MAP, taskNumber);
+    return new TaskID(new JobID(), TaskType.MAP == taskType, taskNumber);
   }
 
   private LoggedTask getLoggedTask(TaskType taskType, int taskNumber) {

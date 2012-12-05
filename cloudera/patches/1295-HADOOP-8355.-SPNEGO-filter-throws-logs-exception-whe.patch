@@ -1,0 +1,60 @@
+From 318114ea5a58cbd217299ab5e468127459f1e043 Mon Sep 17 00:00:00 2001
+From: Alejandro Abdelnur <tucu@apache.org>
+Date: Wed, 11 Jul 2012 22:47:17 +0000
+Subject: [PATCH 1295/1344] HADOOP-8355. SPNEGO filter throws/logs exception when authentication fails (tucu)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1360458 13f79535-47bb-0310-9956-ffa450edef68
+
+Author: Alejandro Abdelnur
+Ref: CDH-4806
+---
+ .../server/AuthenticationFilter.java               |   13 ++++++++-----
+ 1 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/security/authentication/server/AuthenticationFilter.java b/src/core/org/apache/hadoop/security/authentication/server/AuthenticationFilter.java
+index b37f39a..28a4d3d 100644
+--- a/src/core/org/apache/hadoop/security/authentication/server/AuthenticationFilter.java
++++ b/src/core/org/apache/hadoop/security/authentication/server/AuthenticationFilter.java
+@@ -327,6 +327,8 @@ public class AuthenticationFilter implements Filter {
+   @Override
+   public void doFilter(ServletRequest request, ServletResponse response, FilterChain filterChain)
+       throws IOException, ServletException {
++    boolean unauthorizedResponse = true;
++    String unauthorizedMsg = "";
+     HttpServletRequest httpRequest = (HttpServletRequest) request;
+     HttpServletResponse httpResponse = (HttpServletResponse) response;
+     try {
+@@ -350,6 +352,7 @@ public class AuthenticationFilter implements Filter {
+         newToken = true;
+       }
+       if (token != null) {
++        unauthorizedResponse = false;
+         if (LOG.isDebugEnabled()) {
+           LOG.debug("Request [{}] user [{}] authenticated", getRequestURL(httpRequest), token.getUserName());
+         }
+@@ -378,17 +381,17 @@ public class AuthenticationFilter implements Filter {
+         }
+         filterChain.doFilter(httpRequest, httpResponse);
+       }
+-      else {
+-        throw new AuthenticationException("Missing AuthenticationToken");
+-      }
+     } catch (AuthenticationException ex) {
++      unauthorizedMsg = ex.toString();
++      LOG.warn("Authentication exception: " + ex.getMessage(), ex);
++    }
++    if (unauthorizedResponse) {
+       if (!httpResponse.isCommitted()) {
+         Cookie cookie = createCookie("");
+         cookie.setMaxAge(0);
+         httpResponse.addCookie(cookie);
+-        httpResponse.sendError(HttpServletResponse.SC_UNAUTHORIZED, ex.getMessage());
++        httpResponse.sendError(HttpServletResponse.SC_UNAUTHORIZED, unauthorizedMsg);
+       }
+-      LOG.warn("Authentication exception: " + ex.getMessage(), ex);
+     }
+   }
+ 
+-- 
+1.7.0.4
+

@@ -1,0 +1,102 @@
+From 282899e5a11b918f09d9ddf8fb25f3f55aa5a03d Mon Sep 17 00:00:00 2001
+From: Aaron T. Myers <atm@cloudera.com>
+Date: Mon, 23 Jul 2012 09:35:18 -0700
+Subject: [PATCH 1328/1344] HDFS-3698. TestHftpFileSystem is failing in branch-1 due to changed default secure port.
+
+Reason: Bug fix
+Author: Aaron T. Myers
+Ref: CDH-5634
+---
+ .../org/apache/hadoop/hdfs/HsftpFileSystem.java    |    3 ++-
+ .../org/apache/hadoop/hdfs/TestHftpFileSystem.java |   16 ++++++++--------
+ 2 files changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
+index b3b9c32..2f0f45f 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
+@@ -67,7 +67,8 @@ public class HsftpFileSystem extends HftpFileSystem {
+ 
+   @Override
+   protected int getDefaultPort() {
+-    return getDefaultSecurePort();
++    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_KEY,
++        DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT);
+   }
+ 
+   @Override
+diff --git a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+index 4da2c32..9765192 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
++++ b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+@@ -294,14 +294,14 @@ public class TestHftpFileSystem {
+     HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
+ 
+     assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT, fs.getDefaultPort());
+-    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT, fs.getDefaultSecurePort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT, fs.getDefaultSecurePort());
+ 
+     URI fsUri = fs.getUri();
+     assertEquals(uri.getHost(), fsUri.getHost());
+     assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT, fsUri.getPort());
+     
+     assertEquals(
+-        "127.0.0.1:"+DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT,
++        "127.0.0.1:"+DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT,
+         fs.getCanonicalServiceName()
+     );
+   }
+@@ -317,14 +317,14 @@ public class TestHftpFileSystem {
+     HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
+ 
+     assertEquals(123, fs.getDefaultPort());
+-    assertEquals(456, fs.getDefaultSecurePort());
++    assertEquals(123, fs.getDefaultSecurePort());
+     
+     URI fsUri = fs.getUri();
+     assertEquals(uri.getHost(), fsUri.getHost());
+     assertEquals(123, fsUri.getPort());
+     
+     assertEquals(
+-        "127.0.0.1:456",
++        "127.0.0.1:123",
+         fs.getCanonicalServiceName()
+     );
+   }
+@@ -337,14 +337,14 @@ public class TestHftpFileSystem {
+     HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
+ 
+     assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT, fs.getDefaultPort());
+-    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT, fs.getDefaultSecurePort());
++    assertEquals(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT, fs.getDefaultSecurePort());
+ 
+     URI fsUri = fs.getUri();
+     assertEquals(uri.getHost(), fsUri.getHost());
+     assertEquals(uri.getPort(), fsUri.getPort());
+     
+     assertEquals(
+-        "127.0.0.1:"+DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT,
++        "127.0.0.1:"+DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT,
+         fs.getCanonicalServiceName()
+     );
+   }
+@@ -360,14 +360,14 @@ public class TestHftpFileSystem {
+     HftpFileSystem fs = (HftpFileSystem) FileSystem.get(uri, conf);
+ 
+     assertEquals(123, fs.getDefaultPort());
+-    assertEquals(456, fs.getDefaultSecurePort());
++    assertEquals(123, fs.getDefaultSecurePort());
+     
+     URI fsUri = fs.getUri();
+     assertEquals(uri.getHost(), fsUri.getHost());
+     assertEquals(789, fsUri.getPort());
+     
+     assertEquals(
+-        "127.0.0.1:456",
++        "127.0.0.1:123",
+         fs.getCanonicalServiceName()
+     );
+   }
+-- 
+1.7.0.4
+

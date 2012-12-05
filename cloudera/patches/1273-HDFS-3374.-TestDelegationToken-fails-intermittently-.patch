@@ -1,0 +1,87 @@
+From 6d003618ae45cb09b18fcdea8a0bc18329c2dab2 Mon Sep 17 00:00:00 2001
+From: Matthew J. Foley <mattf@apache.org>
+Date: Mon, 7 May 2012 05:46:53 +0000
+Subject: [PATCH 1273/1344] HDFS-3374. TestDelegationToken fails intermittently with a race condition. Contributed by Owen O'Malley.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1334876 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 139f41a1a6f4efa75ca6de5df0636b9b02bf0495)
+
+Author: Owen O'Malley
+Ref: CDH-4806
+---
+ .../AbstractDelegationTokenSecretManager.java      |   28 ++++++++++++--------
+ .../hadoop/hdfs/security/TestDelegationToken.java  |    5 +++
+ 2 files changed, 22 insertions(+), 11 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenSecretManager.java b/src/core/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenSecretManager.java
+index 112b3ed..5fbbf81 100644
+--- a/src/core/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenSecretManager.java
++++ b/src/core/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenSecretManager.java
+@@ -383,24 +383,30 @@ extends AbstractDelegationTokenIdentifier>
+         while (running) {
+           long now = System.currentTimeMillis();
+           if (lastMasterKeyUpdate + keyUpdateInterval < now) {
+-            try {
+-              rollMasterKey();
+-              lastMasterKeyUpdate = now;
+-            } catch (IOException e) {
+-              LOG.error("Master key updating failed. "
+-                  + StringUtils.stringifyException(e));
++            synchronized (AbstractDelegationTokenSecretManager.this) {
++              if (running) {
++                try {
++                  rollMasterKey();
++                  lastMasterKeyUpdate = now;
++                } catch (IOException e) {
++                  LOG.error("Master key updating failed. "
++                            + StringUtils.stringifyException(e));
++                }
++              }
+             }
+           }
+           if (lastTokenCacheCleanup + tokenRemoverScanInterval < now) {
+-            removeExpiredToken();
+-            lastTokenCacheCleanup = now;
++            synchronized (AbstractDelegationTokenSecretManager.this) {
++              if (running) {
++                removeExpiredToken();
++                lastTokenCacheCleanup = now;
++              }
++            }
+           }
+           try {
+             Thread.sleep(5000); // 5 seconds
+           } catch (InterruptedException ie) {
+-            LOG
+-            .error("InterruptedExcpetion recieved for ExpiredTokenRemover thread "
+-                + ie);
++            return;
+           }
+         }
+       } catch (Throwable t) {
+diff --git a/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java b/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java
+index 44bf34a..22f9186 100644
+--- a/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java
++++ b/src/test/org/apache/hadoop/hdfs/security/TestDelegationToken.java
+@@ -69,13 +69,18 @@ public class TestDelegationToken {
+     cluster.waitActive();
+     cluster.getNameNode().getNamesystem().getDelegationTokenSecretManager()
+ 				.startThreads();
++    LOG.info("cluster up and running");
+   }
+ 
+   @After
+   public void tearDown() throws Exception {
++    LOG.info("starting shutting down the cluster");
+     if(cluster!=null) {
++      cluster.getNameNode().getNamesystem().getDelegationTokenSecretManager()
++             .stopThreads();
+       cluster.shutdown();
+     }
++    LOG.info("finished shutting down the cluster");
+   }
+ 
+   private Token<DelegationTokenIdentifier> generateDelegationToken(
+-- 
+1.7.0.4
+

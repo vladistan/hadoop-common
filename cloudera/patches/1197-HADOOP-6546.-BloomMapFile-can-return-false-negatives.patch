@@ -1,0 +1,111 @@
+From ef7e9d0a14408b6f2587ff098631aa37603027c2 Mon Sep 17 00:00:00 2001
+From: Thomas White <tomwhite@apache.org>
+Date: Fri, 19 Mar 2010 23:19:13 +0000
+Subject: [PATCH 1197/1344] HADOOP-6546. BloomMapFile can return false negatives. Contributed by Clark Jefcoat.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/trunk@925479 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 2b41afed6b698161ae2ee3109159034618669cda)
+---
+ src/core/org/apache/hadoop/io/BloomMapFile.java    |   14 ++++++-
+ .../org/apache/hadoop/io/TestBloomMapFile.java     |   41 ++++++++++++++++++++
+ 2 files changed, 53 insertions(+), 2 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/io/BloomMapFile.java b/src/core/org/apache/hadoop/io/BloomMapFile.java
+index aa616a4..17c5e54 100644
+--- a/src/core/org/apache/hadoop/io/BloomMapFile.java
++++ b/src/core/org/apache/hadoop/io/BloomMapFile.java
+@@ -58,6 +58,16 @@ public class BloomMapFile {
+     fs.delete(bloom, true);
+     fs.delete(dir, true);
+   }
++
++  private static byte[] byteArrayForBloomKey(DataOutputBuffer buf) {
++    int cleanLength = buf.getLength();
++    byte [] ba = buf.getData();
++    if (cleanLength != ba.length) {
++      ba = new byte[cleanLength];
++      System.arraycopy(buf.getData(), 0, ba, 0, cleanLength);
++    }
++    return ba;
++  }
+   
+   public static class Writer extends MapFile.Writer {
+     private DynamicBloomFilter bloomFilter;
+@@ -163,7 +173,7 @@ public class BloomMapFile {
+       super.append(key, val);
+       buf.reset();
+       key.write(buf);
+-      bloomKey.set(buf.getData(), 1.0);
++      bloomKey.set(byteArrayForBloomKey(buf), 1.0);
+       bloomFilter.add(bloomKey);
+     }
+ 
+@@ -228,7 +238,7 @@ public class BloomMapFile {
+       }
+       buf.reset();
+       key.write(buf);
+-      bloomKey.set(buf.getData(), 1.0);
++      bloomKey.set(byteArrayForBloomKey(buf), 1.0);
+       return bloomFilter.membershipTest(bloomKey);
+     }
+     
+diff --git a/src/test/org/apache/hadoop/io/TestBloomMapFile.java b/src/test/org/apache/hadoop/io/TestBloomMapFile.java
+index 2a7d224..9cf0bbc 100644
+--- a/src/test/org/apache/hadoop/io/TestBloomMapFile.java
++++ b/src/test/org/apache/hadoop/io/TestBloomMapFile.java
+@@ -18,6 +18,10 @@
+ 
+ package org.apache.hadoop.io;
+ 
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
+@@ -67,4 +71,41 @@ public class TestBloomMapFile extends TestCase {
+     assertTrue(falsePos < 2);
+   }
+ 
++  private void checkMembershipVaryingSizedKeys(String name, List<Text> keys) throws Exception {
++    Path dirName = new Path(System.getProperty("test.build.data",".") +
++        name + ".bloommapfile"); 
++    FileSystem fs = FileSystem.getLocal(conf);
++    Path qualifiedDirName = fs.makeQualified(dirName);
++    BloomMapFile.Writer writer = new BloomMapFile.Writer(conf, fs,
++      qualifiedDirName.toString(), Text.class, NullWritable.class);
++    for (Text key : keys) {
++      writer.append(key, NullWritable.get());
++    }
++    writer.close();
++
++    // will check for membership in the opposite order of how keys were inserted
++    BloomMapFile.Reader reader = new BloomMapFile.Reader(fs,
++        qualifiedDirName.toString(), conf);
++    Collections.reverse(keys);
++    for (Text key : keys) {
++      assertTrue("False negative for existing key " + key, reader.probablyHasKey(key));
++    }
++    reader.close();
++    fs.delete(qualifiedDirName, true);
++  }
++
++  public void testMembershipVaryingSizedKeysTest1() throws Exception {
++    ArrayList<Text> list = new ArrayList<Text>();
++    list.add(new Text("A"));
++    list.add(new Text("BB"));
++    checkMembershipVaryingSizedKeys(getName(), list);
++  }
++
++  public void testMembershipVaryingSizedKeysTest2() throws Exception {
++    ArrayList<Text> list = new ArrayList<Text>();
++    list.add(new Text("AA"));
++    list.add(new Text("B"));
++    checkMembershipVaryingSizedKeys(getName(), list);
++  }
++
+ }
+-- 
+1.7.0.4
+

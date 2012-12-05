@@ -1,0 +1,517 @@
+From 438152247f7eaaede6c676a3125b735487a4c366 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Wed, 6 Jun 2012 22:23:10 -0700
+Subject: [PATCH 1185/1344] HDFS-1457. Limit transmission rate when transfering image between primary and secondary NNs.
+
+Add a configuration option to limit the transfer rate when sending the
+image and edits to avoid network congestion. Also tracked in HDFS-3515.
+
+Reason: Fix client failures accessing the NN when checkpointing large images
+Author: Hairong Kuang, Eli Collins
+Ref: CDH-6036
+---
+ src/hdfs/hdfs-default.xml                          |   10 ++
+ src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java |    4 +
+ .../hadoop/hdfs/server/datanode/BlockReceiver.java |    5 +-
+ .../hadoop/hdfs/server/datanode/BlockSender.java   |    5 +-
+ .../server/datanode/BlockTransferThrottler.java    |  111 --------------------
+ .../hdfs/server/datanode/DataBlockScanner.java     |    5 +-
+ .../hdfs/server/datanode/DataXceiverServer.java    |    3 +-
+ .../hdfs/server/namenode/GetImageServlet.java      |   21 ++++-
+ .../hdfs/server/namenode/TransferFsImage.java      |    7 +-
+ .../hadoop/hdfs/util/DataTransferThrottler.java    |  111 ++++++++++++++++++++
+ .../hdfs/server/datanode/TestBlockReplacement.java |    5 +-
+ 11 files changed, 164 insertions(+), 123 deletions(-)
+ delete mode 100644 src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockTransferThrottler.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/util/DataTransferThrottler.java
+
+diff --git a/src/hdfs/hdfs-default.xml b/src/hdfs/hdfs-default.xml
+index f56bc80..eb20ff1 100644
+--- a/src/hdfs/hdfs-default.xml
++++ b/src/hdfs/hdfs-default.xml
+@@ -502,4 +502,14 @@ creations/deletions), or "all".</description>
+   </description>
+ </property>
+ 
++<property>
++  <name>dfs.image.transfer.bandwidthPerSec</name>
++  <value>0</value>
++  <description>
++    Specifies the maximum amount of bandwidth that can be utilized for
++    image transfer in term of the number of bytes per second. A default
++    value of 0 indicates that throttling is disabled.
++  </description>
++</property>
++
+ </configuration>
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+index 4470863..c2760df 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+@@ -213,6 +213,10 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
+   public static final String  DFS_CLIENT_READ_SHORTCIRCUIT_SKIP_CHECKSUM_KEY = "dfs.client.read.shortcircuit.skip.checksum";
+   public static final boolean DFS_CLIENT_READ_SHORTCIRCUIT_SKIP_CHECKSUM_DEFAULT = false;
+ 
++  public static final String DFS_IMAGE_TRANSFER_RATE_KEY =
++                                           "dfs.image.transfer.bandwidthPerSec";
++  public static final long DFS_IMAGE_TRANSFER_RATE_DEFAULT = 0;  //no throttling
++
+   //Keys with no defaults
+   public static final String  DFS_DATANODE_PLUGINS_KEY = "dfs.datanode.plugins";
+   public static final String  DFS_DATANODE_SOCKET_WRITE_TIMEOUT_KEY = "dfs.datanode.socket.write.timeout";
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockReceiver.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockReceiver.java
+index b848ed1..ee86872 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockReceiver.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockReceiver.java
+@@ -38,6 +38,7 @@ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.FSConstants;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+ import org.apache.hadoop.hdfs.protocol.DataTransferProtocol.PipelineAck;
++import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.io.nativeio.NativeIO;
+ import org.apache.hadoop.util.Daemon;
+@@ -74,7 +75,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
+   private String mirrorAddr;
+   private DataOutputStream mirrorOut;
+   private Daemon responder = null;
+-  private BlockTransferThrottler throttler;
++  private DataTransferThrottler throttler;
+   private FSDataset.BlockWriteStreams streams;
+   private boolean isRecovery = false;
+   private String clientName;
+@@ -551,7 +552,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
+       DataOutputStream mirrOut, // output to next datanode
+       DataInputStream mirrIn,   // input from next datanode
+       DataOutputStream replyOut,  // output to previous datanode
+-      String mirrAddr, BlockTransferThrottler throttlerArg,
++      String mirrAddr, DataTransferThrottler throttlerArg,
+       int numTargets) throws IOException {
+ 
+       mirrorOut = mirrOut;
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockSender.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockSender.java
+index bda246c..df796c1 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockSender.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockSender.java
+@@ -34,6 +34,7 @@ import org.apache.commons.logging.Log;
+ import org.apache.hadoop.fs.ChecksumException;
+ import org.apache.hadoop.hdfs.protocol.Block;
+ import org.apache.hadoop.hdfs.protocol.FSConstants;
++import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.io.ReadaheadPool;
+ import org.apache.hadoop.io.ReadaheadPool.ReadaheadRequest;
+@@ -70,7 +71,7 @@ class BlockSender implements java.io.Closeable, FSConstants {
+   private boolean sentEntireByteRange;
+   private boolean blockReadFully; // set if the entire block was read
+   private boolean verifyChecksum; //if true, check is verified while reading
+-  private BlockTransferThrottler throttler;
++  private DataTransferThrottler throttler;
+   private final String clientTraceFmt; // format of client trace log message
+   private final MemoizedBlock memoizedBlock;
+   private FileDescriptor blockInFd;
+@@ -428,7 +429,7 @@ class BlockSender implements java.io.Closeable, FSConstants {
+    * @return total bytes reads, including crc.
+    */
+   long sendBlock(DataOutputStream out, OutputStream baseStream, 
+-                 BlockTransferThrottler throttler) throws IOException {
++                 DataTransferThrottler throttler) throws IOException {
+     if( out == null ) {
+       throw new IOException( "out stream is null" );
+     }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockTransferThrottler.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockTransferThrottler.java
+deleted file mode 100644
+index fd99b31..0000000
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockTransferThrottler.java
++++ /dev/null
+@@ -1,111 +0,0 @@
+-/**
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package org.apache.hadoop.hdfs.server.datanode;
+-
+-/** 
+- * a class to throttle the block transfers.
+- * This class is thread safe. It can be shared by multiple threads.
+- * The parameter bandwidthPerSec specifies the total bandwidth shared by
+- * threads.
+- */
+-class BlockTransferThrottler {
+-  private long period;          // period over which bw is imposed
+-  private long periodExtension; // Max period over which bw accumulates.
+-  private long bytesPerPeriod; // total number of bytes can be sent in each period
+-  private long curPeriodStart; // current period starting time
+-  private long curReserve;     // remaining bytes can be sent in the period
+-  private long bytesAlreadyUsed;
+-
+-  /** Constructor 
+-   * @param bandwidthPerSec bandwidth allowed in bytes per second. 
+-   */
+-  BlockTransferThrottler(long bandwidthPerSec) {
+-    this(500, bandwidthPerSec);  // by default throttling period is 500ms 
+-  }
+-
+-  /**
+-   * Constructor
+-   * @param period in milliseconds. Bandwidth is enforced over this
+-   *        period.
+-   * @param bandwidthPerSec bandwidth allowed in bytes per second. 
+-   */
+-  BlockTransferThrottler(long period, long bandwidthPerSec) {
+-    this.curPeriodStart = System.currentTimeMillis();
+-    this.period = period;
+-    this.curReserve = this.bytesPerPeriod = bandwidthPerSec*period/1000;
+-    this.periodExtension = period*3;
+-  }
+-
+-  /**
+-   * @return current throttle bandwidth in bytes per second.
+-   */
+-  synchronized long getBandwidth() {
+-    return bytesPerPeriod*1000/period;
+-  }
+-  
+-  /**
+-   * Sets throttle bandwidth. This takes affect latest by the end of current
+-   * period.
+-   * 
+-   * @param bytesPerSecond 
+-   */
+-  synchronized void setBandwidth(long bytesPerSecond) {
+-    if ( bytesPerSecond <= 0 ) {
+-      throw new IllegalArgumentException("" + bytesPerSecond);
+-    }
+-    bytesPerPeriod = bytesPerSecond*period/1000;
+-  }
+-  
+-  /** Given the numOfBytes sent/received since last time throttle was called,
+-   * make the current thread sleep if I/O rate is too fast
+-   * compared to the given bandwidth.
+-   *
+-   * @param numOfBytes
+-   *     number of bytes sent/received since last time throttle was called
+-   */
+-  synchronized void throttle(long numOfBytes) {
+-    if ( numOfBytes <= 0 ) {
+-      return;
+-    }
+-
+-    curReserve -= numOfBytes;
+-    bytesAlreadyUsed += numOfBytes;
+-
+-    while (curReserve <= 0) {
+-      long now = System.currentTimeMillis();
+-      long curPeriodEnd = curPeriodStart + period;
+-
+-      if ( now < curPeriodEnd ) {
+-        // Wait for next period so that curReserve can be increased.
+-        try {
+-          wait( curPeriodEnd - now );
+-        } catch (InterruptedException ignored) {}
+-      } else if ( now <  (curPeriodStart + periodExtension)) {
+-        curPeriodStart = curPeriodEnd;
+-        curReserve += bytesPerPeriod;
+-      } else {
+-        // discard the prev period. Throttler might not have
+-        // been used for a long time.
+-        curPeriodStart = now;
+-        curReserve = bytesPerPeriod - bytesAlreadyUsed;
+-      }
+-    }
+-
+-    bytesAlreadyUsed -= numOfBytes;
+-  }
+-}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataBlockScanner.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataBlockScanner.java
+index e576273..a998ae8 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataBlockScanner.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataBlockScanner.java
+@@ -49,6 +49,7 @@ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.hdfs.protocol.Block;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.util.StringUtils;
+ 
+@@ -94,7 +95,7 @@ class DataBlockScanner implements Runnable {
+   
+   Random random = new Random();
+   
+-  BlockTransferThrottler throttler = null;
++  DataTransferThrottler throttler = null;
+   
+   private static enum ScanType {
+     REMOTE_READ,           // Verified when a block read by a client etc
+@@ -238,7 +239,7 @@ class DataBlockScanner implements Runnable {
+     }
+     
+     synchronized (this) {
+-      throttler = new BlockTransferThrottler(200, MAX_SCAN_RATE);
++      throttler = new DataTransferThrottler(200, MAX_SCAN_RATE);
+     }
+   }
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataXceiverServer.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataXceiverServer.java
+index 8af7acc..0ff2afa 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataXceiverServer.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataXceiverServer.java
+@@ -30,6 +30,7 @@ import org.apache.commons.logging.Log;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.hdfs.protocol.FSConstants;
+ import org.apache.hadoop.hdfs.server.balancer.Balancer;
++import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+ import org.apache.hadoop.util.StringUtils;
+ 
+ /**
+@@ -61,7 +62,7 @@ class DataXceiverServer implements Runnable, FSConstants {
+    * It limits the number of block moves for balancing and
+    * the total amount of bandwidth they can use.
+    */
+-  static class BlockBalanceThrottler extends BlockTransferThrottler {
++  static class BlockBalanceThrottler extends DataTransferThrottler {
+    private int numThreads;
+    
+    /**Constructor
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java
+index 294fd3b..8a78af1 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java
+@@ -38,6 +38,7 @@ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.io.MD5Hash;
++import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.util.StringUtils;
+ 
+@@ -84,13 +85,13 @@ public class GetImageServlet extends HttpServlet {
+               String.valueOf(nnImage.getFsImageName().length()));
+             // send fsImage
+             TransferFsImage.getFileServer(response.getOutputStream(),
+-                                          nnImage.getFsImageName()); 
++                nnImage.getFsImageName(), getThrottler(conf)); 
+           } else if (ff.getEdit()) {
+             response.setHeader(TransferFsImage.CONTENT_LENGTH,
+               String.valueOf(nnImage.getFsEditName().length()));
+             // send edits
+             TransferFsImage.getFileServer(response.getOutputStream(),
+-                                          nnImage.getFsEditName());
++                nnImage.getFsEditName(), getThrottler(conf));
+           } else if (ff.putImage()) {
+             synchronized (fsImageTransferLock) {
+               final MD5Hash expectedChecksum = ff.getNewChecksum();
+@@ -138,6 +139,22 @@ public class GetImageServlet extends HttpServlet {
+       response.getOutputStream().close();
+     }
+   }
++
++  /**
++   * Construct a throttler from conf
++   * @param conf configuration
++   * @return a data transfer throttler
++   */
++  private final DataTransferThrottler getThrottler(Configuration conf) {
++    long transferBandwidth = 
++      conf.getLong(DFSConfigKeys.DFS_IMAGE_TRANSFER_RATE_KEY,
++                   DFSConfigKeys.DFS_IMAGE_TRANSFER_RATE_DEFAULT);
++    DataTransferThrottler throttler = null;
++    if (transferBandwidth > 0) {
++      throttler = new DataTransferThrottler(transferBandwidth);
++    }
++    return throttler;
++  }
+   
+   private boolean isValidRequestor(String remoteUser, Configuration conf)
+       throws IOException {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
+index 0e1a300..16215c1 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
+@@ -31,6 +31,7 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.hdfs.protocol.FSConstants;
+ import org.apache.hadoop.security.SecurityUtil;
++import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+ import org.apache.hadoop.hdfs.server.namenode.SecondaryNameNode.ErrorSimulator;
+ import org.apache.hadoop.io.MD5Hash;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -129,7 +130,8 @@ class TransferFsImage implements FSConstants {
+    * A server-side method to respond to a getfile http request
+    * Copies the contents of the local file into the output stream.
+    */
+-  static void getFileServer(OutputStream outstream, File localfile) 
++  static void getFileServer(OutputStream outstream, File localfile,
++      DataTransferThrottler throttler) 
+     throws IOException {
+     byte buf[] = new byte[BUFFER_SIZE];
+     FileInputStream infile = null;
+@@ -158,6 +160,9 @@ class TransferFsImage implements FSConstants {
+           break;
+         }
+         outstream.write(buf, 0, num);
++        if (throttler != null) {
++          throttler.throttle(num);
++        }
+       }
+     } finally {
+       if (infile != null) {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/util/DataTransferThrottler.java b/src/hdfs/org/apache/hadoop/hdfs/util/DataTransferThrottler.java
+new file mode 100644
+index 0000000..8ef5701
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/util/DataTransferThrottler.java
+@@ -0,0 +1,111 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.util;
++
++/** 
++ * a class to throttle the data transfers.
++ * This class is thread safe. It can be shared by multiple threads.
++ * The parameter bandwidthPerSec specifies the total bandwidth shared by
++ * threads.
++ */
++public class DataTransferThrottler {
++  private long period;          // period over which bw is imposed
++  private long periodExtension; // Max period over which bw accumulates.
++  private long bytesPerPeriod; // total number of bytes can be sent in each period
++  private long curPeriodStart; // current period starting time
++  private long curReserve;     // remaining bytes can be sent in the period
++  private long bytesAlreadyUsed;
++
++  /** Constructor 
++   * @param bandwidthPerSec bandwidth allowed in bytes per second. 
++   */
++  public DataTransferThrottler(long bandwidthPerSec) {
++    this(500, bandwidthPerSec);  // by default throttling period is 500ms 
++  }
++
++  /**
++   * Constructor
++   * @param period in milliseconds. Bandwidth is enforced over this
++   *        period.
++   * @param bandwidthPerSec bandwidth allowed in bytes per second. 
++   */
++  public DataTransferThrottler(long period, long bandwidthPerSec) {
++    this.curPeriodStart = System.currentTimeMillis();
++    this.period = period;
++    this.curReserve = this.bytesPerPeriod = bandwidthPerSec*period/1000;
++    this.periodExtension = period*3;
++  }
++
++  /**
++   * @return current throttle bandwidth in bytes per second.
++   */
++  public synchronized long getBandwidth() {
++    return bytesPerPeriod*1000/period;
++  }
++  
++  /**
++   * Sets throttle bandwidth. This takes affect latest by the end of current
++   * period.
++   * 
++   * @param bytesPerSecond 
++   */
++  public synchronized void setBandwidth(long bytesPerSecond) {
++    if ( bytesPerSecond <= 0 ) {
++      throw new IllegalArgumentException("" + bytesPerSecond);
++    }
++    bytesPerPeriod = bytesPerSecond*period/1000;
++  }
++  
++  /** Given the numOfBytes sent/received since last time throttle was called,
++   * make the current thread sleep if I/O rate is too fast
++   * compared to the given bandwidth.
++   *
++   * @param numOfBytes
++   *     number of bytes sent/received since last time throttle was called
++   */
++  public synchronized void throttle(long numOfBytes) {
++    if ( numOfBytes <= 0 ) {
++      return;
++    }
++
++    curReserve -= numOfBytes;
++    bytesAlreadyUsed += numOfBytes;
++
++    while (curReserve <= 0) {
++      long now = System.currentTimeMillis();
++      long curPeriodEnd = curPeriodStart + period;
++
++      if ( now < curPeriodEnd ) {
++        // Wait for next period so that curReserve can be increased.
++        try {
++          wait( curPeriodEnd - now );
++        } catch (InterruptedException ignored) {}
++      } else if ( now <  (curPeriodStart + periodExtension)) {
++        curPeriodStart = curPeriodEnd;
++        curReserve += bytesPerPeriod;
++      } else {
++        // discard the prev period. Throttler might not have
++        // been used for a long time.
++        curPeriodStart = now;
++        curReserve = bytesPerPeriod - bytesAlreadyUsed;
++      }
++    }
++
++    bytesAlreadyUsed -= numOfBytes;
++  }
++}
+diff --git a/src/test/org/apache/hadoop/hdfs/server/datanode/TestBlockReplacement.java b/src/test/org/apache/hadoop/hdfs/server/datanode/TestBlockReplacement.java
+index 6409a4e..a8b2282 100644
+--- a/src/test/org/apache/hadoop/hdfs/server/datanode/TestBlockReplacement.java
++++ b/src/test/org/apache/hadoop/hdfs/server/datanode/TestBlockReplacement.java
+@@ -45,9 +45,10 @@ import org.apache.hadoop.hdfs.protocol.FSConstants.DatanodeReportType;
+ import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
+ import org.apache.hadoop.hdfs.server.common.HdfsConstants;
+ import org.apache.hadoop.hdfs.server.common.Util;
+-import org.apache.hadoop.hdfs.server.datanode.BlockTransferThrottler;
++import org.apache.hadoop.hdfs.util.DataTransferThrottler;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.net.NetUtils;
++
+ /**
+  * This class tests if block replacement request to data nodes work correctly.
+  */
+@@ -63,7 +64,7 @@ public class TestBlockReplacement extends TestCase {
+     final long TOTAL_BYTES =6*bandwidthPerSec; 
+     long bytesToSend = TOTAL_BYTES; 
+     long start = Util.now();
+-    BlockTransferThrottler throttler = new BlockTransferThrottler(bandwidthPerSec);
++    DataTransferThrottler throttler = new DataTransferThrottler(bandwidthPerSec);
+     long totalBytes = 0L;
+     long bytesSent = 1024*512L; // 0.5MB
+     throttler.throttle(bytesSent);
+-- 
+1.7.0.4
+

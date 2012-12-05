@@ -1,0 +1,113 @@
+From 80481c0b4ae536bd5a5db8a99b732afe4012e4a1 Mon Sep 17 00:00:00 2001
+From: Jitendra Nath Pandey <jitendra@apache.org>
+Date: Wed, 21 Sep 2011 20:44:53 +0000
+Subject: [PATCH 1223/1344] HADOOP-7661. FileSystem.getCanonicalServiceName throws NPE for any file system uri that doesn't have an authority.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1173843 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 3fd63d07725aa52f2d0afb521cc24dd5410a761d)
+
+Author: Jitendra Pandey
+Ref: CDH-4806
+---
+ src/core/org/apache/hadoop/fs/FileSystem.java      |    9 ++++++---
+ .../org/apache/hadoop/fs/FilterFileSystem.java     |    6 ++++++
+ .../apache/hadoop/hdfs/DistributedFileSystem.java  |    6 ++++++
+ .../org/apache/hadoop/fs/TestLocalFileSystem.java  |    7 +++++++
+ 4 files changed, 25 insertions(+), 3 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/fs/FileSystem.java b/src/core/org/apache/hadoop/fs/FileSystem.java
+index 6d549db..00ba298 100644
+--- a/src/core/org/apache/hadoop/fs/FileSystem.java
++++ b/src/core/org/apache/hadoop/fs/FileSystem.java
+@@ -169,11 +169,14 @@ public abstract class FileSystem extends Configured implements Closeable {
+   }
+ 
+   /**
+-   * Get a canonical name for this file system.
+-   * @return a URI string that uniquely identifies this file system
++   * Get a canonical name for this file system. It returns the uri of the file
++   * system unless overridden by a FileSystem implementation. File Systems with
++   * a valid authority can choose to return host:port or ip:port.
++   * 
++   * @return A string that uniquely identifies this file system
+    */
+   public String getCanonicalServiceName() {
+-    return SecurityUtil.buildDTServiceName(getUri(), getDefaultPort());
++    return getUri().toString();
+   }
+   
+   /** @deprecated call #getUri() instead.*/
+diff --git a/src/core/org/apache/hadoop/fs/FilterFileSystem.java b/src/core/org/apache/hadoop/fs/FilterFileSystem.java
+index 5509b4e..5a12246 100644
+--- a/src/core/org/apache/hadoop/fs/FilterFileSystem.java
++++ b/src/core/org/apache/hadoop/fs/FilterFileSystem.java
+@@ -23,6 +23,7 @@ import java.net.URI;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.util.Progressable;
+ 
+ /****************************************************************
+@@ -68,6 +69,11 @@ public class FilterFileSystem extends FileSystem {
+   public URI getUri() {
+     return fs.getUri();
+   }
++  
++  @Override
++  public String getCanonicalServiceName() {
++    return fs.getCanonicalServiceName();
++  }
+ 
+   /** @deprecated call #getUri() instead.*/
+   public String getName() {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+index 5afc102..dcdbd92 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+@@ -39,6 +39,7 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.DFSClient.DFSOutputStream;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.security.AccessControlException;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.SecretManager.InvalidToken;
+ import org.apache.hadoop.util.Progressable;
+@@ -65,6 +66,11 @@ public class DistributedFileSystem extends FileSystem {
+   public DistributedFileSystem() {
+   }
+ 
++  @Override
++  public String getCanonicalServiceName() {
++    return SecurityUtil.buildDTServiceName(getUri(), getDefaultPort());
++  }
++  
+   /** @deprecated */
+   public DistributedFileSystem(InetSocketAddress namenode,
+     Configuration conf) throws IOException {
+diff --git a/src/test/org/apache/hadoop/fs/TestLocalFileSystem.java b/src/test/org/apache/hadoop/fs/TestLocalFileSystem.java
+index b244b9b..c5fd3e8 100644
+--- a/src/test/org/apache/hadoop/fs/TestLocalFileSystem.java
++++ b/src/test/org/apache/hadoop/fs/TestLocalFileSystem.java
+@@ -19,6 +19,7 @@ package org.apache.hadoop.fs;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import java.io.*;
++
+ import junit.framework.*;
+ 
+ /**
+@@ -153,4 +154,10 @@ public class TestLocalFileSystem extends TestCase {
+     assertEquals(path.makeQualified(fs), status.getPath());
+     cleanupFile(fs, path);
+   }
++  
++  public void testGetCanonicalServiceName() throws IOException {
++    Configuration conf = new Configuration();
++    FileSystem fs = FileSystem.getLocal(conf);
++    assertEquals(fs.getUri().toString(), fs.getCanonicalServiceName());
++  }
+ }
+-- 
+1.7.0.4
+

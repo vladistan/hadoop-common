@@ -1,0 +1,47 @@
+From 561152e2507c8fc42b8e0edb9b360d6e3521b67b Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Tue, 3 Apr 2012 19:56:05 +0000
+Subject: [PATCH 1270/1344] HDFS-3176. Use MD5MD5CRC32FileChecksum.readFields() in JsonUtil .  Contributed by Kihwal Lee
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1309119 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 4588e1dfab60b314db1c5e612830cb6404e1c8b5)
+
+Author: Kihwal Lee
+Ref: CDH-4806
+---
+ src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java |   19 +++++++------------
+ 1 files changed, 7 insertions(+), 12 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+index e2abb7b..b19c879 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+@@ -444,18 +444,13 @@ public class JsonUtil {
+     final byte[] bytes = StringUtils.hexStringToByte((String)m.get("bytes"));
+ 
+     final DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes));
+-    final int bytesPerCRC = in.readInt();
+-    final long crcPerBlock = in.readLong();
+-    final MD5Hash md5 = MD5Hash.read(in);
+-    final MD5MD5CRC32FileChecksum checksum = new MD5MD5CRC32FileChecksum(
+-        bytesPerCRC, crcPerBlock, md5);
+-
+-    //check algorithm name
+-    final String alg = "MD5-of-" + crcPerBlock + "MD5-of-" + bytesPerCRC + "CRC32";
+-    if (!alg.equals(algorithm)) {
+-      throw new IOException("Algorithm not matched: algorithm=" + algorithm
+-          + ", crcPerBlock=" + crcPerBlock
+-          + ", bytesPerCRC=" + bytesPerCRC);
++    final MD5MD5CRC32FileChecksum checksum = new MD5MD5CRC32FileChecksum();
++    checksum.readFields(in);
++ 
++     //check algorithm name
++    if (!checksum.getAlgorithmName().equals(algorithm)) {
++      throw new IOException("Algorithm not matched. Expected " + algorithm
++          + ", Received " + checksum.getAlgorithmName());
+     }
+     //check length
+     if (length != checksum.getLength()) {
+-- 
+1.7.0.4
+

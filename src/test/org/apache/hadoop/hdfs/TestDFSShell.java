@@ -31,10 +31,13 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.Scanner;
+import java.util.zip.DeflaterOutputStream;
 import java.util.zip.GZIPOutputStream;
 
 import junit.framework.TestCase;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSInputChecker;
 import org.apache.hadoop.fs.FileSystem;
@@ -46,7 +49,13 @@ import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.FSDataset;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.io.SequenceFile;
+import org.apache.hadoop.io.SequenceFile.CompressionType;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.compress.BZip2Codec;
+import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ToolRunner;
 
@@ -54,6 +63,8 @@ import org.apache.hadoop.util.ToolRunner;
  * This class tests commands from DFSShell.
  */
 public class TestDFSShell extends TestCase {
+  private static final Log LOG = LogFactory.getLog(TestDFSShell.class);
+  
   static final String TEST_ROOT_DIR =
     new Path(System.getProperty("test.build.data","/tmp"))
     .toString().replace(' ', '+');
@@ -544,6 +555,8 @@ public class TestDFSShell extends TestCase {
       FileSystem fs = cluster.getFileSystem();
       Path root = new Path("/texttest");
       fs.mkdirs(root);
+      
+      // Test the gzip type of files. Magic Detection.
       OutputStream zout = new GZIPOutputStream(
           fs.create(new Path(root, "file.gz")));
       Random r = new Random();
@@ -563,12 +576,71 @@ public class TestDFSShell extends TestCase {
       argv[0] = "-text";
       argv[1] = new Path(root, "file.gz").toUri().getPath();
       int ret = ToolRunner.run(new FsShell(), argv);
-      assertTrue("-text returned -1", 0 >= ret);
       file.reset();
       out.reset();
+      assertTrue("-text returned -1", 0 >= ret);
       assertTrue("Output doesn't match input",
           Arrays.equals(file.toByteArray(), out.toByteArray()));
 
+      // Create a sequence file with a gz extension, to test proper
+      // container detection, magic detection
+      SequenceFile.Writer writer = SequenceFile.createWriter(
+          fs,
+          conf,
+          new Path(root, "file.gz"),
+          Text.class,
+          Text.class);
+      writer.append(new Text("Foo"), new Text("Bar"));
+      writer.close();
+      out = new ByteArrayOutputStream();
+      System.setOut(new PrintStream(out));
+      argv = new String[2];
+      argv[0] = "-text";
+      argv[1] = new Path(root, "file.gz").toUri().getPath();
+      ret = ToolRunner.run(new FsShell(conf), argv);
+      assertEquals("'-text " + argv[1] + " returned " + ret, 0, ret);
+      assertTrue("Output doesn't match input",
+        Arrays.equals("Foo\tBar\n".getBytes(), out.toByteArray()));
+      out.reset();
+      
+      // Test deflate. Extension-based detection.
+      OutputStream dout = new DeflaterOutputStream(fs.create(new Path(root,
+          "file.deflate")));
+      byte[] outbytes = "foo".getBytes();
+      dout.write(outbytes);
+      dout.close();
+      out = new ByteArrayOutputStream();
+      System.setOut(new PrintStream(out));
+      argv = new String[2];
+      argv[0] = "-text";
+      argv[1] = new Path(root, "file.deflate").toString();
+      ret = ToolRunner.run(new FsShell(conf), argv);
+      assertEquals("'-text " + argv[1] + " returned " + ret, 0, ret);
+      assertTrue("Output doesn't match input",
+          Arrays.equals(outbytes, out.toByteArray()));
+      out.reset();
+
+      // Test a simple codec. Extension based detection. We use
+      // Bzip2 cause its non-native.
+      CompressionCodec codec = (CompressionCodec) ReflectionUtils.newInstance(
+          BZip2Codec.class, conf);
+      String extension = codec.getDefaultExtension();
+      Path p = new Path(root, "file." + extension);
+      OutputStream fout = new DataOutputStream(codec.createOutputStream(fs
+          .create(p, true)));
+      byte[] writebytes = "foo".getBytes();
+      fout.write(writebytes);
+      fout.close();
+      out = new ByteArrayOutputStream();
+      System.setOut(new PrintStream(out));
+      argv = new String[2];
+      argv[0] = "-text";
+      argv[1] = new Path(root, p).toString();
+      ret = ToolRunner.run(new FsShell(conf), argv);
+      assertEquals("'-text " + argv[1] + " returned " + ret, 0, ret);
+      assertTrue("Output doesn't match input",
+          Arrays.equals(writebytes, out.toByteArray()));
+      out.reset();
     } finally {
       if (null != bak) {
         System.setOut(bak);
@@ -762,18 +834,15 @@ public class TestDFSShell extends TestCase {
      fs.delete(dir, true);
      fs.mkdirs(dir);
 
-     runCmd(shell, "-chmod", "u+rwx,g=rw,o-rwx", chmodDir);
-     assertEquals("rwxrw----",
-                  fs.getFileStatus(dir).getPermission().toString());
-
+     confirmPermissionChange(/* Setting */ "u+rwx,g=rw,o-rwx",
+                             /* Should give */ "rwxrw----", fs, shell, dir);
+     
      //create an empty file
      Path file = new Path(chmodDir, "file");
      TestDFSShell.writeFile(fs, file);
 
      //test octal mode
-     runCmd(shell, "-chmod", "644", file.toString());
-     assertEquals("rw-r--r--",
-                  fs.getFileStatus(file).getPermission().toString());
+     confirmPermissionChange( "644", "rw-r--r--", fs, shell, file);
 
      //test recursive
      runCmd(shell, "-chmod", "-R", "a+rwX", chmodDir);
@@ -781,8 +850,31 @@ public class TestDFSShell extends TestCase {
                   fs.getFileStatus(dir).getPermission().toString()); 
      assertEquals("rw-rw-rw-",
                   fs.getFileStatus(file).getPermission().toString());
+
+     // test sticky bit on directories
+     Path dir2 = new Path(dir, "stickybit" );
+     fs.mkdirs(dir2 );
+     LOG.info("Testing sticky bit on: " + dir2);
+     LOG.info("Sticky bit directory initial mode: " + 
+                   fs.getFileStatus(dir2).getPermission());
      
-     fs.delete(dir, true);     
+     confirmPermissionChange("u=rwx,g=rx,o=rx", "rwxr-xr-x", fs, shell, dir2);
+     
+     confirmPermissionChange("+t", "rwxr-xr-t", fs, shell, dir2);
+
+     confirmPermissionChange("-t", "rwxr-xr-x", fs, shell, dir2);
+
+     confirmPermissionChange("=t", "--------T", fs, shell, dir2);
+
+     confirmPermissionChange("0000", "---------", fs, shell, dir2);
+
+     confirmPermissionChange("1666", "rw-rw-rwT", fs, shell, dir2);
+
+     confirmPermissionChange("777", "rwxrwxrwt", fs, shell, dir2);
+     
+     fs.delete(dir2, true);
+     fs.delete(dir, true);
+     
     } finally {
       try {
         fs.close();
@@ -790,7 +882,20 @@ public class TestDFSShell extends TestCase {
       } catch (IOException ignored) {}
     }
   }
-  
+
+  // Apply a new permission to a path and confirm that the new permission
+  // is the one you were expecting
+  private void confirmPermissionChange(String toApply, String expected,
+      FileSystem fs, FsShell shell, Path dir2) throws IOException {
+    LOG.info("Confirming permission change of " + toApply + " to " + expected);
+    runCmd(shell, "-chmod", toApply, dir2.toString());
+
+    String result = fs.getFileStatus(dir2).getPermission().toString();
+
+    LOG.info("Permission change result: " + result);
+    assertEquals(expected, result);
+  }
+   
   private void confirmOwner(String owner, String group, 
                             FileSystem fs, Path... paths) throws IOException {
     for(Path path : paths) {
@@ -824,7 +929,7 @@ public class TestDFSShell extends TestCase {
     shell.setConf(conf);
     fs = cluster.getFileSystem();
     
-    /* For dfs, I am the super user and I can change ower of any file to
+    /* For dfs, I am the super user and I can change owner of any file to
      * anything. "-R" option is already tested by chmod test above.
      */
     
@@ -1111,7 +1216,8 @@ public class TestDFSShell extends TestCase {
     }
   }
 
-  static List<File> getBlockFiles(MiniDFSCluster cluster) throws IOException {
+  static List<File> getBlockFiles(MiniDFSCluster cluster) 
+      throws IOException, InterruptedException {
     List<File> files = new ArrayList<File>();
     List<DataNode> datanodes = cluster.getDataNodes();
     Block[][] blocks = cluster.getAllBlockReports();
@@ -1182,7 +1288,7 @@ public class TestDFSShell extends TestCase {
     }
   }
   
-  public void testGet() throws IOException {
+  public void testGet() throws IOException, InterruptedException {
     DFSTestUtil.setLogLevel2All(FSInputChecker.LOG);
     final Configuration conf = new Configuration();
     MiniDFSCluster cluster = new MiniDFSCluster(conf, 2, true, null);

@@ -1,0 +1,72 @@
+From 4870b57fea68e99f35208be6dcc7bd8f8dd00126 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Fri, 16 Mar 2012 00:08:24 +0000
+Subject: [PATCH 1269/1344] HDFS-3101. Cannot read empty file using WebHDFS.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1301291 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 50ab216b51ef89759abfcef9219d8befe03dc095)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../web/resources/NamenodeWebHdfsMethods.java      |    8 +++++---
+ .../hdfs/web/TestWebHdfsFileSystemContract.java    |   17 +++++++++++++++--
+ 2 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index e016a9b..6916001 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -137,9 +137,11 @@ public class NamenodeWebHdfsMethods {
+         throw new FileNotFoundException("File " + path + " not found.");
+       }
+       final long len = status.getLen();
+-      if (op == GetOpParam.Op.OPEN && (openOffset < 0L || openOffset >= len)) {
+-        throw new IOException("Offset=" + openOffset + " out of the range [0, "
+-          + len + "); " + op + ", path=" + path);
++      if (op == GetOpParam.Op.OPEN) {
++        if (openOffset < 0L || (openOffset >= len && len > 0)) {
++          throw new IOException("Offset=" + openOffset
++              + " out of the range [0, " + len + "); " + op + ", path=" + path);
++        }
+       }
+ 
+       if (len > 0) {
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+index b0f5f9f..f4015af 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
++++ b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+@@ -198,7 +198,21 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+   }
+ 
+   public void testSeek() throws IOException {
+-    final Path p = new Path("/test/testSeek");
++    final Path dir = new Path("/test/testSeek");
++    assertTrue(fs.mkdirs(dir));
++
++    { //test zero file size
++      final Path zero = new Path(dir, "zero");
++      fs.create(zero).close();
++      
++      int count = 0;
++      final FSDataInputStream in = fs.open(zero);
++      for(; in.read() != -1; count++);
++      in.close();
++      assertEquals(0, count);
++    }
++
++    final Path p = new Path(dir, "file");
+     createFile(p);
+ 
+     final int one_third = data.length/3;
+@@ -269,7 +283,6 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+       final FSDataInputStream in = fs.open(root);
+       in.read();
+       fail();
+-      fail();
+     } catch(IOException e) {
+       WebHdfsFileSystem.LOG.info("This is expected.", e);
+     }
+-- 
+1.7.0.4
+

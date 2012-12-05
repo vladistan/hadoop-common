@@ -1,0 +1,44 @@
+From 8d5c849088fa2b219e7388004e3d31bc7ba184b0 Mon Sep 17 00:00:00 2001
+From: Suresh Srinivas <suresh@apache.org>
+Date: Thu, 13 Oct 2011 03:26:43 +0000
+Subject: [PATCH 1241/1344] HADOOP-7509. Improve exception message thrown when Authentication is required. Contributed by Ravi Prakash.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1182642 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 5b5541eefccba90771c91c3c497dd6f4c8a880f8)
+
+Author: Ravi Prakash
+Ref: CDH-4806
+---
+ src/core/org/apache/hadoop/ipc/Server.java |    9 +++++++--
+ 1 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/ipc/Server.java b/src/core/org/apache/hadoop/ipc/Server.java
+index fd73dfd..9daa175 100644
+--- a/src/core/org/apache/hadoop/ipc/Server.java
++++ b/src/core/org/apache/hadoop/ipc/Server.java
+@@ -61,6 +61,7 @@ import javax.security.sasl.SaslServer;
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.CommonConfigurationKeys;
+ import org.apache.hadoop.io.BytesWritable;
+ import org.apache.hadoop.io.IntWritable;
+ import static org.apache.hadoop.fs.CommonConfigurationKeys.*;
+@@ -1156,8 +1157,12 @@ public abstract class Server {
+             throw new IOException("Unable to read authentication method");
+           }
+           if (isSecurityEnabled && authMethod == AuthMethod.SIMPLE) {
+-            AccessControlException ae = new AccessControlException(
+-                "Authentication is required");
++            AccessControlException ae = new AccessControlException("Authorization ("
++              + CommonConfigurationKeys.HADOOP_SECURITY_AUTHENTICATION
++              + ") is enabled but authentication ("
++              + CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION
++              + ") is configured as simple. Please configure another method "
++              + "like kerberos or digest.");
+             setupResponse(authFailedResponse, authFailedCall, Status.FATAL,
+                 null, ae.getClass().getName(), ae.getMessage());
+             responder.doRespond(authFailedCall);
+-- 
+1.7.0.4
+

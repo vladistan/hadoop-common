@@ -1,0 +1,407 @@
+From dd3bf5e9d27d63261362db56240f4a9dd67e1cc7 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Sat, 30 Jun 2012 18:44:00 -0700
+Subject: [PATCH 1282/1344] HDFS-2116. Use Mokito in TestStreamFile and TestByteRangeInputStream.
+
+Reason: Testing
+Author: Plamen Jeliazkov
+Ref: CDH-4806
+---
+ .../hadoop/hdfs/TestByteRangeInputStream.java      |  101 +++++--------
+ .../hdfs/server/namenode/TestStreamFile.java       |  158 +++-----------------
+ 2 files changed, 56 insertions(+), 203 deletions(-)
+
+diff --git a/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java b/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java
+index 04f23dd..1d5c1e9 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java
++++ b/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java
+@@ -21,23 +21,19 @@ import java.io.ByteArrayInputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.net.HttpURLConnection;
+-import java.net.MalformedURLException;
+ import java.net.URL;
+ 
+ import org.apache.hadoop.hdfs.ByteRangeInputStream;
+ 
+ import org.junit.Test;
+ import static org.junit.Assert.*;
++import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.spy;
++import static org.mockito.Mockito.times;
++import static org.mockito.Mockito.verify;
+ 
+ public class TestByteRangeInputStream {
+-public static class MockHttpURLConnection extends HttpURLConnection {
+-  MockURL m;
+-  
+-  public MockHttpURLConnection(URL u, MockURL m) {
+-    super(u); 
+-    this.m = m;
+-  }
+-
++  public static class MockHttpURLConnection extends HttpURLConnection {
+   public MockHttpURLConnection(URL u) {
+     super(u); 
+   }
+@@ -50,7 +46,6 @@ public static class MockHttpURLConnection extends HttpURLConnection {
+   }
+   
+   public void connect() throws IOException {
+-    m.setMsg("Connect: "+url+", Range: "+getRequestProperty("Range"));
+   }
+   
+   public InputStream getInputStream() throws IOException {
+@@ -68,8 +63,8 @@ public static class MockHttpURLConnection extends HttpURLConnection {
+   }
+   
+   public int getResponseCode() {
+-    if (m.responseCode != -1) {
+-      return m.responseCode;
++    if (responseCode != -1) {
++      return responseCode;
+     } else {
+       if (getRequestProperty("Range") == null) {
+         return 200;
+@@ -84,84 +79,62 @@ public static class MockHttpURLConnection extends HttpURLConnection {
+   }
+ }
+ 
+-class MockURL extends HftpFileSystem.RangeHeaderUrlOpener {
+-  String msg;
+-  public int responseCode = -1;
+-  
+-  public MockURL(URL u) {
+-    super(u);
+-  }
+-
+-  public MockURL(String s) throws MalformedURLException {
+-    this(new URL(s));
+-  }
+-
+-  public HttpURLConnection openConnection() throws IOException {
+-    return new MockHttpURLConnection(url, this);
+-  }    
+-
+-  public void setMsg(String s) {
+-    msg = s;
+-  }
+-  
+-  public String getMsg() {
+-    return msg;
+-  }
+-}
+-
+   @Test
+   public void testByteRange() throws IOException, InterruptedException {
+-    MockURL o = new MockURL("http://test/");
+-    MockURL r =  new MockURL((URL)null);
+-    ByteRangeInputStream is = new HftpFileSystem.RangeHeaderInputStream(o, r);
++    HftpFileSystem.RangeHeaderUrlOpener ospy = spy(
++        new HftpFileSystem.RangeHeaderUrlOpener(new URL("http://test/")));
++    doReturn(new MockHttpURLConnection(ospy.getURL())).when(ospy)
++        .openConnection();
++    HftpFileSystem.RangeHeaderUrlOpener rspy = spy(
++        new HftpFileSystem.RangeHeaderUrlOpener((URL) null));
++    doReturn(new MockHttpURLConnection(rspy.getURL())).when(rspy)
++        .openConnection();
++    ByteRangeInputStream is = new HftpFileSystem.RangeHeaderInputStream(ospy, rspy);
+ 
+     assertEquals("getPos wrong", 0, is.getPos());
+ 
+     is.read();
+ 
+-    assertEquals("Initial call made incorrectly", 
+-                 "Connect: http://test/, Range: null",
+-                 o.getMsg());
++    assertNull("Initial call made incorrectly (Range Check)", ospy
++        .openConnection().getRequestProperty("Range"));
+ 
+     assertEquals("getPos should be 1 after reading one byte", 1, is.getPos());
+ 
+-    o.setMsg(null);
+-
+     is.read();
+ 
+     assertEquals("getPos should be 2 after reading two bytes", 2, is.getPos());
+ 
+-    assertNull("No additional connections should have been made (no seek)",
+-               o.getMsg());
+-
+-    r.setMsg(null);
+-    r.setURL(new URL("http://resolvedurl/"));
++    // No additional connections should have been made (no seek)
++    
++    rspy.setURL(new URL("http://resolvedurl/"));
+     
+     is.seek(100);
+     is.read();
+ 
+-    assertEquals("Seek to 100 bytes made incorrectly", 
+-                 "Connect: http://resolvedurl/, Range: bytes=100-",
+-                 r.getMsg());
+-
+     assertEquals("getPos should be 101 after reading one byte", 101, is.getPos());
+-
+-    r.setMsg(null);
++    
++    assertEquals("Seek to 100 bytes made incorrectly (Range Check)",
++        "bytes=100-", rspy.openConnection().getRequestProperty("Range"));
++         
++    assertEquals("getPos should be 101 after reading one byte", 101,
++        is.getPos());
++         
++    verify(rspy, times(2)).openConnection();
+ 
+     is.seek(101);
+     is.read();
+ 
+-    assertNull("Seek to 101 should not result in another request", r.getMsg());
++    verify(rspy, times(2)).openConnection();
++
++    // Seek to 101 should not result in another request"
+ 
+-    r.setMsg(null);
+     is.seek(2500);
+     is.read();
+ 
+-    assertEquals("Seek to 2500 bytes made incorrectly", 
+-                 "Connect: http://resolvedurl/, Range: bytes=2500-",
+-                 r.getMsg());
+-
+-    r.responseCode = 200;
++    assertEquals("Seek to 2500 bytes made incorrectly (Range Check)",
++        "bytes=2500-", rspy.openConnection().getRequestProperty("Range"));
++         
++    ((MockHttpURLConnection) rspy.openConnection()).setResponseCode(200);
+     is.seek(500);
+     
+     try {
+@@ -173,7 +146,7 @@ class MockURL extends HftpFileSystem.RangeHeaderUrlOpener {
+                    "HTTP_PARTIAL expected, received 200", e.getMessage());
+     }
+ 
+-    r.responseCode = 206;
++    ((MockHttpURLConnection) rspy.openConnection()).setResponseCode(206);
+     is.seek(0);
+ 
+     try {
+diff --git a/src/test/org/apache/hadoop/hdfs/server/namenode/TestStreamFile.java b/src/test/org/apache/hadoop/hdfs/server/namenode/TestStreamFile.java
+index 6bf3a24..91b9d37 100644
+--- a/src/test/org/apache/hadoop/hdfs/server/namenode/TestStreamFile.java
++++ b/src/test/org/apache/hadoop/hdfs/server/namenode/TestStreamFile.java
+@@ -70,129 +70,6 @@ class MockFSInputStream extends FSInputStream {
+ }
+ 
+ 
+-class MockHttpServletResponse implements HttpServletResponse {
+-
+-  private int status = -1;
+-  
+-  public MockHttpServletResponse() {
+-  }
+-  
+-  public int getStatus() {
+-    return status;
+-  }
+-  
+-  
+-  public void setStatus(int sc) {
+-    status = sc;
+-  }
+-  
+-  public void setStatus(int sc, java.lang.String sm) {
+-  }
+-  
+-  public void addIntHeader(String name, int value) {
+-  }
+-
+-  public void setIntHeader(String name, int value) { 
+-  }
+-  
+-  public void addHeader(String name, String value) {
+-  }
+-
+-  public void setHeader(String name, String value) {
+-  }
+-  
+-  public void addDateHeader(java.lang.String name, long date) {
+-  }
+-  
+-  public void setDateHeader(java.lang.String name, long date) {
+-  }
+-
+-  public void sendRedirect(java.lang.String location) { 
+-  }
+-  
+-  public void sendError(int e) {
+-  }
+-  
+-  public void sendError(int a, java.lang.String b) {
+-  }
+-  
+-  public String encodeRedirectUrl(java.lang.String a) {
+-    return null;
+-  }
+-  
+-  public String encodeUrl(java.lang.String url) {
+-    return null;
+-  }
+-  
+-  public String encodeRedirectURL(java.lang.String url) {
+-    return null;
+-  }
+-  
+-  public String encodeURL(java.lang.String url) {
+-    return null;
+-  }
+-  
+-  public boolean containsHeader(java.lang.String name) {
+-    return false;
+-  }
+-  
+-  public void addCookie(javax.servlet.http.Cookie cookie) {
+-  }
+-  
+-  public java.util.Locale getLocale() {
+-    return null;
+-  }
+-  
+-  public void setLocale(java.util.Locale loc) {
+-  }
+-  
+-  public void reset() {
+-  }
+-  
+-  public boolean isCommitted() {
+-    return false;
+-  }
+-  
+-  public void resetBuffer() {
+-  }
+-  
+-  public void flushBuffer() {
+-  }
+-  
+-  public int getBufferSize() {
+-    return 0;
+-  }
+-  
+-  public void setBufferSize(int size) {
+-  }
+-  
+-  public void setContentType(java.lang.String type) {
+-  }
+-  
+-  public void setContentLength(int len) {
+-  }
+-  
+-  public void setCharacterEncoding(java.lang.String charset) {
+-  }
+-  
+-  public java.io.PrintWriter getWriter() {
+-    return null;
+-  }
+-  
+-  public javax.servlet.ServletOutputStream getOutputStream() {
+-    return null;
+-  }
+-  
+-  public java.lang.String getContentType() {
+-    return null;
+-  }
+-  
+-  public java.lang.String getCharacterEncoding() {
+-    return null;
+-  }
+-}
+-
+-
+ public class TestStreamFile {
+   private Configuration CONF = new Configuration();
+   private DFSClient clientMock = Mockito.mock(DFSClient.class);
+@@ -229,7 +106,7 @@ public class TestStreamFile {
+   }
+   
+   @Test
+-  public void testWriteTo() throws IOException, InterruptedException {
++  public void testWriteTo() throws IOException {
+ 
+     FSInputStream fsin = new MockFSInputStream();
+     ByteArrayOutputStream os = new ByteArrayOutputStream();
+@@ -266,45 +143,48 @@ public class TestStreamFile {
+   }
+   
+   @Test
+-  public void testSendPartialData() throws IOException, InterruptedException {
++  public void testSendPartialData() throws IOException {
+     FSInputStream in = new MockFSInputStream();
+     ByteArrayOutputStream os = new ByteArrayOutputStream();
+ 
+     // test if multiple ranges, then 416
+     { 
+       List<InclusiveByteRange> ranges = strToRanges("0-,10-300", 500);
+-      MockHttpServletResponse response = new MockHttpServletResponse();
++      HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
+       StreamFile.sendPartialData(in, os, response, 500, ranges);
+-      assertEquals("Multiple ranges should result in a 416 error",
+-                   416, response.getStatus());
++      // Multiple ranges should result in a 416 error
++      Mockito.verify(response).setStatus(416);
++
+     }
+                               
+     // test if no ranges, then 416
+     { 
+       os.reset();
+-      MockHttpServletResponse response = new MockHttpServletResponse();
++      HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
+       StreamFile.sendPartialData(in, os, response, 500, null);
+-      assertEquals("No ranges should result in a 416 error",
+-                   416, response.getStatus());
++      // No ranges should result in a 416 error
++      Mockito.verify(response).setStatus(416);
+     }
+ 
+     // test if invalid single range (out of bounds), then 416
+     { 
+       List<InclusiveByteRange> ranges = strToRanges("600-800", 500);
+-      MockHttpServletResponse response = new MockHttpServletResponse();
++      HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
+       StreamFile.sendPartialData(in, os, response, 500, ranges);
+-      assertEquals("Single (but invalid) range should result in a 416",
+-                   416, response.getStatus());
++      // Single (but invalid) range should result in a 416
++      Mockito.verify(response).setStatus(416);
+     }
+ 
+       
+     // test if one (valid) range, then 206
+     { 
+       List<InclusiveByteRange> ranges = strToRanges("100-300", 500);
+-      MockHttpServletResponse response = new MockHttpServletResponse();
++      HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
+       StreamFile.sendPartialData(in, os, response, 500, ranges);
+-      assertEquals("Single (valid) range should result in a 206",
+-                   206, response.getStatus());
++
++      // Single (valid) range should result in a 206
++      Mockito.verify(response).setStatus(206);
++
+       assertArrayEquals("Byte range from 100-300",
+                         getOutputArray(100, 201),
+                         os.toByteArray());
+@@ -373,8 +253,8 @@ public class TestStreamFile {
+     }
+   }
+ 
+-  private void setUpForDoGetTest(MiniDFSCluster cluster, Path testFile)
+-      throws IOException {
++  private void setUpForDoGetTest(MiniDFSCluster cluster, Path testFile) {
++
+ 
+     Mockito.doReturn(CONF).when(mockServletContext).getAttribute(
+         JspHelper.CURRENT_CONF);
+-- 
+1.7.0.4
+

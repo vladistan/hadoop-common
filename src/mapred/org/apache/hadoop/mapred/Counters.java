@@ -59,18 +59,22 @@ public class Counters implements Writable, Iterable<Counters.Group> {
   private static char[] charsToEscape =  {GROUP_OPEN, GROUP_CLOSE, 
                                           COUNTER_OPEN, COUNTER_CLOSE, 
                                           UNIT_OPEN, UNIT_CLOSE};
-  /** limit on the size of the name of the group **/
-  private static final int GROUP_NAME_LIMIT = 128;
-  /** limit on the size of the counter name **/
-  private static final int COUNTER_NAME_LIMIT = 64;
-  
   private static final JobConf conf = new JobConf();
+  /** limit on the size of the name of the group **/
+  private static final int GROUP_NAME_LIMIT = 
+    conf.getInt("mapreduce.job.counters.group.name.max", 128);
+  /** limit on the size of the counter name **/
+  private static final int COUNTER_NAME_LIMIT = 
+    conf.getInt("mapreduce.job.counters.counter.name.max", 64);
+  
   /** limit on counters **/
   public static int MAX_COUNTER_LIMIT = 
-    conf.getInt("mapreduce.job.counters.limit", 120);
+    conf.getInt("mapreduce.job.counters.limit", // deprecated in 0.23
+        conf.getInt("mapreduce.job.counters.max", 120));
 
   /** the max groups allowed **/
-  static final int MAX_GROUP_LIMIT = 50;
+  public static final int MAX_GROUP_LIMIT = 
+    conf.getInt("mapreduce.job.counters.groups.max", 50);
   
   /** the number of current counters**/
   private int numCounters = 0;
@@ -291,7 +295,7 @@ public class Counters implements Writable, Iterable<Counters.Group> {
      * @deprecated use {@link #getCounter(String)} instead
      */
     @Deprecated
-    public synchronized Counter getCounter(int id, String name) {
+    public Counter getCounter(int id, String name) {
       return getCounterForName(name);
     }
     
@@ -300,23 +304,27 @@ public class Counters implements Writable, Iterable<Counters.Group> {
      * @param name the internal counter name
      * @return the counter
      */
-    public synchronized Counter getCounterForName(String name) {
-      String shortName = getShortName(name, COUNTER_NAME_LIMIT);
-      Counter result = subcounters.get(shortName);
-      if (result == null) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Adding " + shortName);
+    public Counter getCounterForName(String name) {
+      synchronized(Counters.this) { // lock ordering: Counters then Group
+        synchronized (this) {
+          String shortName = getShortName(name, COUNTER_NAME_LIMIT);
+          Counter result = subcounters.get(shortName);
+          if (result == null) {
+            if (LOG.isDebugEnabled()) {
+              LOG.debug("Adding " + shortName);
+            }
+            numCounters = (numCounters == 0) ? Counters.this.size(): numCounters; 
+            if (numCounters >= MAX_COUNTER_LIMIT) {
+              throw new CountersExceededException("Error: Exceeded limits on number of counters - " 
+                  + "Counters=" + numCounters + " Limit=" + MAX_COUNTER_LIMIT);
+            }
+            result = new Counter(shortName, localize(shortName + ".name", shortName), 0L);
+            subcounters.put(shortName, result);
+            numCounters++;
+          }
+          return result;
         }
-        numCounters = (numCounters == 0) ? Counters.this.size(): numCounters; 
-        if (numCounters >= MAX_COUNTER_LIMIT) {
-          throw new CountersExceededException("Error: Exceeded limits on number of counters - " 
-              + "Counters=" + numCounters + " Limit=" + MAX_COUNTER_LIMIT);
-        }
-        result = new Counter(shortName, localize(shortName + ".name", shortName), 0L);
-        subcounters.put(shortName, result);
-        numCounters++;
       }
-      return result;
     }
     
     /**

@@ -23,46 +23,52 @@
 
 int dfs_mkdir(const char *path, mode_t mode)
 {
+  struct hdfsConn *conn = NULL;
+  hdfsFS fs;
+  dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
+  int ret;
+
   TRACE1("mkdir", path)
 
-  // retrieve dfs specific data
-  dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
-
-  // check params and the context var
   assert(path);
   assert(dfs);
   assert('/' == *path);
 
   if (is_protected(path)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to create the directory: %s", path);
+    ERROR("HDFS trying to create directory %s", path);
     return -EACCES;
   }
 
   if (dfs->read_only) {
-    syslog(LOG_ERR,"ERROR: hdfs is configured as read-only, cannot create the directory %s\n",path);
+    ERROR("HDFS is configured read-only, cannot create directory %s", path);
     return -EACCES;
   }
   
-  hdfsFS userFS;
-  // if not connected, try to connect and fail out if we can't.
-  if ((userFS = doConnectAsUser(dfs->nn_hostname,dfs->nn_port))== NULL) {
-    syslog(LOG_ERR, "ERROR: could not connect to dfs %s:%d\n", __FILE__, __LINE__);
-    return -EIO;
+  ret = fuseConnectAsThreadUid(&conn);
+  if (ret) {
+    fprintf(stderr, "fuseConnectAsThreadUid: failed to open a libhdfs "
+            "connection!  error %d.\n", ret);
+    ret = -EIO;
+    goto cleanup;
   }
+  fs = hdfsConnGetFs(conn);
 
   // In theory the create and chmod should be atomic.
-
-  if (hdfsCreateDirectory(userFS, path)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to create directory %s",path);
-    return -EIO;
+  if (hdfsCreateDirectory(fs, path)) {
+    ERROR("HDFS could not create directory %s", path);
+    ret = (errno > 0) ? -errno : -EIO;
+    goto cleanup;
   }
 
-#if PERMS
-  if (hdfsChmod(userFS, path, (short)mode)) {
-    syslog(LOG_ERR,"ERROR: hdfs trying to chmod %s to %d",path, (int)mode);
-    return -EIO;
+  if (hdfsChmod(fs, path, (short)mode)) {
+    ERROR("Could not chmod %s to %d", path, (int)mode);
+    ret = (errno > 0) ? -errno : -EIO;
   }
-#endif
-  return 0;
+  ret = 0;
 
+cleanup:
+  if (conn) {
+    hdfsConnRelease(conn);
+  }
+  return ret;
 }

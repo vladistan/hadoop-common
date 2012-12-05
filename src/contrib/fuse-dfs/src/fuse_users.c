@@ -24,26 +24,19 @@
 
 #include "fuse_dfs.h"
 
-
-
-#if PERMS
-/**
+/*
  * getpwuid and getgrgid return static structs so we safeguard the contents
  * while retrieving fields using the 2 structs below.
  * NOTE: if using both, always get the passwd struct firt!
  */
 pthread_mutex_t passwdstruct_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t groupstruct_mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
 
-#if PERMS
-
-/**
+/*
  * Utility for getting the user making the fuse call in char * form
  * NOTE: if non-null return, the return must be freed by the caller.
  */
-char *getUsername(uid_t uid)
-{
+char *getUsername(uid_t uid) {
   //
   // Critical section - protect from concurrent calls in different threads.
   // since the struct below is static.
@@ -194,7 +187,7 @@ char ** getGroups(uid_t uid, int *num_groups)
   for (i=0; i < *num_groups; i++)  {
     groupnames[i] = getGroup(grouplist[i]);
     if (groupnames[i] == NULL) {
-      fprintf(stderr, "error could not lookup group %d\n",(int)grouplist[i]);
+      ERROR("Could not lookup group %d\n", (int)grouplist[i]);
     }
   } 
   free(grouplist);
@@ -218,4 +211,3 @@ char ** getGroups(uid_t uid, int *num_groups)
 #endif
   return groupnames;
 }
-#endif

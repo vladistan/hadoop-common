@@ -1,0 +1,64 @@
+From ee4e34b4b10af98b3d48479c3d7118db253ad03f Mon Sep 17 00:00:00 2001
+From: Ahmed Radwan <ahmed@cloudera.com>
+Date: Wed, 1 Aug 2012 18:09:52 -0700
+Subject: [PATCH 1334/1344] CDH-5797. Backport MAPREDUCE-4003 log.index (No such file or directory)
+ AND Task process exit with nonzero status of 126
+
+Reason: Bug
+Ref: CDH-5797
+Author: Koji Noguchi
+---
+ src/mapred/org/apache/hadoop/mapred/TaskLog.java |   20 ++++++++++++++++++--
+ 1 files changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/src/mapred/org/apache/hadoop/mapred/TaskLog.java b/src/mapred/org/apache/hadoop/mapred/TaskLog.java
+index 109e3a0..0c48ca4 100644
+--- a/src/mapred/org/apache/hadoop/mapred/TaskLog.java
++++ b/src/mapred/org/apache/hadoop/mapred/TaskLog.java
+@@ -23,9 +23,11 @@ import java.io.BufferedReader;
+ import java.io.DataOutputStream;
+ import java.io.File;
+ import java.io.FileInputStream;
++import java.io.FileNotFoundException;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.FileReader;
++import java.io.StringReader;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Enumeration;
+@@ -184,7 +186,21 @@ public class TaskLog {
+         new HashMap<LogName, LogFileDetail>();
+ 
+     File indexFile = getIndexFile(taskid, isCleanup);
+-    BufferedReader fis = new BufferedReader(new FileReader(indexFile));
++    BufferedReader fis;
++    try {
++       fis = new BufferedReader(new FileReader(indexFile));
++    } catch (FileNotFoundException ex) {
++      LOG.warn("Index file for the log of " + taskid + " does not exist.");
++
++      //Assume no task reuse is used and files exist on attemptdir
++      StringBuffer input = new StringBuffer();
++      input.append(LogFileDetail.LOCATION
++                     + getAttemptDir(taskid, isCleanup) + "\n");
++      for (LogName logName : LOGS_TRACKED_BY_INDEX_FILES) {
++        input.append(logName + ":0 -1\n");
++      }
++      fis = new BufferedReader(new StringReader(input.toString()));
++    }
+     //the format of the index file is
+     //LOG_DIR: <the dir where the task logs are really stored>
+     //stdout:<start-offset in the stdout file> <length>
+@@ -192,7 +208,7 @@ public class TaskLog {
+     //syslog:<start-offset in the syslog file> <length>
+     String str = fis.readLine();
+     if (str == null) { //the file doesn't have anything
+-      throw new IOException ("Index file for the log of " + taskid+" doesn't exist.");
++      throw new IOException ("Index file for the log of " + taskid+" is empty.");
+     }
+     String loc = str.substring(str.indexOf(LogFileDetail.LOCATION)+
+         LogFileDetail.LOCATION.length());
+-- 
+1.7.0.4
+

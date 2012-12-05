@@ -53,4 +53,17 @@ public @interface HadoopVersionAnnotation {
    * @return the revision number as a string (eg. "451451")
    */
   String revision();
+
+  /**
+   * Get the branch from which this was compiled.
+   * @return The branch name, e.g. "trunk" or "branches/branch-0.20"
+   */
+  String branch();
+
+  /**
+   * Get a checksum of the source files from which
+   * Hadoop was compiled.
+   * @return a string that uniquely identifies the source
+   **/
+  String srcChecksum();
 }

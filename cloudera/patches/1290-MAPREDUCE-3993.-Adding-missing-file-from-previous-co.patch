@@ -1,0 +1,75 @@
+From ff02c3233db3d1cf923230e649e09b1ceed5ddb0 Mon Sep 17 00:00:00 2001
+From: Alejandro Abdelnur <tucu@apache.org>
+Date: Mon, 9 Jul 2012 19:21:21 +0000
+Subject: [PATCH 1290/1344] MAPREDUCE-3993. Adding missing file from previous commit
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1359349 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 9c6ea68b22acfbd7b82a7f70da3de62ab5608f50)
+---
+ src/test/org/apache/hadoop/io/TestIOUtils.java |   54 ++++++++++++++++++++++++
+ 1 files changed, 54 insertions(+), 0 deletions(-)
+ create mode 100644 src/test/org/apache/hadoop/io/TestIOUtils.java
+
+diff --git a/src/test/org/apache/hadoop/io/TestIOUtils.java b/src/test/org/apache/hadoop/io/TestIOUtils.java
+new file mode 100644
+index 0000000..de6ace7
+--- /dev/null
++++ b/src/test/org/apache/hadoop/io/TestIOUtils.java
+@@ -0,0 +1,54 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.io;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import java.io.IOException;
++import java.io.InputStream;
++
++import org.junit.Test;
++import org.mockito.Mockito;
++
++public class TestIOUtils {
++
++  @Test
++  public void testWrappedReadForCompressedData() throws IOException {
++    byte[] buf = new byte[2];
++    InputStream mockStream = Mockito.mock(InputStream.class);
++    Mockito.when(mockStream.read(buf, 0, 1)).thenReturn(1);
++    Mockito.when(mockStream.read(buf, 0, 2)).thenThrow(
++        new java.lang.InternalError());
++
++    try {
++      assertEquals("Check expected value", 1,
++          IOUtils.wrappedReadForCompressedData(mockStream, buf, 0, 1));
++    } catch (IOException ioe) {
++      fail("Unexpected error while reading");
++    }
++    try {
++      IOUtils.wrappedReadForCompressedData(mockStream, buf, 0, 2);
++    } catch (IOException ioe) {
++      assertTrue("Unexpected exception caught",
++          ioe.getMessage().contains("Error while reading compressed data"));
++    }
++  }
++}
+-- 
+1.7.0.4
+

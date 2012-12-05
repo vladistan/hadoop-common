@@ -1,0 +1,41 @@
+From 8554f796363ebdd83078a645c2e4e6bfe848f070 Mon Sep 17 00:00:00 2001
+From: Alejandro Abdelnur <tucu@apache.org>
+Date: Wed, 1 Aug 2012 17:29:22 +0000
+Subject: [PATCH 1335/1344] MAPREDUCE-4036. Streaming TestUlimit fails on CentOS 6. (tucu)
+
+Reason: Fix tests
+Ref: CDH-7048
+Author: Alejandro Abdelnur
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1368134 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit f384ae3d0f34742ebb98895b2e99f36c963ff759)
+(cherry picked from commit ed68cd0931e4e070e532bccd6a2fa178efbccc88)
+---
+ .../org/apache/hadoop/streaming/TestUlimit.java    |    4 +++-
+ 1 files changed, 3 insertions(+), 1 deletions(-)
+
+diff --git a/src/contrib/streaming/src/test/org/apache/hadoop/streaming/TestUlimit.java b/src/contrib/streaming/src/test/org/apache/hadoop/streaming/TestUlimit.java
+index c555e2e..b14ce30 100644
+--- a/src/contrib/streaming/src/test/org/apache/hadoop/streaming/TestUlimit.java
++++ b/src/contrib/streaming/src/test/org/apache/hadoop/streaming/TestUlimit.java
+@@ -46,7 +46,7 @@ public class TestUlimit extends TestCase {
+   MiniDFSCluster dfs = null;
+   MiniMRCluster mr = null;
+   FileSystem fs = null;
+-  private static String SET_MEMORY_LIMIT = "786432"; // 768MB
++  private static String SET_MEMORY_LIMIT = "1786432"; // 1768MB
+ 
+   String[] genArgs(String memLimit) {
+     return new String[] {
+@@ -57,6 +57,8 @@ public class TestUlimit extends TestCase {
+       "-numReduceTasks", "0",
+       "-jobconf", "mapred.map.tasks=1",
+       "-jobconf", JobConf.MAPRED_MAP_TASK_ULIMIT + "=" + memLimit,
++      "-jobconf", "mapred.child.java.opts=-Xmx512m",
++      "-jobconf", "mapred.child.env=MALLOC_ARENA_MAX=1",
+       "-jobconf", "mapred.job.tracker=" + "localhost:" +
+                                            mr.getJobTrackerPort(),
+       "-jobconf", "fs.default.name=" + "hdfs://localhost:" 
+-- 
+1.7.0.4
+

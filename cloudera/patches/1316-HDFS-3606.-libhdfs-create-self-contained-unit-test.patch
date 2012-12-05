@@ -1,0 +1,396 @@
+From 0bdd6f8b6bcfd3b854a7ddaa4ed725c90a23cb49 Mon Sep 17 00:00:00 2001
+From: Colin Patrick Mccabe <cmccabe@cloudera.com>
+Date: Fri, 20 Jul 2012 19:08:53 -0700
+Subject: [PATCH 1316/1344] HDFS-3606. libhdfs: create self-contained unit test.
+
+Author: Colin Patrick McCabe
+Ref: CDH-6716
+---
+ src/c++/libhdfs/Makefile.am                   |    6 +-
+ src/c++/libhdfs/tests/expect.h                |  101 +++++++++++
+ src/c++/libhdfs/tests/test_libhdfs_threaded.c |  241 +++++++++++++++++++++++++
+ 3 files changed, 346 insertions(+), 2 deletions(-)
+ create mode 100644 src/c++/libhdfs/tests/expect.h
+ create mode 100644 src/c++/libhdfs/tests/test_libhdfs_threaded.c
+
+diff --git a/src/c++/libhdfs/Makefile.am b/src/c++/libhdfs/Makefile.am
+index 1d51597..6696e01 100644
+--- a/src/c++/libhdfs/Makefile.am
++++ b/src/c++/libhdfs/Makefile.am
+@@ -22,8 +22,7 @@ ACLOCAL_AMFLAGS = -I m4
+ lib_LTLIBRARIES = libhdfs.la
+ libhdfs_la_SOURCES = hdfs.c hdfsJniHelper.c hdfs.h
+ 
+-#check_PROGRAMS = hdfs_test hdfs_read hdfs_write
+-check_PROGRAMS = hdfs_test hdfs_read hdfs_write
++check_PROGRAMS = hdfs_test hdfs_read hdfs_write test_libhdfs_threaded
+ 
+ hdfs_test_SOURCES = hdfs_test.c hdfs.h
+ hdfs_test_LDADD = ${libdir}/libhdfs.la 
+@@ -34,6 +33,9 @@ hdfs_read_LDADD = ${libdir}/libhdfs.la
+ hdfs_write_SOURCES = hdfs_write.c
+ hdfs_write_LDADD = ${libdir}/libhdfs.la 
+ 
++test_libhdfs_threaded_SOURCES = tests/test_libhdfs_threaded.c
++test_libhdfs_threaded_LDADD = ${libdir}/libhdfs.la
++
+ test: hdfs_test hdfs_read hdfs_write 
+ 	${LIBHDFS_SRC_DIR}/tests/test-libhdfs.sh	
+ 
+diff --git a/src/c++/libhdfs/tests/expect.h b/src/c++/libhdfs/tests/expect.h
+new file mode 100644
+index 0000000..2046bd0
+--- /dev/null
++++ b/src/c++/libhdfs/tests/expect.h
+@@ -0,0 +1,101 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef LIBHDFS_NATIVE_TESTS_EXPECT_H
++#define LIBHDFS_NATIVE_TESTS_EXPECT_H
++
++#include <stdio.h>
++
++#define EXPECT_ZERO(x) \
++    do { \
++        int __my_ret__ = x; \
++        if (__my_ret__) { \
++            int __my_errno__ = errno; \
++            fprintf(stderr, "TEST_ERROR: failed on line %d with return " \
++		    "code %d (errno: %d): got nonzero from %s\n", \
++		    __LINE__, __my_ret__, __my_errno__, #x); \
++            return __my_ret__; \
++        } \
++    } while (0);
++
++#define EXPECT_NULL(x) \
++    do { \
++        void* __my_ret__ = x; \
++        int __my_errno__ = errno; \
++        if (__my_ret__ != NULL) { \
++            fprintf(stderr, "TEST_ERROR: failed on line %d (errno: %d): " \
++		    "got non-NULL value %p from %s\n", \
++		    __LINE__, __my_errno__, __my_ret__, #x); \
++            return -1; \
++        } \
++    } while (0);
++
++#define EXPECT_NONNULL(x) \
++    do { \
++        void* __my_ret__ = x; \
++        int __my_errno__ = errno; \
++        if (__my_ret__ == NULL) { \
++            fprintf(stderr, "TEST_ERROR: failed on line %d (errno: %d): " \
++		    "got NULL from %s\n", __LINE__, __my_errno__, #x); \
++            return -1; \
++        } \
++    } while (0);
++
++#define EXPECT_NEGATIVE_ONE_WITH_ERRNO(x, e) \
++    do { \
++        int __my_ret__ = x; \
++        int __my_errno__ = errno; \
++        if (__my_ret__ != -1) { \
++            fprintf(stderr, "TEST_ERROR: failed on line %d with return " \
++                "code %d (errno: %d): expected -1 from %s\n", __LINE__, \
++                __my_ret__, __my_errno__, #x); \
++            return -1; \
++        } \
++        if (__my_errno__ != e) { \
++            fprintf(stderr, "TEST_ERROR: failed on line %d with return " \
++                "code %d (errno: %d): expected errno = %d from %s\n", \
++                __LINE__, __my_ret__, __my_errno__, e, #x); \
++            return -1; \
++	} \
++    } while (0);
++
++#define EXPECT_NONZERO(x) \
++    do { \
++        int __my_ret__ = x; \
++        int __my_errno__ = errno; \
++        if (__my_ret__) { \
++            fprintf(stderr, "TEST_ERROR: failed on line %d with return " \
++		    "code %d (errno: %d): got zero from %s\n", __LINE__, \
++                __my_ret__, __my_errno__, #x); \
++            return -1; \
++        } \
++    } while (0);
++
++#define EXPECT_NONNEGATIVE(x) \
++    do { \
++        int __my_ret__ = x; \
++        int __my_errno__ = errno; \
++        if (__my_ret__ < 0) { \
++            fprintf(stderr, "TEST_ERROR: failed on line %d with return " \
++                "code %d (errno: %d): got negative return from %s\n", \
++		    __LINE__, __my_ret__, __my_errno__, #x); \
++            return __my_ret__; \
++        } \
++    } while (0);
++
++#endif
+diff --git a/src/c++/libhdfs/tests/test_libhdfs_threaded.c b/src/c++/libhdfs/tests/test_libhdfs_threaded.c
+new file mode 100644
+index 0000000..f993976
+--- /dev/null
++++ b/src/c++/libhdfs/tests/test_libhdfs_threaded.c
+@@ -0,0 +1,241 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "expect.h"
++#include "hdfs.h"
++
++#include <errno.h>
++#include <semaphore.h>
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define TLH_MAX_THREADS 100
++
++static sem_t tlhSem;
++
++struct tlhThreadInfo {
++    /** Thread index */
++    int threadIdx;
++    /** 0 = thread was successful; error code otherwise */
++    int success;
++    /** pthread identifier */
++    pthread_t thread;
++};
++
++static const char *gNameNode;
++
++static int gNameNodePort;
++
++static int hdfsSingleNameNodeConnect(hdfsFS *fs)
++{
++    int ret;
++    hdfsFS hdfs;
++    
++    hdfs = hdfsConnectNewInstance(gNameNode, gNameNodePort);
++    if (!hdfs) {
++        ret = -errno;
++        return ret;
++    }
++    *fs = hdfs;
++    return 0;
++}
++
++static int doTestHdfsOperations(struct tlhThreadInfo *ti, hdfsFS fs)
++{
++    char prefix[256], tmp[256];
++    hdfsFile file;
++    int ret, expected;
++    hdfsFileInfo *fileInfo;
++
++    snprintf(prefix, sizeof(prefix), "/tlhData%04d", ti->threadIdx);
++
++    if (hdfsExists(fs, prefix) == 0) {
++        EXPECT_ZERO(hdfsDelete(fs, prefix));
++    }
++    EXPECT_ZERO(hdfsCreateDirectory(fs, prefix));
++    snprintf(tmp, sizeof(tmp), "%s/file", prefix);
++
++    /* There should not be any file to open for reading. */
++    EXPECT_NULL(hdfsOpenFile(fs, tmp, O_RDONLY, 0, 0, 0));
++
++    file = hdfsOpenFile(fs, tmp, O_WRONLY, 0, 0, 0);
++    EXPECT_NONNULL(file);
++
++    /* TODO: implement writeFully and use it here */
++    expected = strlen(prefix);
++    ret = hdfsWrite(fs, file, prefix, expected);
++    if (ret < 0) {
++        ret = errno;
++        fprintf(stderr, "hdfsWrite failed and set errno %d\n", ret);
++        return ret;
++    }
++    if (ret != expected) {
++        fprintf(stderr, "hdfsWrite was supposed to write %d bytes, but "
++                "it wrote %d\n", ret, expected);
++        return EIO;
++    }
++    EXPECT_ZERO(hdfsFlush(fs, file));
++    EXPECT_ZERO(hdfsCloseFile(fs, file));
++
++    /* Let's re-open the file for reading */
++    file = hdfsOpenFile(fs, tmp, O_RDONLY, 0, 0, 0);
++    EXPECT_NONNULL(file);
++
++    /* TODO: implement readFully and use it here */
++    ret = hdfsRead(fs, file, tmp, sizeof(tmp));
++    if (ret < 0) {
++        ret = errno;
++        fprintf(stderr, "hdfsRead failed and set errno %d\n", ret);
++        return ret;
++    }
++    if (ret != expected) {
++        fprintf(stderr, "hdfsRead was supposed to read %d bytes, but "
++                "it read %d\n", ret, expected);
++        return EIO;
++    }
++    EXPECT_ZERO(memcmp(prefix, tmp, expected));
++    EXPECT_ZERO(hdfsCloseFile(fs, file));
++
++    // TODO: Non-recursive delete should fail?
++    //EXPECT_NONZERO(hdfsDelete(fs, prefix, 0));
++
++    snprintf(tmp, sizeof(tmp), "%s/file", prefix);
++//    EXPECT_ZERO(hdfsChown(fs, tmp, NULL, NULL));
++//    EXPECT_ZERO(hdfsChown(fs, tmp, NULL, "doop"));
++//    fileInfo = hdfsGetPathInfo(fs, tmp);
++//    EXPECT_NONNULL(fileInfo);
++//    EXPECT_ZERO(strcmp("doop", fileInfo->mGroup));
++//    hdfsFreeFileInfo(fileInfo, 1);
++
++    EXPECT_ZERO(hdfsChown(fs, tmp, "ha", "doop2"));
++    fileInfo = hdfsGetPathInfo(fs, tmp);
++    EXPECT_NONNULL(fileInfo);
++    EXPECT_ZERO(strcmp("ha", fileInfo->mOwner));
++    EXPECT_ZERO(strcmp("doop2", fileInfo->mGroup));
++    hdfsFreeFileInfo(fileInfo, 1);
++
++//    EXPECT_ZERO(hdfsChown(fs, tmp, "ha2", NULL));
++//    fileInfo = hdfsGetPathInfo(fs, tmp);
++//    EXPECT_NONNULL(fileInfo);
++//    EXPECT_ZERO(strcmp("ha2", fileInfo->mOwner));
++//    EXPECT_ZERO(strcmp("doop2", fileInfo->mGroup));
++//    hdfsFreeFileInfo(fileInfo, 1);
++
++    EXPECT_ZERO(hdfsDelete(fs, prefix));
++    return 0;
++}
++
++static void *testHdfsOperations(void *v)
++{
++    struct tlhThreadInfo *ti = (struct tlhThreadInfo*)v;
++    hdfsFS fs = NULL;
++    int ret;
++
++    fprintf(stderr, "testHdfsOperations(threadIdx=%d): starting\n",
++        ti->threadIdx);
++    ret = hdfsSingleNameNodeConnect(&fs);
++    if (ret) {
++        fprintf(stderr, "testHdfsOperations(threadIdx=%d): "
++            "hdfsSingleNameNodeConnect failed with error %d.\n",
++            ti->threadIdx, ret);
++        ti->success = EIO;
++        return NULL;
++    }
++    ti->success = doTestHdfsOperations(ti, fs);
++    if (hdfsDisconnect(fs)) {
++        ret = errno;
++        fprintf(stderr, "hdfsDisconnect error %d\n", ret);
++        ti->success = ret;
++    }
++    return NULL;
++}
++
++static int checkFailures(struct tlhThreadInfo *ti, int tlhNumThreads)
++{
++    int i, threadsFailed = 0;
++    const char *sep = "";
++
++    for (i = 0; i < tlhNumThreads; i++) {
++        if (ti[i].success != 0) {
++            threadsFailed = 1;
++        }
++    }
++    if (!threadsFailed) {
++        fprintf(stderr, "testLibHdfs: all threads succeeded.  SUCCESS.\n");
++        return EXIT_SUCCESS;
++    }
++    fprintf(stderr, "testLibHdfs: some threads failed: [");
++    for (i = 0; i < tlhNumThreads; i++) {
++        if (ti[i].success != 0) {
++            fprintf(stderr, "%s%d", sep, i);
++            sep = ", "; 
++        }
++    }
++    fprintf(stderr, "].  FAILURE.\n");
++    return EXIT_FAILURE;
++}
++
++
++/**
++ * Test that we can write a file with libhdfs and then read it back
++ */
++int main(void)
++{
++    int i, tlhNumThreads;
++    const char *tlhNumThreadsStr;
++    const char *nameNodePort;
++    struct tlhThreadInfo ti[TLH_MAX_THREADS];
++
++    gNameNode = getenv("TLH_NAMENODE");
++    if (!gNameNode) {
++        gNameNode = "default";
++    }
++    nameNodePort = getenv("TLH_NAMENODE_PORT");
++    gNameNodePort = nameNodePort ? atoi(nameNodePort) : 0;
++
++    tlhNumThreadsStr = getenv("TLH_NUM_THREADS");
++    if (!tlhNumThreadsStr) {
++        tlhNumThreadsStr = "3";
++    }
++    tlhNumThreads = atoi(tlhNumThreadsStr);
++    if ((tlhNumThreads <= 0) || (tlhNumThreads > TLH_MAX_THREADS)) {
++        fprintf(stderr, "testLibHdfs: must have a number of threads "
++                "between 1 and %d inclusive, not %d\n",
++                TLH_MAX_THREADS, tlhNumThreads);
++        return EXIT_FAILURE;
++    }
++    memset(&ti[0], 0, sizeof(ti));
++    for (i = 0; i < tlhNumThreads; i++) {
++        ti[i].threadIdx = i;
++    }
++
++    EXPECT_ZERO(sem_init(&tlhSem, 0, tlhNumThreads));
++
++    for (i = 0; i < tlhNumThreads; i++) {
++        EXPECT_ZERO(pthread_create(&ti[i].thread, NULL,
++            testHdfsOperations, &ti[i]));
++    }
++    for (i = 0; i < tlhNumThreads; i++) {
++        EXPECT_ZERO(pthread_join(ti[i].thread, NULL));
++    }
++
++    EXPECT_ZERO(sem_destroy(&tlhSem));
++    return checkFailures(ti, tlhNumThreads);
++}
+-- 
+1.7.0.4
+

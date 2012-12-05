@@ -1,0 +1,79 @@
+From 475b1a7d0f095cf0d11fbe114e135d463f447d28 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Mon, 6 Aug 2012 15:46:07 -0700
+Subject: [PATCH 1339/1344] HDFS-3754. BlockSender doesn't shutdown ReadaheadPool threads.
+
+The BlockSender doesn't shutdown the ReadaheadPool threads so when tests
+are run with native libraries some tests fail (time out) because
+shutdown hangs waiting for the outstanding threads to exit.
+
+Reason: Bug
+Author: Eli Collins
+Ref: CDH-7116
+---
+ .../hadoop/hdfs/server/datanode/BlockSender.java   |    5 ++---
+ .../hadoop/hdfs/server/datanode/DataNode.java      |    7 +++++++
+ 2 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockSender.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockSender.java
+index 857f438..b0af237 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockSender.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/BlockSender.java
+@@ -79,13 +79,11 @@ class BlockSender implements java.io.Closeable, FSConstants {
+   // Cache-management related fields
+   private final long readaheadLength;
+   private final boolean shouldDropCacheBehindRead;
++  private ReadaheadPool readaheadPool;
+   private ReadaheadRequest curReadahead;
+   private long lastCacheDropOffset;
+   private static final long CACHE_DROP_INTERVAL_BYTES = 1024 * 1024; // 1MB
+   
+-  private static ReadaheadPool readaheadPool =
+-    ReadaheadPool.getInstance();
+-
+   /**
+    * Minimum buffer used while sending data to clients. Used only if
+    * transferTo() is enabled. 64KB is not that large. It could be larger, but
+@@ -119,6 +117,7 @@ class BlockSender implements java.io.Closeable, FSConstants {
+       this.blockLength = datanode.data.getVisibleLength(block);
+       this.transferToAllowed = datanode.transferToAllowed;
+       this.readaheadLength = datanode.getReadaheadLength();
++      this.readaheadPool = datanode.readaheadPool;
+       this.shouldDropCacheBehindRead = datanode.shouldDropCacheBehindReads();
+       this.clientTraceFmt = clientTraceFmt;
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+index d531222..8895f77 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+@@ -107,6 +107,7 @@ import org.apache.hadoop.hdfs.web.resources.Param;
+ import org.apache.hadoop.hdfs.server.protocol.BalancerBandwidthCommand;
+ import org.apache.hadoop.http.HttpServer;
+ import org.apache.hadoop.io.IOUtils;
++import org.apache.hadoop.io.ReadaheadPool;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.ipc.RPC;
+ import org.apache.hadoop.ipc.RemoteException;
+@@ -273,6 +274,8 @@ public class DataNode extends Configured
+   public Server ipcServer;
+ 
+   private SecureResources secureResources = null;
++
++  ReadaheadPool readaheadPool;
+   
+   /**
+    * Current system time.
+@@ -479,6 +482,10 @@ public class DataNode extends Configured
+                reason + ".");
+     }
+ 
++    // Create the ReadaheadPool from the DataNode context so we can
++    // exit without having to explicitly shutdown its thread pool.
++    readaheadPool = ReadaheadPool.getInstance();
++
+     this.connectToDnViaHostname = conf.getBoolean(
+         DFSConfigKeys.DFS_DATANODE_USE_DN_HOSTNAME,
+         DFSConfigKeys.DFS_DATANODE_USE_DN_HOSTNAME_DEFAULT);
+-- 
+1.7.0.4
+

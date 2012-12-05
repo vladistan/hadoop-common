@@ -75,7 +75,7 @@ public class TaskDistributedCacheManager {
     private CacheStatus status;
 
     CacheFile(URI uri, FileType type, boolean isPublic, long timestamp, 
-                      boolean classPath) throws IOException {
+        boolean classPath) throws IOException {
       this.uri = uri;
       this.type = type;
       this.isPublic = isPublic;
@@ -100,6 +100,7 @@ public class TaskDistributedCacheManager {
     public CacheStatus getStatus() {
       return status;
     }
+
     /**
      * Converts the scheme used by DistributedCache to serialize what files to
      * cache in the configuration into CacheFile objects that represent those 
@@ -243,7 +244,7 @@ public class TaskDistributedCacheManager {
     }
     return classPaths;
   }
-  
+
   /**
    * Releases the cached files/archives, so that space
    * can be reclaimed by the {@link TrackerDistributedCacheManager}.

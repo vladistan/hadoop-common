@@ -95,11 +95,13 @@ extends AbstractDelegationTokenIdentifier>
   }
 
   /** should be called before this object is used */
-  public synchronized void startThreads() throws IOException {
+  public void startThreads() throws IOException {
     updateCurrentKey();
-    running = true;
-    tokenRemoverThread = new Daemon(new ExpiredTokenRemover());
-    tokenRemoverThread.start();
+    synchronized (this) {
+      running = true;
+      tokenRemoverThread = new Daemon(new ExpiredTokenRemover());
+      tokenRemoverThread.start();
+    }
   }
   
   /**
@@ -381,24 +383,30 @@ extends AbstractDelegationTokenIdentifier>
         while (running) {
           long now = System.currentTimeMillis();
           if (lastMasterKeyUpdate + keyUpdateInterval < now) {
-            try {
-              rollMasterKey();
-              lastMasterKeyUpdate = now;
-            } catch (IOException e) {
-              LOG.error("Master key updating failed. "
-                  + StringUtils.stringifyException(e));
+            synchronized (AbstractDelegationTokenSecretManager.this) {
+              if (running) {
+                try {
+                  rollMasterKey();
+                  lastMasterKeyUpdate = now;
+                } catch (IOException e) {
+                  LOG.error("Master key updating failed. "
+                            + StringUtils.stringifyException(e));
+                }
+              }
             }
           }
           if (lastTokenCacheCleanup + tokenRemoverScanInterval < now) {
-            removeExpiredToken();
-            lastTokenCacheCleanup = now;
+            synchronized (AbstractDelegationTokenSecretManager.this) {
+              if (running) {
+                removeExpiredToken();
+                lastTokenCacheCleanup = now;
+              }
+            }
           }
           try {
             Thread.sleep(5000); // 5 seconds
           } catch (InterruptedException ie) {
-            LOG
-            .error("InterruptedExcpetion recieved for ExpiredTokenRemover thread "
-                + ie);
+            return;
           }
         }
       } catch (Throwable t) {

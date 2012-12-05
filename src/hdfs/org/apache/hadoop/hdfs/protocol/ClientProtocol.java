@@ -50,12 +50,9 @@ public interface ClientProtocol extends VersionedProtocol {
    * Compared to the previous version the following changes have been introduced:
    * (Only the latest change is reflected.
    * The log of historical changes can be retrieved from the svn).
-   * 61: Serialized format of BlockTokenIdentifier changed to contain
-   *     multiple blocks within a single BlockTokenIdentifier 
-   *     
-   *     (bumped to 61 to bring in line with trunk)
+   * 63: Remove getBlockLocations optimization
    */
-  public static final long versionID = 61L;
+  public static final long versionID = 63L;
   
   ///////////////////////////////////////
   // File contents
@@ -143,12 +140,22 @@ public interface ClientProtocol extends VersionedProtocol {
    * denied by the system. As usually on the client side the exception will 
    * be wrapped into {@link org.apache.hadoop.ipc.RemoteException}.
    * Allows appending to an existing file if the server is
-   * configured with the parameter dfs.support.append set to true, otherwise
+   * configured with the parameter dfs.support.broken.append set to true, otherwise
    * throws an IOException.
    * @throws IOException if other errors occur.
    */
   public LocatedBlock append(String src, String clientName) throws IOException;
   
+  /**
+   * Start lease recovery
+   * 
+   * @param src path of the file to start lease recovery
+   * @param clientName name of the current client
+   * @return true if the file is already closed
+   * @throws IOException
+   */
+  public boolean recoverLease(String src, String clientName) throws IOException;
+
   /**
    * Start lease recovery
    * 

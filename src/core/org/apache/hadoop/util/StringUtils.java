@@ -319,6 +319,29 @@ public class StringUtils {
     return values;
   }
 
+  /**
+   * Splits a comma separated value <code>String</code>, trimming leading and trailing whitespace on each value.
+   * @param str a comma separated <String> with values
+   * @return a <code>Collection</code> of <code>String</code> values
+   */
+  public static Collection<String> getTrimmedStringCollection(String str){
+    return Arrays.asList(getTrimmedStrings(str));
+  }
+  
+  /**
+   * Splits a comma separated value <code>String</code>, trimming leading and trailing whitespace on each value.
+   * @param str a comma separated <String> with values
+   * @return an array of <code>String</code> values
+   */
+  public static String[] getTrimmedStrings(String str){
+    if (null == str || "".equals(str.trim())) {
+      return emptyStringArray;
+    }
+
+    return str.trim().split("\\s*,\\s*");
+  }
+
+  final public static String[] emptyStringArray = {};
   final public static char COMMA = ',';
   final public static String COMMA_STR = ",";
   final public static char ESCAPE_CHAR = '\\';
@@ -710,28 +733,28 @@ public class StringUtils {
     }
     return sb.toString();
   }
-
+  
   /**
-   * Concatenates strings, using a separator.
+   * Concatenates stringified objects, using a separator.
    *
    * @param separator to join with
-   * @param strings to join
-   * @return  the joined string
+   * @param objects to join
+   * @return the joined string
    */
-  public static String join(CharSequence separator, String[] strings) {
-    // Ideally we don't have to duplicate the code here if array is iterable.
-    StringBuilder sb = new StringBuilder();
+  public static String joinObjects(
+	  CharSequence separator, Iterable<? extends Object> objects) {
+    StringBuffer sb = new StringBuffer();
     boolean first = true;
-    for (String s : strings) {
+    for (Object o : objects) {
       if (first) {
         first = false;
       } else {
         sb.append(separator);
       }
-      sb.append(s);
+      sb.append(String.valueOf(o));
     }
     return sb.toString();
-  }
+  }  
 
   /**
    * Capitalize a word

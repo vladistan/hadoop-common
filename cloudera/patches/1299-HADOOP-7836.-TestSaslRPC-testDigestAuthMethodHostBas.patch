@@ -1,0 +1,33 @@
+From c997690cdb37260a43bf01ee844b22d2f0375c9c Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@apache.org>
+Date: Thu, 12 Jul 2012 18:25:22 +0000
+Subject: [PATCH 1299/1344] HADOOP-7836. TestSaslRPC#testDigestAuthMethodHostBasedToken fails with hostname localhost.localdomain. Contributed by Daryn Sharp
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1360845 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit bd47fbbb7133fd6974eca8e26be61d9d4193edee)
+
+Author: Eli Collins
+Ref: CDH-4806
+---
+ src/test/org/apache/hadoop/ipc/TestSaslRPC.java |    5 ++++-
+ 1 files changed, 4 insertions(+), 1 deletions(-)
+
+diff --git a/src/test/org/apache/hadoop/ipc/TestSaslRPC.java b/src/test/org/apache/hadoop/ipc/TestSaslRPC.java
+index 68c393d..14c7f00 100644
+--- a/src/test/org/apache/hadoop/ipc/TestSaslRPC.java
++++ b/src/test/org/apache/hadoop/ipc/TestSaslRPC.java
+@@ -364,7 +364,10 @@ public class TestSaslRPC {
+     server.start();
+ 
+     final UserGroupInformation current = UserGroupInformation.getCurrentUser();
+-    final InetSocketAddress addr = NetUtils.getConnectAddress(server);
++    // don't use what the rpc server claims it's bound to since it's the
++    // client's responsibility to set the service
++    final InetSocketAddress addr = NetUtils.createSocketAddr(
++        ADDRESS, server.getListenerAddress().getPort());
+     TestTokenIdentifier tokenId = new TestTokenIdentifier(new Text(current
+         .getUserName()));
+     Token<TestTokenIdentifier> token = new Token<TestTokenIdentifier>(tokenId,
+-- 
+1.7.0.4
+

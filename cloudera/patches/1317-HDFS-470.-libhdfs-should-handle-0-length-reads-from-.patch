@@ -1,0 +1,90 @@
+From cf9de4674202ac9e28a835733d3caf56496c172f Mon Sep 17 00:00:00 2001
+From: Colin Patrick Mccabe <cmccabe@cloudera.com>
+Date: Fri, 20 Jul 2012 13:53:48 -0700
+Subject: [PATCH 1317/1344] HDFS-470. libhdfs should handle 0-length reads from FSInputStream correctly.
+
+Reason: bug fix
+Ref: CDH-6716
+Author: Colin Patrick McCabe
+---
+ src/c++/libhdfs/hdfs.c |   22 ++++++++++------------
+ src/c++/libhdfs/hdfs.h |   12 ++++++++----
+ 2 files changed, 18 insertions(+), 16 deletions(-)
+
+diff --git a/src/c++/libhdfs/hdfs.c b/src/c++/libhdfs/hdfs.c
+index 706f5d7..0a3ac0e 100644
+--- a/src/c++/libhdfs/hdfs.c
++++ b/src/c++/libhdfs/hdfs.c
+@@ -865,14 +865,13 @@ tSize hdfsRead(hdfsFS fs, hdfsFile f, void* buffer, tSize length)
+         noReadBytes = jVal.i;
+         if (noReadBytes > 0) {
+             (*env)->GetByteArrayRegion(env, jbRarray, 0, noReadBytes, buffer);
+-        }  else {
+-            //This is a valid case: there aren't any bytes left to read!
+-          if (noReadBytes == 0 || noReadBytes < -1) {
+-            fprintf(stderr, "WARN: FSDataInputStream.read returned invalid return code - libhdfs returning EOF, i.e., 0: %d\n", noReadBytes);
+-          }
++        }  else if (noReadBytes == 0) {
++            errno = EINTR;
++            noReadBytes = -1;
++        } else {
++            // EOF
+             noReadBytes = 0;
+         }
+-        errno = 0;
+     }
+ 
+     destroyLocalReference(env, jbRarray);
+@@ -929,14 +928,13 @@ tSize hdfsPread(hdfsFS fs, hdfsFile f, tOffset position,
+         noReadBytes = jVal.i;
+         if (noReadBytes > 0) {
+             (*env)->GetByteArrayRegion(env, jbRarray, 0, noReadBytes, buffer);
+-        }  else {
+-            //This is a valid case: there aren't any bytes left to read!
+-          if (noReadBytes == 0 || noReadBytes < -1) {
+-            fprintf(stderr, "WARN: FSDataInputStream.read returned invalid return code - libhdfs returning EOF, i.e., 0: %d\n", noReadBytes);
+-          }
++        } else if (noReadBytes == 0) {
++            errno = EINTR;
++            noReadBytes = -1;
++        } else  {
++            // EOF
+             noReadBytes = 0;
+         }
+-        errno = 0;
+     }
+     destroyLocalReference(env, jbRarray);
+ 
+diff --git a/src/c++/libhdfs/hdfs.h b/src/c++/libhdfs/hdfs.h
+index 48e0160..55ef588 100644
+--- a/src/c++/libhdfs/hdfs.h
++++ b/src/c++/libhdfs/hdfs.h
+@@ -307,8 +307,13 @@ extern  "C" {
+      * @param file The file handle.
+      * @param buffer The buffer to copy read bytes into.
+      * @param length The length of the buffer.
+-     * @return Returns the number of bytes actually read, possibly less
+-     * than than length;-1 on error.
++     * @return      On success, a positive number indicating how many bytes
++     *              were read.
++     *              On end-of-file, 0.
++     *              On error, -1.  Errno will be set to the error code.
++     *              Just like the POSIX read function, hdfsRead will return -1
++     *              and set errno to EINTR if data is temporarily unavailable,
++     *              but we are not yet at the end of the file.
+      */
+     tSize hdfsRead(hdfsFS fs, hdfsFile file, void* buffer, tSize length);
+ 
+@@ -320,8 +325,7 @@ extern  "C" {
+      * @param position Position from which to read
+      * @param buffer The buffer to copy read bytes into.
+      * @param length The length of the buffer.
+-     * @return Returns the number of bytes actually read, possibly less than
+-     * than length;-1 on error.
++     * @return See hdfsRead
+      */
+     tSize hdfsPread(hdfsFS fs, hdfsFile file, tOffset position,
+                     void* buffer, tSize length);
+-- 
+1.7.0.4
+

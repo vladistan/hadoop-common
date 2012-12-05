@@ -1,0 +1,71 @@
+From 11724f78695298d4929cbcdb921fe41b0746d3aa Mon Sep 17 00:00:00 2001
+From: Tom White <tom@cloudera.com>
+Date: Thu, 5 Jul 2012 16:01:57 -0400
+Subject: [PATCH 1199/1344] MAPREDUCE-4359. Potential deadlock in Counters.
+
+Reason: Bug
+Ref: CDH-6464
+Author: Tom White
+---
+ src/mapred/org/apache/hadoop/mapred/Counters.java |   36 +++++++++++---------
+ 1 files changed, 20 insertions(+), 16 deletions(-)
+
+diff --git a/src/mapred/org/apache/hadoop/mapred/Counters.java b/src/mapred/org/apache/hadoop/mapred/Counters.java
+index e21b26c..ee01f08 100644
+--- a/src/mapred/org/apache/hadoop/mapred/Counters.java
++++ b/src/mapred/org/apache/hadoop/mapred/Counters.java
+@@ -295,7 +295,7 @@ public class Counters implements Writable, Iterable<Counters.Group> {
+      * @deprecated use {@link #getCounter(String)} instead
+      */
+     @Deprecated
+-    public synchronized Counter getCounter(int id, String name) {
++    public Counter getCounter(int id, String name) {
+       return getCounterForName(name);
+     }
+     
+@@ -304,23 +304,27 @@ public class Counters implements Writable, Iterable<Counters.Group> {
+      * @param name the internal counter name
+      * @return the counter
+      */
+-    public synchronized Counter getCounterForName(String name) {
+-      String shortName = getShortName(name, COUNTER_NAME_LIMIT);
+-      Counter result = subcounters.get(shortName);
+-      if (result == null) {
+-        if (LOG.isDebugEnabled()) {
+-          LOG.debug("Adding " + shortName);
+-        }
+-        numCounters = (numCounters == 0) ? Counters.this.size(): numCounters; 
+-        if (numCounters >= MAX_COUNTER_LIMIT) {
+-          throw new CountersExceededException("Error: Exceeded limits on number of counters - " 
+-              + "Counters=" + numCounters + " Limit=" + MAX_COUNTER_LIMIT);
++    public Counter getCounterForName(String name) {
++      synchronized(Counters.this) { // lock ordering: Counters then Group
++        synchronized (this) {
++          String shortName = getShortName(name, COUNTER_NAME_LIMIT);
++          Counter result = subcounters.get(shortName);
++          if (result == null) {
++            if (LOG.isDebugEnabled()) {
++              LOG.debug("Adding " + shortName);
++            }
++            numCounters = (numCounters == 0) ? Counters.this.size(): numCounters; 
++            if (numCounters >= MAX_COUNTER_LIMIT) {
++              throw new CountersExceededException("Error: Exceeded limits on number of counters - " 
++                  + "Counters=" + numCounters + " Limit=" + MAX_COUNTER_LIMIT);
++            }
++            result = new Counter(shortName, localize(shortName + ".name", shortName), 0L);
++            subcounters.put(shortName, result);
++            numCounters++;
++          }
++          return result;
+         }
+-        result = new Counter(shortName, localize(shortName + ".name", shortName), 0L);
+-        subcounters.put(shortName, result);
+-        numCounters++;
+       }
+-      return result;
+     }
+     
+     /**
+-- 
+1.7.0.4
+

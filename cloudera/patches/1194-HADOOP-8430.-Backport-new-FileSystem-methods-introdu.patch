@@ -1,0 +1,69 @@
+From d4e57f7ee2a265c64c255b8b112a20b61d295267 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Mon, 11 Jun 2012 23:06:54 -0700
+Subject: [PATCH 1194/1344] HADOOP-8430. Backport new FileSystem methods introduced by HADOOP-8014.
+
+Per HADOOP-8422, backport the new FileSystem methods from HADOOP-8014 so
+users can transition over to the new federation friendly APIs in CDH4.
+
+Reason: Encourage transition to federation friendly APIs
+Author: Eli Collins
+Ref: CDH-6177
+---
+ src/core/org/apache/hadoop/fs/FileSystem.java |   29 +++++++++++++++++++++++-
+ 1 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/fs/FileSystem.java b/src/core/org/apache/hadoop/fs/FileSystem.java
+index 6cc3961..c2742fa 100644
+--- a/src/core/org/apache/hadoop/fs/FileSystem.java
++++ b/src/core/org/apache/hadoop/fs/FileSystem.java
+@@ -1424,19 +1424,44 @@ public abstract class FileSystem extends Configured implements Closeable {
+     return getFileStatus(f).getBlockSize();
+   }
+     
+-  /** Return the number of bytes that large input files should be optimally
+-   * be split into to minimize i/o time. */
++  /**
++   * Return the number of bytes that large input files should be optimally
++   * be split into to minimize i/o time.
++   * @deprecated use {@link #getDefaultBlockSize(Path)} instead
++   */
++  @Deprecated
+   public long getDefaultBlockSize() {
+     // default to 32MB: large enough to minimize the impact of seeks
+     return getConf().getLong("fs.local.block.size", 32 * 1024 * 1024);
+   }
++
++  /**
++   * Return the number of bytes that large input files should be optimally
++   * be split into to minimize i/o time.
++   * @param f path of file
++   * @return the default block size for the path's filesystem
++   */
++  public long getDefaultBlockSize(Path f) {
++    return getDefaultBlockSize();
++  }
+     
+   /**
+    * Get the default replication.
++   * @deprecated use {@link #getDefaultReplication(Path)} instead
+    */
++  @Deprecated
+   public short getDefaultReplication() { return 1; }
+ 
+   /**
++   * Get the default replication.
++   * @param path of the file
++   * @return default replication for the path's filesystem 
++   */
++  public short getDefaultReplication(Path path) {
++    return getDefaultReplication();
++  }
++
++  /**
+    * Return a file status object that represents the path.
+    * @param f The path we want information from
+    * @return a FileStatus object
+-- 
+1.7.0.4
+

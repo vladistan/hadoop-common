@@ -38,6 +38,7 @@ public abstract class AbstractClusterStory implements ClusterStory {
   protected Map<String, MachineNode> mNodeMap;
   protected Map<String, RackNode> rNodeMap;
   protected int maximumDistance = 0;
+  protected Random random;
   
   @Override
   public Set<MachineNode> getMachines() {
@@ -52,8 +53,7 @@ public abstract class AbstractClusterStory implements ClusterStory {
   }
   
   @Override
-  public synchronized MachineNode[] getRandomMachines(int expected, 
-                                                      Random random) {
+  public synchronized MachineNode[] getRandomMachines(int expected) {
     if (expected == 0) {
       return new MachineNode[0];
     }
@@ -64,6 +64,7 @@ public abstract class AbstractClusterStory implements ClusterStory {
 
     if (mNodesFlattened == null) {
       mNodesFlattened = machineNodes.toArray(new MachineNode[total]);
+      random = new Random();
     }
 
     MachineNode[] retval = new MachineNode[select];

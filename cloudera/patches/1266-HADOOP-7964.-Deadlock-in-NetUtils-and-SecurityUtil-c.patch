@@ -1,0 +1,720 @@
+From b27a9a5fea1ac78f1396dd5f0334584dfa98e1a7 Mon Sep 17 00:00:00 2001
+From: Suresh Srinivas <suresh@apache.org>
+Date: Tue, 24 Jan 2012 01:24:53 +0000
+Subject: [PATCH 1266/1344] HADOOP-7964. Deadlock in NetUtils and SecurityUtil class initialization. Contributed by Daryn Sharp.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1235107 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 7129823f514db06685d04a0decc3217986d4481b)
+
+Author: Daryn Sharp
+Ref: CDH-4806
+---
+ src/core/org/apache/hadoop/net/NetUtils.java       |  171 +------------------
+ .../org/apache/hadoop/security/SecurityUtil.java   |  182 ++++++++++++++++++--
+ src/test/org/apache/hadoop/fs/TestFileSystem.java  |    2 +-
+ .../apache/hadoop/net/NetUtilsTestResolver.java    |   74 --------
+ src/test/org/apache/hadoop/net/TestNetUtils.java   |   16 +--
+ .../hadoop/security/NetUtilsTestResolver.java      |   85 +++++++++
+ .../apache/hadoop/security/TestSecurityUtil.java   |    2 +-
+ 7 files changed, 258 insertions(+), 274 deletions(-)
+ delete mode 100644 src/test/org/apache/hadoop/net/NetUtilsTestResolver.java
+ create mode 100644 src/test/org/apache/hadoop/security/NetUtilsTestResolver.java
+
+diff --git a/src/core/org/apache/hadoop/net/NetUtils.java b/src/core/org/apache/hadoop/net/NetUtils.java
+index 79b1849..ee51500 100644
+--- a/src/core/org/apache/hadoop/net/NetUtils.java
++++ b/src/core/org/apache/hadoop/net/NetUtils.java
+@@ -48,35 +48,12 @@ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.util.ReflectionUtils;
+ import org.apache.hadoop.thirdparty.guava.common.base.Preconditions;
+ 
+-// this will need to be replaced someday when there is a suitable replacement
+-import sun.net.dns.ResolverConfiguration;
+-import sun.net.util.IPAddressUtil;
+-
+ public class NetUtils {
+   private static final Log LOG = LogFactory.getLog(NetUtils.class);
+     
+   private static Map<String, String> hostToResolved = 
+                                      new HashMap<String, String>();
+ 
+-  private static HostResolver hostResolver;
+-  
+-  static {
+-    // SecurityUtils requires a more secure host resolver if tokens are
+-    // using hostnames
+-    setUseQualifiedHostResolver(!SecurityUtil.getTokenServiceUseIp());
+-  }
+-
+-  /**
+-   * This method is intended for use only by SecurityUtils!
+-   * @param flag where the qualified or standard host resolver is used
+-   *             to create socket addresses
+-   */
+-  public static void setUseQualifiedHostResolver(boolean flag) {
+-      hostResolver = flag
+-          ? new QualifiedHostResolver()
+-          : new StandardHostResolver();
+-  }
+-  
+   /**
+    * Get the socket factory for the given class according to its
+    * configuration parameter
+@@ -209,7 +186,7 @@ public class NetUtils {
+     
+     InetSocketAddress addr;
+     try {
+-      InetAddress iaddr = hostResolver.getByName(resolveHost);
++      InetAddress iaddr = SecurityUtil.getByName(resolveHost);
+       // if there is a static entry for the host, make the returned
+       // address look like the original given host
+       if (staticHost != null) {
+@@ -222,150 +199,6 @@ public class NetUtils {
+     return addr;
+   }
+   
+-  protected interface HostResolver {
+-    InetAddress getByName(String host) throws UnknownHostException;    
+-  }
+-  
+-  /**
+-   * Uses standard java host resolution
+-   */
+-  protected static class StandardHostResolver implements HostResolver {
+-    public InetAddress getByName(String host) throws UnknownHostException {
+-      return InetAddress.getByName(host);
+-    }
+-  }
+-  
+-  /**
+-   * This an alternate resolver with important properties that the standard
+-   * java resolver lacks:
+-   * 1) The hostname is fully qualified.  This avoids security issues if not
+-   *    all hosts in the cluster do not share the same search domains.  It
+-   *    also prevents other hosts from performing unnecessary dns searches.
+-   *    In contrast, InetAddress simply returns the host as given.
+-   * 2) The InetAddress is instantiated with an exact host and IP to prevent
+-   *    further unnecessary lookups.  InetAddress may perform an unnecessary
+-   *    reverse lookup for an IP.
+-   * 3) A call to getHostName() will always return the qualified hostname, or
+-   *    more importantly, the IP if instantiated with an IP.  This avoids
+-   *    unnecessary dns timeouts if the host is not resolvable.
+-   * 4) Point 3 also ensures that if the host is re-resolved, ex. during a
+-   *    connection re-attempt, that a reverse lookup to host and forward
+-   *    lookup to IP is not performed since the reverse/forward mappings may
+-   *    not always return the same IP.  If the client initiated a connection
+-   *    with an IP, then that IP is all that should ever be contacted.
+-   *    
+-   * NOTE: this resolver is only used if:
+-   *       hadoop.security.token.service.use_ip=false 
+-   */
+-  protected static class QualifiedHostResolver implements HostResolver {
+-    @SuppressWarnings("unchecked")
+-    private List<String> searchDomains =
+-        ResolverConfiguration.open().searchlist();
+-    
+-    /**
+-     * Create an InetAddress with a fully qualified hostname of the given
+-     * hostname.  InetAddress does not qualify an incomplete hostname that
+-     * is resolved via the domain search list.
+-     * {@link InetAddress#getCanonicalHostName()} will fully qualify the
+-     * hostname, but it always return the A record whereas the given hostname
+-     * may be a CNAME.
+-     * 
+-     * @param host a hostname or ip address
+-     * @return InetAddress with the fully qualified hostname or ip
+-     * @throws UnknownHostException if host does not exist
+-     */
+-    public InetAddress getByName(String host) throws UnknownHostException {
+-      InetAddress addr = null;
+-
+-      if (IPAddressUtil.isIPv4LiteralAddress(host)) {
+-        // use ipv4 address as-is
+-        byte[] ip = IPAddressUtil.textToNumericFormatV4(host);
+-        addr = InetAddress.getByAddress(host, ip);
+-      } else if (IPAddressUtil.isIPv6LiteralAddress(host)) {
+-        // use ipv6 address as-is
+-        byte[] ip = IPAddressUtil.textToNumericFormatV6(host);
+-        addr = InetAddress.getByAddress(host, ip);
+-      } else if (host.endsWith(".")) {
+-        // a rooted host ends with a dot, ex. "host."
+-        // rooted hosts never use the search path, so only try an exact lookup
+-        addr = getByExactName(host);
+-      } else if (host.contains(".")) {
+-        // the host contains a dot (domain), ex. "host.domain"
+-        // try an exact host lookup, then fallback to search list
+-        addr = getByExactName(host);
+-        if (addr == null) {
+-          addr = getByNameWithSearch(host);
+-        }
+-      } else {
+-        // it's a simple host with no dots, ex. "host"
+-        // try the search list, then fallback to exact host
+-        InetAddress loopback = InetAddress.getByName(null);
+-        if (host.equalsIgnoreCase(loopback.getHostName())) {
+-          addr = InetAddress.getByAddress(host, loopback.getAddress());
+-        } else {
+-          addr = getByNameWithSearch(host);
+-          if (addr == null) {
+-            addr = getByExactName(host);
+-          }
+-        }
+-      }
+-      // unresolvable!
+-      if (addr == null) {
+-        throw new UnknownHostException(host);
+-      }
+-      return addr;
+-    }
+-
+-    InetAddress getByExactName(String host) {
+-      InetAddress addr = null;
+-      // InetAddress will use the search list unless the host is rooted
+-      // with a trailing dot.  The trailing dot will disable any use of the
+-      // search path in a lower level resolver.  See RFC 1535.
+-      String fqHost = host;
+-      if (!fqHost.endsWith(".")) fqHost += ".";
+-      try {
+-        addr = getInetAddressByName(fqHost);
+-        // can't leave the hostname as rooted or other parts of the system
+-        // malfunction, ex. kerberos principals are lacking proper host
+-        // equivalence for rooted/non-rooted hostnames
+-        addr = InetAddress.getByAddress(host, addr.getAddress());
+-      } catch (UnknownHostException e) {
+-        // ignore, caller will throw if necessary
+-      }
+-      return addr;
+-    }
+-
+-    InetAddress getByNameWithSearch(String host) {
+-      InetAddress addr = null;
+-      if (host.endsWith(".")) { // already qualified?
+-        addr = getByExactName(host); 
+-      } else {
+-        for (String domain : searchDomains) {
+-          String dot = !domain.startsWith(".") ? "." : "";
+-          addr = getByExactName(host + dot + domain);
+-          if (addr != null) break;
+-        }
+-      }
+-      return addr;
+-    }
+-
+-    // implemented as a separate method to facilitate unit testing
+-    InetAddress getInetAddressByName(String host) throws UnknownHostException {
+-      return InetAddress.getByName(host);
+-    }
+-
+-    void setSearchDomains(String ... domains) {
+-      searchDomains = Arrays.asList(domains);
+-    }
+-  }
+-  
+-  /**
+-   * This is for testing only!
+-   */
+-  static void setHostResolver(HostResolver newResolver) {
+-    hostResolver = newResolver;
+-  }
+-  
+   /**
+    * Resolve the uri's hostname and add the default port if not in the uri
+    * @param uri to resolve
+@@ -407,7 +240,7 @@ public class NetUtils {
+     String fqHost = canonicalizedHostCache.get(host);
+     if (fqHost == null) {
+       try {
+-        fqHost = hostResolver.getByName(host).getHostName();
++        fqHost = SecurityUtil.getByName(host).getHostName();
+         // slight race condition, but won't hurt 
+         canonicalizedHostCache.put(host, fqHost);
+       } catch (UnknownHostException e) {
+diff --git a/src/core/org/apache/hadoop/security/SecurityUtil.java b/src/core/org/apache/hadoop/security/SecurityUtil.java
+index 19a2740..56fe5d3 100644
+--- a/src/core/org/apache/hadoop/security/SecurityUtil.java
++++ b/src/core/org/apache/hadoop/security/SecurityUtil.java
+@@ -22,6 +22,8 @@ import java.net.InetSocketAddress;
+ import java.net.URI;
+ import java.net.URL;
+ import java.net.UnknownHostException;
++import java.util.Arrays;
++import java.util.List;
+ import java.util.Set;
+ 
+ import javax.security.auth.Subject;
+@@ -36,6 +38,9 @@ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.authorize.AccessControlList;
+ import org.apache.hadoop.security.token.Token;
+ 
++//this will need to be replaced someday when there is a suitable replacement
++import sun.net.dns.ResolverConfiguration;
++import sun.net.util.IPAddressUtil;
+ import sun.security.jgss.krb5.Krb5Util;
+ import sun.security.krb5.Credentials;
+ import sun.security.krb5.PrincipalName;
+@@ -45,8 +50,9 @@ public class SecurityUtil {
+   public static final String HOSTNAME_PATTERN = "_HOST";
+ 
+   // controls whether buildTokenService will use an ip or host/ip as given
+-  // by the user
+-  private static boolean useIpForTokenService;
++  // by the user; visible for testing
++  static boolean useIpForTokenService;
++  static HostResolver hostResolver;
+   
+   static {
+     boolean useIp = new Configuration().getBoolean(
+@@ -60,15 +66,9 @@ public class SecurityUtil {
+    */
+   static void setTokenServiceUseIp(boolean flag) {
+     useIpForTokenService = flag;
+-    NetUtils.setUseQualifiedHostResolver(!flag);
+-  }
+-  
+-  /**
+-   * Intended only for temporary use by NetUtils.  Do not use.
+-   * @return whether tokens use an IP address
+-   */
+- public static boolean getTokenServiceUseIp() {
+-    return useIpForTokenService;
++    hostResolver = !useIpForTokenService
++        ? new QualifiedHostResolver()
++        : new StandardHostResolver();
+   }
+   
+   /**
+@@ -118,6 +118,7 @@ public class SecurityUtil {
+    * it will be removed when the Java behavior is changed.
+    * 
+    * @param remoteHost Target URL the krb-https client will access
++   * @throws IOException if a service ticket is not available
+    */
+   public static void fetchServiceTicket(URL remoteHost) throws IOException {
+     if(!UserGroupInformation.isSecurityEnabled())
+@@ -154,7 +155,7 @@ public class SecurityUtil {
+    * @param hostname
+    *          the fully-qualified domain name used for substitution
+    * @return converted Kerberos principal name
+-   * @throws IOException
++   * @throws IOException if the service ticket cannot be retrieved
+    */
+   public static String getServerPrincipal(String principalConfig,
+       String hostname) throws IOException {
+@@ -179,7 +180,7 @@ public class SecurityUtil {
+    * @param addr
+    *          InetAddress of the host used for substitution
+    * @return converted Kerberos principal name
+-   * @throws IOException
++   * @throws IOException if the client address cannot be determined
+    */
+   public static String getServerPrincipal(String principalConfig,
+       InetAddress addr) throws IOException {
+@@ -226,7 +227,7 @@ public class SecurityUtil {
+    *          the key to look for keytab file in conf
+    * @param userNameKey
+    *          the key to look for user's Kerberos principal name in conf
+-   * @throws IOException
++   * @throws IOException if the client address cannot be determined
+    */
+   public static void login(final Configuration conf,
+       final String keytabFileKey, final String userNameKey) throws IOException {
+@@ -245,7 +246,7 @@ public class SecurityUtil {
+    *          the key to look for user's Kerberos principal name in conf
+    * @param hostname
+    *          hostname to use for substitution
+-   * @throws IOException
++   * @throws IOException if login fails
+    */
+   public static void login(final Configuration conf,
+       final String keytabFileKey, final String userNameKey, String hostname)
+@@ -348,4 +349,155 @@ public class SecurityUtil {
+   public static String getHostFromPrincipal(String principalName) {
+     return new KerberosName(principalName).getHostName();
+   }
++  
++  /**
++   * Resolves a host subject to the security requirements determined by
++   * hadoop.security.token.service.use_ip.
++   * 
++   * @param hostname host or ip to resolve
++   * @return a resolved host
++   * @throws UnknownHostException if the host doesn't exist
++   */
++  //@InterfaceAudience.Private
++  public static
++  InetAddress getByName(String hostname) throws UnknownHostException {
++    return hostResolver.getByName(hostname);
++  }
++  
++  interface HostResolver {
++    InetAddress getByName(String host) throws UnknownHostException;    
++  }
++  
++  /**
++   * Uses standard java host resolution
++   */
++  static class StandardHostResolver implements HostResolver {
++    public InetAddress getByName(String host) throws UnknownHostException {
++      return InetAddress.getByName(host);
++    }
++  }
++  
++  /**
++   * This an alternate resolver with important properties that the standard
++   * java resolver lacks:
++   * 1) The hostname is fully qualified.  This avoids security issues if not
++   *    all hosts in the cluster do not share the same search domains.  It
++   *    also prevents other hosts from performing unnecessary dns searches.
++   *    In contrast, InetAddress simply returns the host as given.
++   * 2) The InetAddress is instantiated with an exact host and IP to prevent
++   *    further unnecessary lookups.  InetAddress may perform an unnecessary
++   *    reverse lookup for an IP.
++   * 3) A call to getHostName() will always return the qualified hostname, or
++   *    more importantly, the IP if instantiated with an IP.  This avoids
++   *    unnecessary dns timeouts if the host is not resolvable.
++   * 4) Point 3 also ensures that if the host is re-resolved, ex. during a
++   *    connection re-attempt, that a reverse lookup to host and forward
++   *    lookup to IP is not performed since the reverse/forward mappings may
++   *    not always return the same IP.  If the client initiated a connection
++   *    with an IP, then that IP is all that should ever be contacted.
++   *    
++   * NOTE: this resolver is only used if:
++   *       hadoop.security.token.service.use_ip=false 
++   */
++  protected static class QualifiedHostResolver implements HostResolver {
++    @SuppressWarnings("unchecked")
++    private List<String> searchDomains =
++        ResolverConfiguration.open().searchlist();
++    
++    /**
++     * Create an InetAddress with a fully qualified hostname of the given
++     * hostname.  InetAddress does not qualify an incomplete hostname that
++     * is resolved via the domain search list.
++     * {@link InetAddress#getCanonicalHostName()} will fully qualify the
++     * hostname, but it always return the A record whereas the given hostname
++     * may be a CNAME.
++     * 
++     * @param host a hostname or ip address
++     * @return InetAddress with the fully qualified hostname or ip
++     * @throws UnknownHostException if host does not exist
++     */
++    public InetAddress getByName(String host) throws UnknownHostException {
++      InetAddress addr = null;
++
++      if (IPAddressUtil.isIPv4LiteralAddress(host)) {
++        // use ipv4 address as-is
++        byte[] ip = IPAddressUtil.textToNumericFormatV4(host);
++        addr = InetAddress.getByAddress(host, ip);
++      } else if (IPAddressUtil.isIPv6LiteralAddress(host)) {
++        // use ipv6 address as-is
++        byte[] ip = IPAddressUtil.textToNumericFormatV6(host);
++        addr = InetAddress.getByAddress(host, ip);
++      } else if (host.endsWith(".")) {
++        // a rooted host ends with a dot, ex. "host."
++        // rooted hosts never use the search path, so only try an exact lookup
++        addr = getByExactName(host);
++      } else if (host.contains(".")) {
++        // the host contains a dot (domain), ex. "host.domain"
++        // try an exact host lookup, then fallback to search list
++        addr = getByExactName(host);
++        if (addr == null) {
++          addr = getByNameWithSearch(host);
++        }
++      } else {
++        // it's a simple host with no dots, ex. "host"
++        // try the search list, then fallback to exact host
++        InetAddress loopback = InetAddress.getByName(null);
++        if (host.equalsIgnoreCase(loopback.getHostName())) {
++          addr = InetAddress.getByAddress(host, loopback.getAddress());
++        } else {
++          addr = getByNameWithSearch(host);
++          if (addr == null) {
++            addr = getByExactName(host);
++          }
++        }
++      }
++      // unresolvable!
++      if (addr == null) {
++        throw new UnknownHostException(host);
++      }
++      return addr;
++    }
++
++    InetAddress getByExactName(String host) {
++      InetAddress addr = null;
++      // InetAddress will use the search list unless the host is rooted
++      // with a trailing dot.  The trailing dot will disable any use of the
++      // search path in a lower level resolver.  See RFC 1535.
++      String fqHost = host;
++      if (!fqHost.endsWith(".")) fqHost += ".";
++      try {
++        addr = getInetAddressByName(fqHost);
++        // can't leave the hostname as rooted or other parts of the system
++        // malfunction, ex. kerberos principals are lacking proper host
++        // equivalence for rooted/non-rooted hostnames
++        addr = InetAddress.getByAddress(host, addr.getAddress());
++      } catch (UnknownHostException e) {
++        // ignore, caller will throw if necessary
++      }
++      return addr;
++    }
++
++    InetAddress getByNameWithSearch(String host) {
++      InetAddress addr = null;
++      if (host.endsWith(".")) { // already qualified?
++        addr = getByExactName(host); 
++      } else {
++        for (String domain : searchDomains) {
++          String dot = !domain.startsWith(".") ? "." : "";
++          addr = getByExactName(host + dot + domain);
++          if (addr != null) break;
++        }
++      }
++      return addr;
++    }
++
++    // implemented as a separate method to facilitate unit testing
++    InetAddress getInetAddressByName(String host) throws UnknownHostException {
++      return InetAddress.getByName(host);
++    }
++
++    void setSearchDomains(String ... domains) {
++      searchDomains = Arrays.asList(domains);
++    }
++  }  
+ }
+diff --git a/src/test/org/apache/hadoop/fs/TestFileSystem.java b/src/test/org/apache/hadoop/fs/TestFileSystem.java
+index 6adfe67..191dd44 100644
+--- a/src/test/org/apache/hadoop/fs/TestFileSystem.java
++++ b/src/test/org/apache/hadoop/fs/TestFileSystem.java
+@@ -61,7 +61,7 @@ import org.apache.hadoop.mapred.Reporter;
+ import org.apache.hadoop.mapred.SequenceFileInputFormat;
+ import org.apache.hadoop.mapred.lib.LongSumReducer;
+ import org.apache.hadoop.net.NetUtils;
+-import org.apache.hadoop.net.NetUtilsTestResolver;
++import org.apache.hadoop.security.NetUtilsTestResolver;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+diff --git a/src/test/org/apache/hadoop/net/NetUtilsTestResolver.java b/src/test/org/apache/hadoop/net/NetUtilsTestResolver.java
+deleted file mode 100644
+index 819264c..0000000
+--- a/src/test/org/apache/hadoop/net/NetUtilsTestResolver.java
++++ /dev/null
+@@ -1,74 +0,0 @@
+-/**
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package org.apache.hadoop.net;
+-
+-import java.net.InetAddress;
+-import java.net.UnknownHostException;
+-import java.util.HashMap;
+-import java.util.LinkedList;
+-import java.util.List;
+-import java.util.Map;
+-
+-import org.apache.hadoop.net.NetUtils.QualifiedHostResolver;
+-
+-/**
+- * provides a dummy dns search resolver with a configurable search path
+- * and host mapping
+- */
+-public class NetUtilsTestResolver extends QualifiedHostResolver {
+-  Map<String, InetAddress> resolvedHosts = new HashMap<String, InetAddress>();
+-  List<String> hostSearches = new LinkedList<String>();
+-
+-  public static NetUtilsTestResolver install() {
+-    NetUtilsTestResolver resolver = new NetUtilsTestResolver();
+-    resolver.setSearchDomains("a.b", "b", "c");
+-    resolver.addResolvedHost("host.a.b.", "1.1.1.1");
+-    resolver.addResolvedHost("b-host.b.", "2.2.2.2");
+-    resolver.addResolvedHost("simple.", "3.3.3.3");    
+-    NetUtils.setHostResolver(resolver);
+-    return resolver;
+-  }
+-
+-  public void addResolvedHost(String host, String ip) {
+-    InetAddress addr;
+-    try {
+-      addr = InetAddress.getByName(ip);
+-      addr = InetAddress.getByAddress(host, addr.getAddress());
+-    } catch (UnknownHostException e) {
+-      throw new IllegalArgumentException("not an ip:"+ip);
+-    }
+-    resolvedHosts.put(host, addr);
+-  }
+-
+-  InetAddress getInetAddressByName(String host) throws UnknownHostException {
+-    hostSearches.add(host);
+-    if (!resolvedHosts.containsKey(host)) {
+-      throw new UnknownHostException(host);
+-    }
+-    return resolvedHosts.get(host);
+-  }
+-
+-  String[] getHostSearches() {
+-    return hostSearches.toArray(new String[0]);
+-  }
+-
+-  void reset() {
+-    hostSearches.clear();
+-  }
+-}
+diff --git a/src/test/org/apache/hadoop/net/TestNetUtils.java b/src/test/org/apache/hadoop/net/TestNetUtils.java
+index 806fe9f..f91aa55 100644
+--- a/src/test/org/apache/hadoop/net/TestNetUtils.java
++++ b/src/test/org/apache/hadoop/net/TestNetUtils.java
+@@ -32,6 +32,7 @@ import java.net.Socket;
+ import java.net.SocketException;
+ import java.net.SocketTimeoutException;
+ import java.net.UnknownHostException;
++import java.net.URI;
+ import java.util.HashMap;
+ import java.util.LinkedList;
+ import java.util.List;
+@@ -42,20 +43,7 @@ import org.apache.commons.lang.StringUtils;
+ import org.apache.hadoop.conf.Configuration;
+ 
+ import org.apache.hadoop.io.IOUtils;
+-import org.apache.hadoop.net.NetUtils.QualifiedHostResolver;
+-=======
+-import java.net.Socket;
+-import java.net.SocketException;
+-import java.net.URI;
+-import java.net.UnknownHostException;
+-
+-import org.apache.commons.lang.StringUtils;
+-import org.apache.hadoop.conf.Configuration;
+-import org.junit.Before;
+-import org.junit.BeforeClass;
+-import org.junit.Test;
+->>>>>>> 88cc960... HDFS-2450. Filesystem supports path with both short names and FQDN. Contributed by Daryn Sharp.
+-
++import org.apache.hadoop.security.NetUtilsTestResolver;
+ 
+ public class TestNetUtils {
+ 
+diff --git a/src/test/org/apache/hadoop/security/NetUtilsTestResolver.java b/src/test/org/apache/hadoop/security/NetUtilsTestResolver.java
+new file mode 100644
+index 0000000..0f35e69
+--- /dev/null
++++ b/src/test/org/apache/hadoop/security/NetUtilsTestResolver.java
+@@ -0,0 +1,85 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.security;
++
++import java.net.InetAddress;
++import java.net.UnknownHostException;
++import java.util.HashMap;
++import java.util.LinkedList;
++import java.util.List;
++import java.util.Map;
++
++import org.apache.hadoop.security.SecurityUtil.QualifiedHostResolver;
++
++/**
++ * provides a dummy dns search resolver with a configurable search path
++ * and host mapping
++ */
++public class NetUtilsTestResolver extends QualifiedHostResolver {
++  Map<String, InetAddress> resolvedHosts = new HashMap<String, InetAddress>();
++  List<String> hostSearches = new LinkedList<String>();
++
++  public static NetUtilsTestResolver install() {
++    NetUtilsTestResolver resolver = new NetUtilsTestResolver();
++    resolver.setSearchDomains("a.b", "b", "c");
++    resolver.addResolvedHost("host.a.b.", "1.1.1.1");
++    resolver.addResolvedHost("b-host.b.", "2.2.2.2");
++    resolver.addResolvedHost("simple.", "3.3.3.3");    
++    SecurityUtil.hostResolver = resolver;
++    return resolver;
++  }
++
++  public void addResolvedHost(String host, String ip) {
++    InetAddress addr;
++    try {
++      addr = InetAddress.getByName(ip);
++      addr = InetAddress.getByAddress(host, addr.getAddress());
++    } catch (UnknownHostException e) {
++      throw new IllegalArgumentException("not an ip:"+ip);
++    }
++    resolvedHosts.put(host, addr);
++  }
++
++  @Override
++  public InetAddress getInetAddressByName(String host) throws UnknownHostException {
++    hostSearches.add(host);
++    if (!resolvedHosts.containsKey(host)) {
++      throw new UnknownHostException(host);
++    }
++    return resolvedHosts.get(host);
++  }
++
++  @Override
++  public InetAddress getByExactName(String host) {
++    return super.getByExactName(host);
++  }
++  
++  @Override
++  public InetAddress getByNameWithSearch(String host) {
++    return super.getByNameWithSearch(host);
++  }
++  
++  public String[] getHostSearches() {
++    return hostSearches.toArray(new String[0]);
++  }
++
++  public void reset() {
++    hostSearches.clear();
++  }
++}
+\ No newline at end of file
+diff --git a/src/test/org/apache/hadoop/security/TestSecurityUtil.java b/src/test/org/apache/hadoop/security/TestSecurityUtil.java
+index dd0a3a4..4b5ac50 100644
+--- a/src/test/org/apache/hadoop/security/TestSecurityUtil.java
++++ b/src/test/org/apache/hadoop/security/TestSecurityUtil.java
+@@ -200,7 +200,7 @@ public class TestSecurityUtil {
+     assertTrue(!addr.isUnresolved());
+     // don't know what the standard resolver will return for hostname.
+     // should be host for host; host or ip for ip is ambiguous
+-    if (!SecurityUtil.getTokenServiceUseIp()) {
++    if (!SecurityUtil.useIpForTokenService) {
+       assertEquals(host, addr.getHostName());
+       assertEquals(host, addr.getAddress().getHostName());
+     }
+-- 
+1.7.0.4
+

@@ -1,0 +1,47 @@
+From b4ae204d7684e7183a0fcc3586898afd352049e6 Mon Sep 17 00:00:00 2001
+From: Colin Patrick Mccabe <cmccabe@cloudera.com>
+Date: Fri, 20 Jul 2012 11:12:32 -0700
+Subject: [PATCH 1318/1344] HDFS-711. hdfsUtime does not handle atime = -1 or mtime = -1 correctly.
+
+Reason: bug fix
+Ref: CDH-6716
+Author: Colin Patrick McCabe
+---
+ src/c++/libhdfs/hdfs.c |    5 +++--
+ src/c++/libhdfs/hdfs.h |    4 ++--
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/c++/libhdfs/hdfs.c b/src/c++/libhdfs/hdfs.c
+index 0a3ac0e..60680b4 100644
+--- a/src/c++/libhdfs/hdfs.c
++++ b/src/c++/libhdfs/hdfs.c
+@@ -1721,8 +1721,9 @@ int hdfsUtime(hdfsFS fs, const char* path, tTime mtime, tTime atime)
+       return -2;
+     }
+ 
+-    jlong jmtime = mtime * (jlong)1000;
+-    jlong jatime = atime * (jlong)1000;
++    const tTime NO_CHANGE = -1;
++    jlong jmtime = (mtime == NO_CHANGE) ? -1 : (mtime * (jlong)1000);
++    jlong jatime = (atime == NO_CHANGE) ? -1 : (atime * (jlong)1000);
+ 
+     int ret = 0;
+     jthrowable jExc = NULL;
+diff --git a/src/c++/libhdfs/hdfs.h b/src/c++/libhdfs/hdfs.h
+index 55ef588..c2f521c 100644
+--- a/src/c++/libhdfs/hdfs.h
++++ b/src/c++/libhdfs/hdfs.h
+@@ -576,8 +576,8 @@ extern  "C" {
+      * hdfsUtime
+      * @param fs The configured filesystem handle.
+      * @param path the path to the file or directory
+-     * @param mtime new modification time or 0 for only set access time in seconds
+-     * @param atime new access time or 0 for only set modification time in seconds
++     * @param mtime new modification time or -1 for no change
++     * @param atime new access time or -1 for no change
+      * @return 0 on success else -1
+      */
+     int hdfsUtime(hdfsFS fs, const char* path, tTime mtime, tTime atime);
+-- 
+1.7.0.4
+

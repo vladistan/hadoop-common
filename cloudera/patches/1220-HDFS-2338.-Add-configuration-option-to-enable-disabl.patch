@@ -1,0 +1,76 @@
+From e09f6d141ae37d3fb2cddd64678dfe03aa9ec588 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Fri, 16 Sep 2011 04:04:09 +0000
+Subject: [PATCH 1220/1344] HDFS-2338. Add configuration option to enable/disable webhdfs.  Contributed by jitendra
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1171380 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit deab4dbf4741047c5c5d614a8a5f2806a583b050)
+
+Author: Jitendra Pandey
+Ref: CDH-4806
+---
+ src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java |    2 ++
+ .../hadoop/hdfs/server/datanode/DataNode.java      |   10 ++++++----
+ .../hadoop/hdfs/server/namenode/NameNode.java      |   12 ++++++++----
+ 3 files changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+index 5b5a65f..e67e71e 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+@@ -97,6 +97,8 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
+   public static final int     DFS_NAMENODE_REPLICATION_PENDING_TIMEOUT_SEC_DEFAULT = -1;
+   public static final String  DFS_NAMENODE_REPLICATION_MAX_STREAMS_KEY = "dfs.namenode.replication.max-streams";
+   public static final int     DFS_NAMENODE_REPLICATION_MAX_STREAMS_DEFAULT = 2;
++  public static final String  DFS_WEBHDFS_ENABLED_KEY = "dfs.webhdfs.enabled";
++  public static final boolean DFS_WEBHDFS_ENABLED_DEFAULT = false;
+   public static final String  DFS_PERMISSIONS_ENABLED_KEY = "dfs.permissions.enabled";
+   public static final boolean DFS_PERMISSIONS_ENABLED_DEFAULT = true;
+   public static final String  DFS_PERMISSIONS_SUPERUSERGROUP_KEY = "dfs.permissions.superusergroup";
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+index a51c846..3af773b 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+@@ -512,10 +512,12 @@ public class DataNode extends Configured
+     this.infoServer.addServlet(null, "/blockScannerReport", 
+                                DataBlockScanner.Servlet.class);
+ 
+-    infoServer.addJerseyResourcePackage(
+-        DatanodeWebHdfsMethods.class.getPackage().getName()
+-        + ";" + Param.class.getPackage().getName(),
+-        "/" + WebHdfsFileSystem.PATH_PREFIX + "/*");
++    if (conf.getBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY,
++        DFSConfigKeys.DFS_WEBHDFS_ENABLED_DEFAULT)) {
++      infoServer.addJerseyResourcePackage(DatanodeWebHdfsMethods.class
++          .getPackage().getName() + ";" + Param.class.getPackage().getName(),
++          "/" + WebHdfsFileSystem.PATH_PREFIX + "/*");
++    }
+     this.infoServer.start();
+     // adjust info port
+     this.dnRegistration.setInfoPort(this.infoServer.getPort());
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+index f796abd..aa91773 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+@@ -444,10 +444,14 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+           httpServer.addInternalServlet("contentSummary", "/contentSummary/*",
+               ContentSummaryServlet.class, false);
+ 
+-          httpServer.addJerseyResourcePackage(
+-              NamenodeWebHdfsMethods.class.getPackage().getName()
+-              + ";" + Param.class.getPackage().getName(),
+-              "/" + WebHdfsFileSystem.PATH_PREFIX + "/*");
++          if (conf.getBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY,
++              DFSConfigKeys.DFS_WEBHDFS_ENABLED_DEFAULT)) {
++            httpServer.addJerseyResourcePackage(NamenodeWebHdfsMethods.class
++                .getPackage().getName()
++                + ";"
++                + Param.class.getPackage().getName(), "/"
++                + WebHdfsFileSystem.PATH_PREFIX + "/*");
++          }
+           httpServer.start();
+       
+           // The web-server port can be ephemeral... ensure we have the correct info
+-- 
+1.7.0.4
+

@@ -1,0 +1,116 @@
+From ec331dbfb19df4311eb52bcc9c74eec192cd9c44 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Thu, 15 Sep 2011 15:28:58 +0000
+Subject: [PATCH 1218/1344] HDFS-2333. Change DFSOutputStream back to package private, otherwise, there are two SC_START_IN_CTOR findbugs warnings.  (szetszwo)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1171137 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit d3fddba9aa178eb89b4eebfb13f95a5de1b270f5)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ src/hdfs/org/apache/hadoop/hdfs/DFSClient.java     |   22 +++++++++++++------
+ .../apache/hadoop/hdfs/DistributedFileSystem.java  |    4 +--
+ .../web/resources/DatanodeWebHdfsMethods.java      |    7 +----
+ 3 files changed, 18 insertions(+), 15 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+index 4ead11f..ad97a60 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+@@ -801,12 +801,20 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+    * 
+    * @param src file name
+    * @param buffersize buffer size
+-   * @param progress for reporting write-progress
++   * @param progress for reporting write-progress; null is acceptable.
++   * @param statistics file system statistics; null is acceptable.
+    * @return an output stream for writing into the file
+-   * @throws IOException
+-   * @see ClientProtocol#append(String, String)
++   * 
++   * @see ClientProtocol#append(String, String) 
+    */
+-  public DFSOutputStream append(String src, int buffersize, Progressable progress
++  public FSDataOutputStream append(final String src, final int buffersize,
++      final Progressable progress, final FileSystem.Statistics statistics
++      ) throws IOException {
++    final DFSOutputStream out = append(src, buffersize, progress);
++    return new FSDataOutputStream(out, statistics, out.getInitialLen());
++  }
++
++  private DFSOutputStream append(String src, int buffersize, Progressable progress
+       ) throws IOException {
+     checkOpen();
+     HdfsFileStatus stat = null;
+@@ -2788,7 +2796,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+    * datanode from the original pipeline. The DataStreamer now
+    * starts sending packets from the dataQueue.
+   ****************************************************************/
+-  public class DFSOutputStream extends FSOutputSummer implements Syncable {
++  class DFSOutputStream extends FSOutputSummer implements Syncable {
+     private Socket s;
+     boolean closed = false;
+   
+@@ -3964,7 +3972,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+      * block is not yet allocated, then this API will return 0 because there are
+      * no replicas in the pipeline.
+      */
+-    public int getNumCurrentReplicas() throws IOException {
++    int getNumCurrentReplicas() throws IOException {
+       synchronized(dataQueue) {
+         if (nodes == null) {
+           return blockReplication;
+@@ -4137,7 +4145,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+     /**
+      * Returns the size of a file as it was when this stream was opened
+      */
+-    public long getInitialLen() {
++    long getInitialLen() {
+       return initialFileSize;
+     }
+   }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+index fd54ae7..5afc102 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+@@ -204,10 +204,8 @@ public class DistributedFileSystem extends FileSystem {
+   /** This optional operation is not yet supported. */
+   public FSDataOutputStream append(Path f, int bufferSize,
+       Progressable progress) throws IOException {
+-
+     statistics.incrementWriteOps(1);
+-    final DFSOutputStream op = dfs.append(getPathName(f), bufferSize, progress);
+-    return new FSDataOutputStream(op, statistics, op.getInitialLen());
++    return dfs.append(getPathName(f), bufferSize, progress, statistics);
+   }
+ 
+   public FSDataOutputStream create(Path f, FsPermission permission,
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+index be3ef00..7dc74d6 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -45,7 +45,6 @@ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.hdfs.DFSClient;
+ import org.apache.hadoop.hdfs.DFSClient.DFSDataInputStream;
+-import org.apache.hadoop.hdfs.DFSClient.DFSOutputStream;
+ import org.apache.hadoop.hdfs.server.datanode.DataNode;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+@@ -149,10 +148,8 @@ public class DatanodeWebHdfsMethods {
+     {
+       final Configuration conf = new Configuration(datanode.getConf());
+       final DFSClient dfsclient = new DFSClient(conf);
+-      final DFSOutputStream dfsout = dfsclient.append(fullpath,
+-          bufferSize.getValue(), null);
+-      final FSDataOutputStream out = new FSDataOutputStream(dfsout, null,
+-          dfsout.getInitialLen());
++      final FSDataOutputStream out = dfsclient.append(fullpath,
++          bufferSize.getValue(), null, null);
+       try {
+         IOUtils.copyBytes(in, out, bufferSize.getValue());
+       } finally {
+-- 
+1.7.0.4
+

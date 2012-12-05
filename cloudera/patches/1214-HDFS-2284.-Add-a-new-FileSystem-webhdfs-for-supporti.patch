@@ -1,0 +1,3425 @@
+From 711f1fc0b37b16885828a751aa4f9b62a378b72e Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Sun, 11 Sep 2011 01:43:43 +0000
+Subject: [PATCH 1214/1344] HDFS-2284. Add a new FileSystem, webhdfs://, for supporting write Http access to HDFS.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1167663 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 7b82b9f5ea494f88004519ea5ed000702b56092d)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ src/core/core-default.xml                          |    5 +
+ src/core/org/apache/hadoop/io/IOUtils.java         |   24 ++-
+ src/hdfs/org/apache/hadoop/hdfs/DFSClient.java     |    8 +-
+ .../apache/hadoop/hdfs/DistributedFileSystem.java  |    2 +-
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |    2 +-
+ .../hadoop/hdfs/server/datanode/DataNode.java      |   20 ++-
+ .../web/resources/DatanodeWebHdfsMethods.java      |  159 ++++++++++
+ .../hdfs/server/namenode/FileDataServlet.java      |    2 +-
+ .../hadoop/hdfs/server/namenode/JspHelper.java     |    2 +-
+ .../hadoop/hdfs/server/namenode/NameNode.java      |   45 +++-
+ .../web/resources/NamenodeWebHdfsMethods.java      |  296 +++++++++++++++++++
+ src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java  |  123 ++++++++
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |  304 ++++++++++++++++++++
+ .../hadoop/hdfs/web/resources/AccessTimeParam.java |   49 ++++
+ .../hadoop/hdfs/web/resources/BlockSizeParam.java  |   49 ++++
+ .../hadoop/hdfs/web/resources/BooleanParam.java    |   51 ++++
+ .../hadoop/hdfs/web/resources/BufferSizeParam.java |   49 ++++
+ .../hadoop/hdfs/web/resources/DeleteOpParam.java   |   74 +++++
+ .../hadoop/hdfs/web/resources/DstPathParam.java    |   43 +++
+ .../hadoop/hdfs/web/resources/EnumParam.java       |   46 +++
+ .../hdfs/web/resources/ExceptionHandler.java       |   59 ++++
+ .../hadoop/hdfs/web/resources/GetOpParam.java      |   73 +++++
+ .../hadoop/hdfs/web/resources/GroupParam.java      |   41 +++
+ .../hadoop/hdfs/web/resources/HttpOpParam.java     |   52 ++++
+ .../hadoop/hdfs/web/resources/IntegerParam.java    |   60 ++++
+ .../hadoop/hdfs/web/resources/LongParam.java       |   60 ++++
+ .../hdfs/web/resources/ModificationTimeParam.java  |   49 ++++
+ .../hadoop/hdfs/web/resources/OverwriteParam.java  |   49 ++++
+ .../hadoop/hdfs/web/resources/OwnerParam.java      |   41 +++
+ .../apache/hadoop/hdfs/web/resources/Param.java    |  104 +++++++
+ .../hadoop/hdfs/web/resources/PermissionParam.java |   57 ++++
+ .../hadoop/hdfs/web/resources/PostOpParam.java     |   74 +++++
+ .../hadoop/hdfs/web/resources/PutOpParam.java      |   84 ++++++
+ .../hadoop/hdfs/web/resources/RecursiveParam.java  |   49 ++++
+ .../hdfs/web/resources/ReplicationParam.java       |   49 ++++
+ .../hadoop/hdfs/web/resources/ShortParam.java      |   60 ++++
+ .../hadoop/hdfs/web/resources/StringParam.java     |   54 ++++
+ .../hadoop/hdfs/web/resources/UriFsPathParam.java  |   45 +++
+ .../hadoop/hdfs/web/resources/UserParam.java       |   41 +++
+ .../hadoop/hdfs/web/resources/UserProvider.java    |   73 +++++
+ .../apache/hadoop/fs/FSMainOperationsBaseTest.java |    9 +-
+ .../hadoop/fs/FileSystemContractBaseTest.java      |    6 +-
+ .../org/apache/hadoop/hdfs/MiniDFSCluster.java     |   14 +
+ .../hdfs/web/TestFSMainOperationsWebHdfs.java      |  115 ++++++++
+ .../org/apache/hadoop/hdfs/web/TestJsonUtil.java   |   55 ++++
+ .../hdfs/web/TestWebHdfsFileSystemContract.java    |   86 ++++++
+ 46 files changed, 2787 insertions(+), 25 deletions(-)
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/BooleanParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/DeleteOpParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/EnumParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/ExceptionHandler.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/GroupParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/IntegerParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/LongParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/OverwriteParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/OwnerParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/Param.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/PermissionParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/PostOpParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/RecursiveParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/ReplicationParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/ShortParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/StringParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/UriFsPathParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/UserParam.java
+ create mode 100644 src/hdfs/org/apache/hadoop/hdfs/web/resources/UserProvider.java
+ create mode 100644 src/test/org/apache/hadoop/hdfs/web/TestFSMainOperationsWebHdfs.java
+ create mode 100644 src/test/org/apache/hadoop/hdfs/web/TestJsonUtil.java
+ create mode 100644 src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+
+diff --git a/src/core/core-default.xml b/src/core/core-default.xml
+index c92a644..027f165 100644
+--- a/src/core/core-default.xml
++++ b/src/core/core-default.xml
+@@ -209,6 +209,11 @@
+ </property>
+ 
+ <property>
++  <name>fs.webhdfs.impl</name>
++  <value>org.apache.hadoop.hdfs.web.WebHdfsFileSystem</value>
++</property>
++
++<property>
+   <name>fs.ftp.impl</name>
+   <value>org.apache.hadoop.fs.ftp.FTPFileSystem</value>
+   <description>The FileSystem for ftp: uris.</description>
+diff --git a/src/core/org/apache/hadoop/io/IOUtils.java b/src/core/org/apache/hadoop/io/IOUtils.java
+index 6a7ddd6..b06ac07 100644
+--- a/src/core/org/apache/hadoop/io/IOUtils.java
++++ b/src/core/org/apache/hadoop/io/IOUtils.java
+@@ -61,7 +61,29 @@ public class IOUtils {
+       }
+     }
+   }
+-  
++
++  /**
++   * Copies from one stream to another.
++   * 
++   * @param in InputStrem to read from
++   * @param out OutputStream to write to
++   * @param buffSize the size of the buffer 
++   */
++  public static void copyBytes(InputStream in, OutputStream out, int buffSize) 
++    throws IOException {
++
++    PrintStream ps = out instanceof PrintStream ? (PrintStream)out : null;
++    byte buf[] = new byte[buffSize];
++    int bytesRead = in.read(buf);
++    while (bytesRead >= 0) {
++      out.write(buf, 0, bytesRead);
++      if ((ps != null) && ps.checkError()) {
++        throw new IOException("Unable to write to output stream.");
++      }
++      bytesRead = in.read(buf);
++    }
++  }
++
+   /**
+    * Copies from one stream to another. <strong>closes the input and output streams 
+    * at the end</strong>.
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+index f8ef858..5cf2e63 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+@@ -806,7 +806,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+    * @throws IOException
+    * @see ClientProtocol#append(String, String)
+    */
+-  OutputStream append(String src, int buffersize, Progressable progress
++  public DFSOutputStream append(String src, int buffersize, Progressable progress
+       ) throws IOException {
+     checkOpen();
+     HdfsFileStatus stat = null;
+@@ -820,7 +820,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+                                      NSQuotaExceededException.class,
+                                      DSQuotaExceededException.class);
+     }
+-    OutputStream result = new DFSOutputStream(src, buffersize, progress,
++    final DFSOutputStream result = new DFSOutputStream(src, buffersize, progress,
+         lastBlock, stat, conf.getInt("io.bytes.per.checksum", 512));
+     leasechecker.put(src, result);
+     return result;
+@@ -2788,7 +2788,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+    * datanode from the original pipeline. The DataStreamer now
+    * starts sending packets from the dataQueue.
+   ****************************************************************/
+-  class DFSOutputStream extends FSOutputSummer implements Syncable {
++  public class DFSOutputStream extends FSOutputSummer implements Syncable {
+     private Socket s;
+     boolean closed = false;
+   
+@@ -4137,7 +4137,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+     /**
+      * Returns the size of a file as it was when this stream was opened
+      */
+-    long getInitialLen() {
++    public long getInitialLen() {
+       return initialFileSize;
+     }
+   }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+index 047771e..fd54ae7 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DistributedFileSystem.java
+@@ -206,7 +206,7 @@ public class DistributedFileSystem extends FileSystem {
+       Progressable progress) throws IOException {
+ 
+     statistics.incrementWriteOps(1);
+-    DFSOutputStream op = (DFSOutputStream)dfs.append(getPathName(f), bufferSize, progress);
++    final DFSOutputStream op = dfs.append(getPathName(f), bufferSize, progress);
+     return new FSDataOutputStream(op, statistics, op.getInitialLen());
+   }
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index 04fd872..f6354f2 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -303,7 +303,7 @@ public class HftpFileSystem extends FileSystem {
+   @Override
+   public FSDataInputStream open(Path f, int buffersize) throws IOException {
+     final HttpURLConnection connection = openConnection(
+-        "/data" + ServletUtil.encodePath(f.toUri().getPath()),
++        "/data" + ServletUtil.encodePath(f.makeQualified(this).toUri().getPath()),
+         "ugi=" + getUgiParameter());
+     final InputStream in;
+     try {
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+index 4e5ecce..a51c846 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+@@ -47,6 +47,9 @@ import java.util.Random;
+ import java.util.Set;
+ import java.util.concurrent.atomic.AtomicInteger;
+ 
++import javax.management.InstanceAlreadyExistsException;
++import javax.management.MBeanRegistrationException;
++import javax.management.MalformedObjectNameException;
+ import javax.management.ObjectName;
+ 
+ import org.apache.commons.logging.Log;
+@@ -76,11 +79,13 @@ import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
+ import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager.AccessMode;
+ import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
+ import org.apache.hadoop.hdfs.server.common.HdfsConstants;
+-import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
+ import org.apache.hadoop.hdfs.server.common.HdfsConstants.StartupOption;
++import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
++import org.apache.hadoop.hdfs.server.common.Storage;
+ import org.apache.hadoop.hdfs.server.datanode.FSDataset.VolumeInfo;
+ import org.apache.hadoop.hdfs.server.datanode.SecureDataNodeStarter.SecureResources;
+ import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeMetrics;
++import org.apache.hadoop.hdfs.server.datanode.web.resources.DatanodeWebHdfsMethods;
+ import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+ import org.apache.hadoop.hdfs.server.namenode.FileChecksumServlets;
+ import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+@@ -97,6 +102,8 @@ import org.apache.hadoop.hdfs.server.protocol.InterDatanodeProtocol;
+ import org.apache.hadoop.hdfs.server.protocol.KeyUpdateCommand;
+ import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
+ import org.apache.hadoop.hdfs.server.protocol.UpgradeCommand;
++import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
++import org.apache.hadoop.hdfs.web.resources.Param;
+ import org.apache.hadoop.http.HttpServer;
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.io.Text;
+@@ -114,12 +121,12 @@ import org.apache.hadoop.security.token.TokenIdentifier;
+ import org.apache.hadoop.util.Daemon;
+ import org.apache.hadoop.util.DiskChecker;
+ import org.apache.hadoop.util.PluginDispatcher;
++import org.apache.hadoop.util.DiskChecker.DiskErrorException;
++import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
+ import org.apache.hadoop.util.ReflectionUtils;
+ import org.apache.hadoop.util.ServicePlugin;
+ import org.apache.hadoop.util.SingleArgumentRunnable;
+ import org.apache.hadoop.util.StringUtils;
+-import org.apache.hadoop.util.DiskChecker.DiskErrorException;
+-import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
+ import org.apache.hadoop.util.VersionInfo;
+ import org.mortbay.util.ajax.JSON;
+ 
+@@ -498,10 +505,17 @@ public class DataNode extends Configured
+     this.infoServer.addInternalServlet(null, "/streamFile/*", StreamFile.class);
+     this.infoServer.addInternalServlet(null, "/getFileChecksum/*",
+         FileChecksumServlets.GetServlet.class);
++
++    this.infoServer.setAttribute("datanode", this);
+     this.infoServer.setAttribute("datanode.blockScanner", blockScanner);
+     this.infoServer.setAttribute(JspHelper.CURRENT_CONF, conf);
+     this.infoServer.addServlet(null, "/blockScannerReport", 
+                                DataBlockScanner.Servlet.class);
++
++    infoServer.addJerseyResourcePackage(
++        DatanodeWebHdfsMethods.class.getPackage().getName()
++        + ";" + Param.class.getPackage().getName(),
++        "/" + WebHdfsFileSystem.PATH_PREFIX + "/*");
+     this.infoServer.start();
+     // adjust info port
+     this.dnRegistration.setInfoPort(this.infoServer.getPort());
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+new file mode 100644
+index 0000000..966ee1d
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -0,0 +1,159 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.server.datanode.web.resources;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.net.URI;
++import java.net.URISyntaxException;
++
++import javax.servlet.ServletContext;
++import javax.ws.rs.Consumes;
++import javax.ws.rs.DefaultValue;
++import javax.ws.rs.POST;
++import javax.ws.rs.PUT;
++import javax.ws.rs.Path;
++import javax.ws.rs.PathParam;
++import javax.ws.rs.Produces;
++import javax.ws.rs.QueryParam;
++import javax.ws.rs.core.Context;
++import javax.ws.rs.core.MediaType;
++import javax.ws.rs.core.Response;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.hdfs.DFSClient;
++import org.apache.hadoop.hdfs.DFSClient.DFSOutputStream;
++import org.apache.hadoop.hdfs.server.datanode.DataNode;
++import org.apache.hadoop.hdfs.server.namenode.NameNode;
++import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
++import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
++import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
++import org.apache.hadoop.hdfs.web.resources.OverwriteParam;
++import org.apache.hadoop.hdfs.web.resources.Param;
++import org.apache.hadoop.hdfs.web.resources.PermissionParam;
++import org.apache.hadoop.hdfs.web.resources.PostOpParam;
++import org.apache.hadoop.hdfs.web.resources.PutOpParam;
++import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
++import org.apache.hadoop.hdfs.web.resources.UriFsPathParam;
++import org.apache.hadoop.io.IOUtils;
++
++/** Web-hdfs DataNode implementation. */
++@Path("")
++public class DatanodeWebHdfsMethods {
++  private static final Log LOG = LogFactory.getLog(DatanodeWebHdfsMethods.class);
++
++  private @Context ServletContext context;
++
++  /** Handle HTTP PUT request. */
++  @PUT
++  @Path("{" + UriFsPathParam.NAME + ":.*}")
++  @Consumes({"*/*"})
++  @Produces({MediaType.APPLICATION_JSON})
++  public Response put(
++      final InputStream in,
++      @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
++      @QueryParam(PutOpParam.NAME) @DefaultValue(PutOpParam.DEFAULT)
++          final PutOpParam op,
++      @QueryParam(PermissionParam.NAME) @DefaultValue(PermissionParam.DEFAULT)
++          final PermissionParam permission,
++      @QueryParam(OverwriteParam.NAME) @DefaultValue(OverwriteParam.DEFAULT)
++          final OverwriteParam overwrite,
++      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
++          final BufferSizeParam bufferSize,
++      @QueryParam(ReplicationParam.NAME) @DefaultValue(ReplicationParam.DEFAULT)
++          final ReplicationParam replication,
++      @QueryParam(BlockSizeParam.NAME) @DefaultValue(BlockSizeParam.DEFAULT)
++          final BlockSizeParam blockSize
++      ) throws IOException, URISyntaxException {
++    if (LOG.isTraceEnabled()) {
++      LOG.trace(op + ": " + path
++            + Param.toSortedString(", ", permission, overwrite, bufferSize,
++                replication, blockSize));
++    }
++
++    final String fullpath = path.getAbsolutePath();
++    final DataNode datanode = (DataNode)context.getAttribute("datanode");
++
++    switch(op.getValue()) {
++    case CREATE:
++    {
++      final Configuration conf = new Configuration(datanode.getConf());
++      final DFSClient dfsclient = new DFSClient(conf);
++      final FSDataOutputStream out = new FSDataOutputStream(dfsclient.create(
++          fullpath, permission.getFsPermission(), overwrite.getValue(),
++          replication.getValue(), blockSize.getValue(), null,
++          bufferSize.getValue()), null);
++      try {
++        IOUtils.copyBytes(in, out, bufferSize.getValue());
++      } finally {
++        out.close();
++      }
++      final String nnAddr = NameNode.getInfoServer(conf);
++      final URI uri = new URI(WebHdfsFileSystem.SCHEME + "://" + nnAddr + fullpath);
++      return Response.created(uri).type(MediaType.APPLICATION_JSON).build();
++    }
++    default:
++      throw new UnsupportedOperationException(op + " is not supported");
++    }
++  }
++
++  /** Handle HTTP POST request. */
++  @POST
++  @Path("{" + UriFsPathParam.NAME + ":.*}")
++  @Consumes({"*/*"})
++  @Produces({MediaType.APPLICATION_JSON})
++  public Response post(
++      final InputStream in,
++      @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
++      @QueryParam(PostOpParam.NAME) @DefaultValue(PostOpParam.DEFAULT)
++          final PostOpParam op,
++      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
++          final BufferSizeParam bufferSize
++      ) throws IOException, URISyntaxException {
++    if (LOG.isTraceEnabled()) {
++      LOG.trace(op + ": " + path
++            + Param.toSortedString(", ", bufferSize));
++    }
++
++    final String fullpath = path.getAbsolutePath();
++    final DataNode datanode = (DataNode)context.getAttribute("datanode");
++
++    switch(op.getValue()) {
++    case APPEND:
++    {
++      final Configuration conf = new Configuration(datanode.getConf());
++      final DFSClient dfsclient = new DFSClient(conf);
++      final DFSOutputStream dfsout = dfsclient.append(fullpath,
++          bufferSize.getValue(), null);
++      final FSDataOutputStream out = new FSDataOutputStream(dfsout, null,
++          dfsout.getInitialLen());
++      try {
++        IOUtils.copyBytes(in, out, bufferSize.getValue());
++      } finally {
++        out.close();
++      }
++      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++    }
++    default:
++      throw new UnsupportedOperationException(op + " is not supported");
++    }
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FileDataServlet.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FileDataServlet.java
+index 7b1dee8..e42b464 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FileDataServlet.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FileDataServlet.java
+@@ -83,7 +83,7 @@ public class FileDataServlet extends DfsServlet {
+       // pick a random datanode
+       return jspHelper.randomNode();
+     }
+-    return jspHelper.bestNode(blks.get(0));
++    return JspHelper.bestNode(blks.get(0));
+   }
+ 
+   /**
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
+index 5ac946b..9ab1efe 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
+@@ -91,7 +91,7 @@ public class JspHelper {
+     return fsn.getRandomDatanode();
+   }
+ 
+-  public DatanodeInfo bestNode(LocatedBlock blk) throws IOException {
++  public static DatanodeInfo bestNode(LocatedBlock blk) throws IOException {
+     TreeSet<DatanodeInfo> deadNodes = new TreeSet<DatanodeInfo>();
+     DatanodeInfo chosenNode = null;
+     int failures = 0;
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+index bf5d000..f796abd 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+@@ -17,23 +17,48 @@
+  */
+ package org.apache.hadoop.hdfs.server.namenode;
+ 
+-import org.apache.commons.logging.*;
++import java.io.File;
++import java.io.IOException;
++import java.net.InetSocketAddress;
++import java.net.URI;
++import java.security.PrivilegedExceptionAction;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collection;
++import java.util.Iterator;
++import java.util.List;
+ 
+ import org.apache.hadoop.fs.CommonConfigurationKeys;
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.ContentSummary;
++import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.Trash;
+-import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.fs.permission.PermissionStatus;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.HDFSPolicyProvider;
+-import org.apache.hadoop.hdfs.protocol.*;
++import org.apache.hadoop.hdfs.protocol.Block;
++import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
++import org.apache.hadoop.hdfs.protocol.ClientProtocol;
++import org.apache.hadoop.hdfs.protocol.DatanodeID;
++import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.DirectoryListing;
++import org.apache.hadoop.hdfs.protocol.FSConstants;
++import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
++import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.protocol.UnregisteredDatanodeException;
++import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.server.common.HdfsConstants.StartupOption;
+ import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
+ import org.apache.hadoop.hdfs.server.common.UpgradeStatusReport;
+ import org.apache.hadoop.hdfs.server.namenode.FSNamesystem.CompleteFileStatus;
+ import org.apache.hadoop.hdfs.server.namenode.metrics.NameNodeMetrics;
++import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
+ import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
+@@ -41,9 +66,11 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+ import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
+ import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
+ import org.apache.hadoop.hdfs.server.protocol.UpgradeCommand;
++import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
++import org.apache.hadoop.hdfs.web.resources.Param;
+ import org.apache.hadoop.http.HttpServer;
+ import org.apache.hadoop.io.Text;
+-import org.apache.hadoop.ipc.*;
++import org.apache.hadoop.ipc.RPC;
+ import org.apache.hadoop.ipc.RPC.Server;
+ import org.apache.hadoop.conf.*;
+ import org.apache.hadoop.tools.GetUserMappingsProtocol;
+@@ -53,6 +80,9 @@ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.net.NetworkTopology;
+ import org.apache.hadoop.net.Node;
+ import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
++import org.apache.hadoop.security.Groups;
++import org.apache.hadoop.security.RefreshUserMappingsProtocol;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.authorize.AuthorizationException;
+ import org.apache.hadoop.security.authorize.ProxyUsers;
+@@ -73,6 +103,8 @@ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.util.List;
+ 
++
++
+ /**********************************************************
+  * NameNode serves as both directory namespace manager and
+  * "inode table" for the Hadoop DFS.  There is a single NameNode
+@@ -411,6 +443,11 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+               FileChecksumServlets.RedirectServlet.class, false);
+           httpServer.addInternalServlet("contentSummary", "/contentSummary/*",
+               ContentSummaryServlet.class, false);
++
++          httpServer.addJerseyResourcePackage(
++              NamenodeWebHdfsMethods.class.getPackage().getName()
++              + ";" + Param.class.getPackage().getName(),
++              "/" + WebHdfsFileSystem.PATH_PREFIX + "/*");
+           httpServer.start();
+       
+           // The web-server port can be ephemeral... ensure we have the correct info
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+new file mode 100644
+index 0000000..3d4be49
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -0,0 +1,296 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.server.namenode.web.resources;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.net.URI;
++import java.net.URISyntaxException;
++
++import javax.servlet.ServletContext;
++import javax.ws.rs.Consumes;
++import javax.ws.rs.DELETE;
++import javax.ws.rs.DefaultValue;
++import javax.ws.rs.GET;
++import javax.ws.rs.POST;
++import javax.ws.rs.PUT;
++import javax.ws.rs.Path;
++import javax.ws.rs.PathParam;
++import javax.ws.rs.Produces;
++import javax.ws.rs.QueryParam;
++import javax.ws.rs.core.Context;
++import javax.ws.rs.core.MediaType;
++import javax.ws.rs.core.Response;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.server.namenode.JspHelper;
++import org.apache.hadoop.hdfs.server.namenode.NameNode;
++import org.apache.hadoop.hdfs.web.JsonUtil;
++import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
++import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
++import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
++import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
++import org.apache.hadoop.hdfs.web.resources.DeleteOpParam;
++import org.apache.hadoop.hdfs.web.resources.DstPathParam;
++import org.apache.hadoop.hdfs.web.resources.GetOpParam;
++import org.apache.hadoop.hdfs.web.resources.GroupParam;
++import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
++import org.apache.hadoop.hdfs.web.resources.ModificationTimeParam;
++import org.apache.hadoop.hdfs.web.resources.OverwriteParam;
++import org.apache.hadoop.hdfs.web.resources.OwnerParam;
++import org.apache.hadoop.hdfs.web.resources.Param;
++import org.apache.hadoop.hdfs.web.resources.PermissionParam;
++import org.apache.hadoop.hdfs.web.resources.PostOpParam;
++import org.apache.hadoop.hdfs.web.resources.PutOpParam;
++import org.apache.hadoop.hdfs.web.resources.RecursiveParam;
++import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
++import org.apache.hadoop.hdfs.web.resources.UriFsPathParam;
++
++/** Web-hdfs NameNode implementation. */
++@Path("")
++public class NamenodeWebHdfsMethods {
++  private static final Log LOG = LogFactory.getLog(NamenodeWebHdfsMethods.class);
++
++  private @Context ServletContext context;
++
++  private static DatanodeInfo chooseDatanode(final NameNode namenode,
++      final String path, final HttpOpParam.Op op) throws IOException {
++    if (op == PostOpParam.Op.APPEND) {
++      final HdfsFileStatus status = namenode.getFileInfo(path);
++      final long len = status.getLen();
++      if (len > 0) {
++        final LocatedBlocks locations = namenode.getBlockLocations(path, len-1, 1);
++        final int count = locations.locatedBlockCount();
++        if (count > 0) {
++          return JspHelper.bestNode(locations.get(count - 1));
++        }
++      }
++    } 
++
++    return namenode.getNamesystem().getRandomDatanode();
++  }
++
++  private static URI redirectURI(final NameNode namenode,
++      final String path, final HttpOpParam.Op op,
++      final Param<?, ?>... parameters) throws URISyntaxException, IOException {
++    final DatanodeInfo dn = chooseDatanode(namenode, path, op);
++    final String query = op.toQueryString() + Param.toSortedString("&", parameters);
++    final String uripath = "/" + WebHdfsFileSystem.PATH_PREFIX + path;
++
++    final URI uri = new URI("http", null, dn.getHostName(), dn.getInfoPort(),
++        uripath, query, null);
++    if (LOG.isTraceEnabled()) {
++      LOG.trace("redirectURI=" + uri);
++    }
++    return uri;
++  }
++
++  /** Handle HTTP PUT request. */
++  @PUT
++  @Path("{" + UriFsPathParam.NAME + ":.*}")
++  @Consumes({"*/*"})
++  @Produces({MediaType.APPLICATION_JSON})
++  public Response put(
++      final InputStream in,
++      @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
++      @QueryParam(PutOpParam.NAME) @DefaultValue(PutOpParam.DEFAULT)
++          final PutOpParam op,
++      @QueryParam(DstPathParam.NAME) @DefaultValue(DstPathParam.DEFAULT)
++          final DstPathParam dstPath,
++      @QueryParam(OwnerParam.NAME) @DefaultValue(OwnerParam.DEFAULT)
++          final OwnerParam owner,
++      @QueryParam(GroupParam.NAME) @DefaultValue(GroupParam.DEFAULT)
++          final GroupParam group,
++      @QueryParam(PermissionParam.NAME) @DefaultValue(PermissionParam.DEFAULT)
++          final PermissionParam permission,
++      @QueryParam(OverwriteParam.NAME) @DefaultValue(OverwriteParam.DEFAULT)
++          final OverwriteParam overwrite,
++      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
++          final BufferSizeParam bufferSize,
++      @QueryParam(ReplicationParam.NAME) @DefaultValue(ReplicationParam.DEFAULT)
++          final ReplicationParam replication,
++      @QueryParam(BlockSizeParam.NAME) @DefaultValue(BlockSizeParam.DEFAULT)
++          final BlockSizeParam blockSize,
++      @QueryParam(ModificationTimeParam.NAME) @DefaultValue(ModificationTimeParam.DEFAULT)
++          final ModificationTimeParam modificationTime,
++      @QueryParam(AccessTimeParam.NAME) @DefaultValue(AccessTimeParam.DEFAULT)
++          final AccessTimeParam accessTime
++      ) throws IOException, URISyntaxException {
++
++    if (LOG.isTraceEnabled()) {
++      LOG.trace(op + ": " + path
++            + Param.toSortedString(", ", dstPath, owner, group, permission,
++                overwrite, bufferSize, replication, blockSize));
++    }
++
++    final String fullpath = path.getAbsolutePath();
++    final NameNode namenode = (NameNode)context.getAttribute("name.node");
++
++    switch(op.getValue()) {
++    case CREATE:
++    {
++      final URI uri = redirectURI(namenode, fullpath, op.getValue(),
++          permission, overwrite, bufferSize, replication, blockSize);
++      return Response.temporaryRedirect(uri).build();
++    } 
++    case MKDIRS:
++    {
++      final boolean b = namenode.mkdirs(fullpath, permission.getFsPermission());
++      final String js = JsonUtil.toJsonString(PutOpParam.Op.MKDIRS, b);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++    }
++    case RENAME:
++    {
++      final boolean b = namenode.rename(fullpath, dstPath.getValue());
++      final String js = JsonUtil.toJsonString(PutOpParam.Op.RENAME, b);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++    }
++    case SETREPLICATION:
++    {
++      final boolean b = namenode.setReplication(fullpath, replication.getValue());
++      final String js = JsonUtil.toJsonString(PutOpParam.Op.SETREPLICATION, b);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++    }
++    case SETOWNER:
++    {
++      namenode.setOwner(fullpath, owner.getValue(), group.getValue());
++      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++    }
++    case SETPERMISSION:
++    {
++      namenode.setPermission(fullpath, permission.getFsPermission());
++      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++    }
++    case SETTIMES:
++    {
++      namenode.setTimes(fullpath, modificationTime.getValue(), accessTime.getValue());
++      return Response.ok().type(MediaType.APPLICATION_JSON).build();
++    }
++    default:
++      throw new UnsupportedOperationException(op + " is not supported");
++    }
++  }
++
++  /** Handle HTTP POST request. */
++  @POST
++  @Path("{" + UriFsPathParam.NAME + ":.*}")
++  @Consumes({"*/*"})
++  @Produces({MediaType.APPLICATION_JSON})
++  public Response post(
++      final InputStream in,
++      @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
++      @QueryParam(PostOpParam.NAME) @DefaultValue(PostOpParam.DEFAULT)
++          final PostOpParam op,
++      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
++          final BufferSizeParam bufferSize
++      ) throws IOException, URISyntaxException {
++
++    if (LOG.isTraceEnabled()) {
++      LOG.trace(op + ": " + path
++            + Param.toSortedString(", ", bufferSize));
++    }
++
++    final String fullpath = path.getAbsolutePath();
++    final NameNode namenode = (NameNode)context.getAttribute("name.node");
++
++    switch(op.getValue()) {
++    case APPEND:
++    {
++      final URI uri = redirectURI(namenode, fullpath, op.getValue(), bufferSize);
++      return Response.temporaryRedirect(uri).build();
++    }
++    default:
++      throw new UnsupportedOperationException(op + " is not supported");
++    }
++  }
++
++  private static final UriFsPathParam ROOT = new UriFsPathParam("");
++
++  /** Handle HTTP GET request for the root. */
++  @GET
++  @Path("/")
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
++  public Response root(
++      @QueryParam(GetOpParam.NAME) @DefaultValue(GetOpParam.DEFAULT)
++          final GetOpParam op
++      ) throws IOException {
++    return get(ROOT, op);
++  }
++
++  /** Handle HTTP GET request. */
++  @GET
++  @Path("{" + UriFsPathParam.NAME + ":.*}")
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
++  public Response get(
++      @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
++      @QueryParam(GetOpParam.NAME) @DefaultValue(GetOpParam.DEFAULT)
++          final GetOpParam op
++      ) throws IOException {
++
++    if (LOG.isTraceEnabled()) {
++      LOG.trace(op + ", " + path
++          + Param.toSortedString(", "));
++    }
++
++    switch(op.getValue()) {
++    case GETFILESTATUS:
++      final NameNode namenode = (NameNode)context.getAttribute("name.node");
++      final String fullpath = path.getAbsolutePath();
++      final HdfsFileStatus status = namenode.getFileInfo(fullpath);
++      final String js = JsonUtil.toJsonString(status);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++
++    default:
++      throw new UnsupportedOperationException(op + " is not supported");
++    }    
++  }
++
++  /** Handle HTTP DELETE request. */
++  @DELETE
++  @Path("{path:.*}")
++  @Produces(MediaType.APPLICATION_JSON)
++  public Response delete(
++      @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
++      @QueryParam(DeleteOpParam.NAME) @DefaultValue(DeleteOpParam.DEFAULT)
++          final DeleteOpParam op,
++      @QueryParam(RecursiveParam.NAME) @DefaultValue(RecursiveParam.DEFAULT)
++          final RecursiveParam recursive
++      ) throws IOException {
++
++    if (LOG.isTraceEnabled()) {
++      LOG.trace(op + ", " + path
++        + Param.toSortedString(", ", recursive));
++    }
++
++    switch(op.getValue()) {
++    case DELETE:
++      final NameNode namenode = (NameNode)context.getAttribute("name.node");
++      final String fullpath = path.getAbsolutePath();
++      final boolean b = namenode.delete(fullpath, recursive.getValue());
++      final String js = JsonUtil.toJsonString(DeleteOpParam.Op.DELETE, b);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++
++    default:
++      throw new UnsupportedOperationException(op + " is not supported");
++    }    
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+new file mode 100644
+index 0000000..d39539e
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+@@ -0,0 +1,123 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web;
++
++import java.util.Map;
++import java.util.TreeMap;
++
++import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.hdfs.DFSUtil;
++import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
++import org.apache.hadoop.ipc.RemoteException;
++import org.mortbay.util.ajax.JSON;
++
++/** JSON Utilities */
++public class JsonUtil {
++  private static final ThreadLocal<Map<String, Object>> jsonMap
++      = new ThreadLocal<Map<String, Object>>() {
++    @Override
++    protected Map<String, Object> initialValue() {
++      return new TreeMap<String, Object>();
++    }
++
++    @Override
++    public Map<String, Object> get() {
++      final Map<String, Object> m = super.get();
++      m.clear();
++      return m;
++    }
++  };
++
++  /** Convert an exception object to a Json string. */
++  public static String toJsonString(final Exception e) {
++    final Map<String, Object> m = jsonMap.get();
++    m.put("className", e.getClass().getName());
++    m.put("message", e.getMessage());
++    return JSON.toString(m);
++  }
++
++  /** Convert a Json map to a RemoteException. */
++  public static RemoteException toRemoteException(final Map<String, Object> m) {
++    final String className = (String)m.get("className");
++    final String message = (String)m.get("message");
++    return new RemoteException(className, message);
++  }
++
++  /** Convert a key-value pair to a Json string. */
++  public static String toJsonString(final Object key, final Object value) {
++    final Map<String, Object> m = jsonMap.get();
++    m.put(key instanceof String ? (String) key : key.toString(), value);
++    return JSON.toString(m);
++  }
++
++  /** Convert a FsPermission object to a string. */
++  public static String toString(final FsPermission permission) {
++    return String.format("%o", permission.toShort());
++  }
++
++  /** Convert a string to a FsPermission object. */
++  public static FsPermission toFsPermission(final String s) {
++    return new FsPermission(Short.parseShort(s, 8));
++  }
++
++  /** Convert a HdfsFileStatus object to a Json string. */
++  public static String toJsonString(final HdfsFileStatus status) {
++    final Map<String, Object> m = jsonMap.get();
++    if (status == null) {
++      m.put("isNull", true);
++    } else {
++      m.put("isNull", false);
++      m.put("localName", status.getLocalName());
++      m.put("isDir", status.isDir());
++      m.put("len", status.getLen());
++      m.put("owner", status.getOwner());
++      m.put("group", status.getGroup());
++      m.put("permission", toString(status.getPermission()));
++      m.put("accessTime", status.getAccessTime());
++      m.put("modificationTime", status.getModificationTime());
++      m.put("blockSize", status.getBlockSize());
++      m.put("replication", status.getReplication());
++    }
++    return JSON.toString(m);
++  }
++
++  @SuppressWarnings("unchecked")
++  static Map<String, Object> parse(String jsonString) {
++    return (Map<String, Object>) JSON.parse(jsonString);
++  }
++
++  /** Convert a Json string to a HdfsFileStatus object. */
++  public static HdfsFileStatus toFileStatus(final Map<String, Object> m) {
++    if ((Boolean)m.get("isNull")) {
++      return null;
++    }
++
++    final String localName = (String) m.get("localName");
++    final boolean isDir = (Boolean) m.get("isDir");
++    final long len = (Long) m.get("len");
++    final String owner = (String) m.get("owner");
++    final String group = (String) m.get("group");
++    final FsPermission permission = toFsPermission((String) m.get("permission"));
++    final long aTime = (Long) m.get("accessTime");
++    final long mTime = (Long) m.get("modificationTime");
++    final long blockSize = (Long) m.get("blockSize");
++    final short replication = (short) (long) (Long) m.get("replication");
++    return new HdfsFileStatus(len, isDir, replication, blockSize, mTime, aTime,
++        permission, owner, group, DFSUtil.string2Bytes(localName));
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+new file mode 100644
+index 0000000..5504d68
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -0,0 +1,304 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.hdfs.web;
++
++import java.io.BufferedOutputStream;
++import java.io.FileNotFoundException;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.InputStreamReader;
++import java.net.HttpURLConnection;
++import java.net.URI;
++import java.net.URISyntaxException;
++import java.util.Map;
++
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.FileStatus;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.hdfs.DFSUtil;
++import org.apache.hadoop.hdfs.HftpFileSystem;
++import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
++import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
++import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
++import org.apache.hadoop.hdfs.server.namenode.SafeModeException;
++import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
++import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
++import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
++import org.apache.hadoop.hdfs.web.resources.DeleteOpParam;
++import org.apache.hadoop.hdfs.web.resources.DstPathParam;
++import org.apache.hadoop.hdfs.web.resources.GetOpParam;
++import org.apache.hadoop.hdfs.web.resources.GroupParam;
++import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
++import org.apache.hadoop.hdfs.web.resources.ModificationTimeParam;
++import org.apache.hadoop.hdfs.web.resources.OverwriteParam;
++import org.apache.hadoop.hdfs.web.resources.OwnerParam;
++import org.apache.hadoop.hdfs.web.resources.Param;
++import org.apache.hadoop.hdfs.web.resources.PermissionParam;
++import org.apache.hadoop.hdfs.web.resources.PostOpParam;
++import org.apache.hadoop.hdfs.web.resources.PutOpParam;
++import org.apache.hadoop.hdfs.web.resources.RecursiveParam;
++import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
++import org.apache.hadoop.ipc.RemoteException;
++import org.apache.hadoop.security.AccessControlException;
++import org.apache.hadoop.util.Progressable;
++import org.mortbay.util.ajax.JSON;
++
++/** A FileSystem for HDFS over the web. */
++public class WebHdfsFileSystem extends HftpFileSystem {
++  /** File System URI: {SCHEME}://namenode:port/path/to/file */
++  public static final String SCHEME = "webhdfs";
++  /** Http URI: http://namenode:port/{PATH_PREFIX}/path/to/file */
++  public static final String PATH_PREFIX = SCHEME;
++
++  protected Path workingDir;
++
++  @Override
++  public URI getUri() {
++    try {
++      return new URI(SCHEME, null, nnAddr.getHostName(), nnAddr.getPort(),
++          null, null, null);
++    } catch (URISyntaxException e) {
++      return null;
++    }
++  }
++
++  @Override
++  public synchronized Path getWorkingDirectory() {
++    if (workingDir == null) {
++      workingDir = getHomeDirectory();
++    }
++    return workingDir;
++  }
++
++  @Override
++  public synchronized void setWorkingDirectory(final Path dir) {
++    String result = makeAbsolute(dir).toUri().getPath();
++    if (!DFSUtil.isValidName(result)) {
++      throw new IllegalArgumentException("Invalid DFS directory name " + 
++                                         result);
++    }
++    workingDir = makeAbsolute(dir);
++  }
++
++  private Path makeAbsolute(Path f) {
++    return f.isAbsolute()? f: new Path(workingDir, f);
++  }
++
++  @SuppressWarnings("unchecked")
++  private static Map<String, Object> jsonParse(final InputStream in
++      ) throws IOException {
++    if (in == null) {
++      throw new IOException("The input stream is null.");
++    }
++    return (Map<String, Object>)JSON.parse(new InputStreamReader(in));
++  }
++
++  private static void validateResponse(final HttpOpParam.Op op,
++      final HttpURLConnection conn) throws IOException {
++    final int code = conn.getResponseCode();
++    if (code != op.getExpectedHttpResponseCode()) {
++      final Map<String, Object> m;
++      try {
++        m = jsonParse(conn.getErrorStream());
++      } catch(IOException e) {
++        throw new IOException("Unexpected HTTP response: code = " + code + " != "
++            + op.getExpectedHttpResponseCode() + ", " + op.toQueryString()
++            + ", message=" + conn.getResponseMessage(), e);
++      }
++
++      final RemoteException re = JsonUtil.toRemoteException(m);
++      throw re.unwrapRemoteException(AccessControlException.class,
++          DSQuotaExceededException.class,
++          FileNotFoundException.class,
++          SafeModeException.class,
++          NSQuotaExceededException.class);
++    }
++  }
++
++  private HttpURLConnection httpConnect(final HttpOpParam.Op op, final Path fspath,
++      final Param<?,?>... parameters) throws IOException {
++    //initialize URI path and query
++    final String uripath = "/" + PATH_PREFIX + makeQualified(fspath).toUri().getPath();
++    final String query = op.toQueryString() + Param.toSortedString("&", parameters);
++
++    //connect and get response
++    final HttpURLConnection conn = openConnection(uripath, query);
++    try {
++      conn.setRequestMethod(op.getType().toString());
++      conn.setDoOutput(op.getDoOutput());
++      if (op.getDoOutput()) {
++        conn.setRequestProperty("Expect", "100-Continue");
++        conn.setInstanceFollowRedirects(true);
++      }
++      conn.connect();
++      return conn;
++    } catch(IOException e) {
++      conn.disconnect();
++      throw e;
++    }
++  }
++
++  private Map<String, Object> run(final HttpOpParam.Op op, final Path fspath,
++      final Param<?,?>... parameters) throws IOException {
++    final HttpURLConnection conn = httpConnect(op, fspath, parameters);
++    validateResponse(op, conn);
++    try {
++      return jsonParse(conn.getInputStream());
++    } finally {
++      conn.disconnect();
++    }
++  }
++
++  private FsPermission applyUMask(FsPermission permission) {
++    if (permission == null) {
++      permission = FsPermission.getDefault();
++    }
++    return permission.applyUMask(FsPermission.getUMask(getConf()));
++  }
++
++  private HdfsFileStatus getHdfsFileStatus(Path f) throws IOException {
++    final HttpOpParam.Op op = GetOpParam.Op.GETFILESTATUS;
++    final Map<String, Object> json = run(op, f);
++    final HdfsFileStatus status = JsonUtil.toFileStatus(json);
++    if (status == null) {
++      throw new FileNotFoundException("File does not exist: " + f);
++    }
++    return status;
++  }
++
++  @Override
++  public FileStatus getFileStatus(Path f) throws IOException {
++    statistics.incrementReadOps(1);
++    return makeQualified(getHdfsFileStatus(f), f);
++  }
++
++  private FileStatus makeQualified(HdfsFileStatus f, Path parent) {
++    return new FileStatus(f.getLen(), f.isDir(), f.getReplication(),
++        f.getBlockSize(), f.getModificationTime(),
++        f.getAccessTime(),
++        f.getPermission(), f.getOwner(), f.getGroup(),
++        f.getFullPath(parent).makeQualified(this)); // fully-qualify path
++  }
++
++  @Override
++  public boolean mkdirs(Path f, FsPermission permission) throws IOException {
++    statistics.incrementWriteOps(1);
++    final HttpOpParam.Op op = PutOpParam.Op.MKDIRS;
++    final Map<String, Object> json = run(op, f,
++        new PermissionParam(applyUMask(permission)));
++    return (Boolean)json.get(op.toString());
++  }
++
++  @Override
++  public boolean rename(final Path src, final Path dst) throws IOException {
++    statistics.incrementWriteOps(1);
++    final HttpOpParam.Op op = PutOpParam.Op.RENAME;
++    final Map<String, Object> json = run(op, src,
++        new DstPathParam(makeQualified(dst).toUri().getPath()));
++    return (Boolean)json.get(op.toString());
++  }
++
++  @Override
++  public void setOwner(final Path p, final String owner, final String group
++      ) throws IOException {
++    if (owner == null && group == null) {
++      throw new IOException("owner == null && group == null");
++    }
++
++    statistics.incrementWriteOps(1);
++    final HttpOpParam.Op op = PutOpParam.Op.SETOWNER;
++    run(op, p, new OwnerParam(owner), new GroupParam(group));
++  }
++
++  @Override
++  public void setPermission(final Path p, final FsPermission permission
++      ) throws IOException {
++    statistics.incrementWriteOps(1);
++    final HttpOpParam.Op op = PutOpParam.Op.SETPERMISSION;
++    run(op, p, new PermissionParam(permission));
++  }
++
++  @Override
++  public boolean setReplication(final Path p, final short replication
++     ) throws IOException {
++    statistics.incrementWriteOps(1);
++    final HttpOpParam.Op op = PutOpParam.Op.SETREPLICATION;
++    final Map<String, Object> json = run(op, p,
++        new ReplicationParam(replication));
++    return (Boolean)json.get(op.toString());
++  }
++
++  @Override
++  public void setTimes(final Path p, final long mtime, final long atime
++      ) throws IOException {
++    statistics.incrementWriteOps(1);
++    final HttpOpParam.Op op = PutOpParam.Op.SETTIMES;
++    run(op, p, new ModificationTimeParam(mtime), new AccessTimeParam(atime));
++  }
++
++  private FSDataOutputStream write(final HttpOpParam.Op op,
++      final HttpURLConnection conn, final int bufferSize) throws IOException {
++    return new FSDataOutputStream(new BufferedOutputStream(
++        conn.getOutputStream(), bufferSize), statistics) {
++      @Override
++      public void close() throws IOException {
++        try {
++          super.close();
++        } finally {
++          validateResponse(op, conn);
++        }
++      }
++    };
++  }
++
++  @Override
++  public FSDataOutputStream create(final Path f, final FsPermission permission,
++      final boolean overwrite, final int bufferSize, final short replication,
++      final long blockSize, final Progressable progress) throws IOException {
++    statistics.incrementWriteOps(1);
++
++    final HttpOpParam.Op op = PutOpParam.Op.CREATE;
++    final HttpURLConnection conn = httpConnect(op, f, 
++        new PermissionParam(applyUMask(permission)),
++        new OverwriteParam(overwrite),
++        new BufferSizeParam(bufferSize),
++        new ReplicationParam(replication),
++        new BlockSizeParam(blockSize));
++    return write(op, conn, bufferSize);
++  }
++
++  @Override
++  public FSDataOutputStream append(final Path f, final int bufferSize,
++      final Progressable progress) throws IOException {
++    statistics.incrementWriteOps(1);
++
++    final HttpOpParam.Op op = PostOpParam.Op.APPEND;
++    final HttpURLConnection conn = httpConnect(op, f, 
++        new BufferSizeParam(bufferSize));
++    return write(op, conn, bufferSize);
++  }
++
++  @Override
++  public boolean delete(Path f, boolean recursive) throws IOException {
++    final HttpOpParam.Op op = DeleteOpParam.Op.DELETE;
++    final Map<String, Object> json = run(op, f, new RecursiveParam(recursive));
++    return (Boolean)json.get(op.toString());
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java
+new file mode 100644
+index 0000000..830e5cd
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/AccessTimeParam.java
+@@ -0,0 +1,49 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Access time parameter. */
++public class AccessTimeParam extends LongParam {
++  /** Parameter name. */
++  public static final String NAME = "accessTime";
++  /** Default parameter value. */
++  public static final String DEFAULT = "-1";
++
++  private static final Domain DOMAIN = new Domain(NAME);
++
++  /**
++   * Constructor.
++   * @param value the parameter value.
++   */
++  public AccessTimeParam(final Long value) {
++    super(DOMAIN, value);
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public AccessTimeParam(final String str) {
++    this(DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java
+new file mode 100644
+index 0000000..0f83519
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BlockSizeParam.java
+@@ -0,0 +1,49 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Block size parameter. */
++public class BlockSizeParam extends LongParam {
++  /** Parameter name. */
++  public static final String NAME = "blockSize";
++  /** Default parameter value. */
++  public static final String DEFAULT = NULL;
++
++  private static final Domain DOMAIN = new Domain(NAME);
++
++  /**
++   * Constructor.
++   * @param value the parameter value.
++   */
++  public BlockSizeParam(final Long value) {
++    super(DOMAIN, value);
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public BlockSizeParam(final String str) {
++    this(DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BooleanParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BooleanParam.java
+new file mode 100644
+index 0000000..14dfdf5
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BooleanParam.java
+@@ -0,0 +1,51 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Boolean parameter. */
++abstract class BooleanParam extends Param<Boolean, BooleanParam.Domain> {
++  static final String TRUE = "true";
++  static final String FALSE = "false";
++
++  BooleanParam(final Domain domain, final Boolean value) {
++    super(domain, value);
++  }
++
++  /** The domain of the parameter. */
++  static final class Domain extends Param.Domain<Boolean> {
++    Domain(final String paramName) {
++      super(paramName);
++    }
++
++    @Override
++    public String getDomain() {
++      return "<" + NULL + " | boolean>";
++    }
++
++    @Override
++    Boolean parse(final String str) {
++      if (TRUE.equalsIgnoreCase(str)) {
++        return true;
++      } else if (FALSE.equalsIgnoreCase(str)) {
++        return false;
++      }
++      throw new IllegalArgumentException("Failed to parse \"" + str
++          + "\" to Boolean.");
++    }
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java
+new file mode 100644
+index 0000000..bc2e741
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/BufferSizeParam.java
+@@ -0,0 +1,49 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Buffer size parameter. */
++public class BufferSizeParam extends IntegerParam {
++  /** Parameter name. */
++  public static final String NAME = "bufferSize";
++  /** Default parameter value. */
++  public static final String DEFAULT = NULL;
++
++  private static final Domain DOMAIN = new Domain(NAME);
++
++  /**
++   * Constructor.
++   * @param value the parameter value.
++   */
++  public BufferSizeParam(final Integer value) {
++    super(DOMAIN, value);
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public BufferSizeParam(final String str) {
++    this(DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DeleteOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DeleteOpParam.java
+new file mode 100644
+index 0000000..e61e858
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DeleteOpParam.java
+@@ -0,0 +1,74 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import java.net.HttpURLConnection;
++
++/** Http DELETE operation parameter. */
++public class DeleteOpParam extends HttpOpParam<DeleteOpParam.Op> {
++  /** Parameter name. */
++  public static final String NAME = "deleteOp";
++
++  /** Delete operations. */
++  public static enum Op implements HttpOpParam.Op {
++    DELETE(HttpURLConnection.HTTP_OK),
++
++    NULL(HttpURLConnection.HTTP_NOT_IMPLEMENTED);
++
++    final int expectedHttpResponseCode;
++
++    Op(final int expectedHttpResponseCode) {
++      this.expectedHttpResponseCode = expectedHttpResponseCode;
++    }
++
++    @Override
++    public HttpOpParam.Type getType() {
++      return HttpOpParam.Type.DELETE;
++    }
++
++    @Override
++    public boolean getDoOutput() {
++      return false;
++    }
++
++    @Override
++    public int getExpectedHttpResponseCode() {
++      return expectedHttpResponseCode;
++    }
++
++    @Override
++    public String toQueryString() {
++      return NAME + "=" + this;
++    }
++  }
++
++  private static final Domain<Op> DOMAIN = new Domain<Op>(NAME, Op.class);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public DeleteOpParam(final String str) {
++    super(DOMAIN, DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java
+new file mode 100644
+index 0000000..7d522a3
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/DstPathParam.java
+@@ -0,0 +1,43 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import org.apache.hadoop.fs.Path;
++
++/** Destination path parameter. */
++public class DstPathParam extends StringParam {
++  /** Parameter name. */
++  public static final String NAME = "dstPath";
++  /** Default parameter value. */
++  public static final String DEFAULT = "";
++
++  private static final Domain DOMAIN = new Domain(NAME, null);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public DstPathParam(final String str) {
++    super(DOMAIN, str == null || str.equals(DEFAULT)? null: new Path(str).toUri().getPath());
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/EnumParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/EnumParam.java
+new file mode 100644
+index 0000000..1703e3b
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/EnumParam.java
+@@ -0,0 +1,46 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import java.util.Arrays;
++
++abstract class EnumParam<E extends Enum<E>> extends Param<E, EnumParam.Domain<E>> {
++  EnumParam(final Domain<E> domain, final E value) {
++    super(domain, value);
++  }
++
++  /** The domain of the parameter. */
++  static final class Domain<E extends Enum<E>> extends Param.Domain<E> {
++    private final Class<E> enumClass;
++
++    Domain(String name, final Class<E> enumClass) {
++      super(name);
++      this.enumClass = enumClass;
++    }
++
++    @Override
++    public final String getDomain() {
++      return Arrays.asList(enumClass.getEnumConstants()).toString();
++    }
++
++    @Override
++    final E parse(final String str) {
++      return Enum.valueOf(enumClass, str.toUpperCase());
++    }
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ExceptionHandler.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ExceptionHandler.java
+new file mode 100644
+index 0000000..8a04c4a
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ExceptionHandler.java
+@@ -0,0 +1,59 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import java.io.FileNotFoundException;
++import java.io.IOException;
++
++import javax.ws.rs.core.MediaType;
++import javax.ws.rs.core.Response;
++import javax.ws.rs.ext.ExceptionMapper;
++import javax.ws.rs.ext.Provider;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.hdfs.web.JsonUtil;
++
++/** Handle exceptions. */
++@Provider
++public class ExceptionHandler implements ExceptionMapper<Exception> {
++  public static final Log LOG = LogFactory.getLog(ExceptionHandler.class);
++
++  @Override
++  public Response toResponse(final Exception e) {
++    if (LOG.isTraceEnabled()) {
++      LOG.trace("GOT EXCEPITION", e);
++    }
++
++    final Response.Status s;
++    if (e instanceof SecurityException) {
++      s = Response.Status.UNAUTHORIZED;
++    } else if (e instanceof FileNotFoundException) {
++      s = Response.Status.NOT_FOUND;
++    } else if (e instanceof IOException) {
++      s = Response.Status.FORBIDDEN;
++    } else if (e instanceof UnsupportedOperationException) {
++      s = Response.Status.BAD_REQUEST;
++    } else {
++      s = Response.Status.INTERNAL_SERVER_ERROR;
++    }
++ 
++    final String js = JsonUtil.toJsonString(e);
++    return Response.status(s).type(MediaType.APPLICATION_JSON).entity(js).build();
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
+new file mode 100644
+index 0000000..0d19fb4
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
+@@ -0,0 +1,73 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import java.net.HttpURLConnection;
++
++/** Http GET operation parameter. */
++public class GetOpParam extends HttpOpParam<GetOpParam.Op> {
++  /** Parameter name. */
++  public static final String NAME = "getOp";
++
++  /** Get operations. */
++  public static enum Op implements HttpOpParam.Op {
++    GETFILESTATUS(HttpURLConnection.HTTP_OK),
++    NULL(HttpURLConnection.HTTP_NOT_IMPLEMENTED);
++
++    final int expectedHttpResponseCode;
++
++    Op(final int expectedHttpResponseCode) {
++      this.expectedHttpResponseCode = expectedHttpResponseCode;
++    }
++
++    @Override
++    public HttpOpParam.Type getType() {
++      return HttpOpParam.Type.GET;
++    }
++
++    @Override
++    public boolean getDoOutput() {
++      return false;
++    }
++
++    @Override
++    public int getExpectedHttpResponseCode() {
++      return expectedHttpResponseCode;
++    }
++
++    @Override
++    public String toQueryString() {
++      return NAME + "=" + this;
++    }
++  }
++
++  private static final Domain<Op> DOMAIN = new Domain<Op>(NAME, Op.class);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public GetOpParam(final String str) {
++    super(DOMAIN, DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/GroupParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GroupParam.java
+new file mode 100644
+index 0000000..c0429cc
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GroupParam.java
+@@ -0,0 +1,41 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Group parameter. */
++public class GroupParam extends StringParam {
++  /** Parameter name. */
++  public static final String NAME = "group";
++  /** Default parameter value. */
++  public static final String DEFAULT = "";
++
++  private static final Domain DOMAIN = new Domain(NAME, null);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public GroupParam(final String str) {
++    super(DOMAIN, str == null || str.equals(DEFAULT)? null: str);
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java
+new file mode 100644
+index 0000000..204e15b
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/HttpOpParam.java
+@@ -0,0 +1,52 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Http operation parameter. */
++public abstract class HttpOpParam<E extends Enum<E> & HttpOpParam.Op> extends EnumParam<E> {
++  /** Default parameter value. */
++  public static final String DEFAULT = NULL;
++
++  /** Http operation types */
++  public static enum Type {
++    GET, PUT, POST, DELETE;
++  }
++
++  /** Http operation interface. */
++  public static interface Op {
++    /** @return the Http operation type. */
++    public Type getType();
++
++    /** @return true if the operation has output. */
++    public boolean getDoOutput();
++
++    /** @return true if the operation has output. */
++    public int getExpectedHttpResponseCode();
++
++    /** @return a URI query string. */
++    public String toQueryString();
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  HttpOpParam(final Domain<E> domain, final E value) {
++    super(domain, value);
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/IntegerParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/IntegerParam.java
+new file mode 100644
+index 0000000..5e89087
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/IntegerParam.java
+@@ -0,0 +1,60 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Integer parameter. */
++abstract class IntegerParam extends Param<Integer, IntegerParam.Domain> {
++  IntegerParam(final Domain domain, final Integer value) {
++    super(domain, value);
++  }
++  
++  @Override
++  public String toString() {
++    return getName() + "=" + domain.toString(getValue());
++  }
++
++  /** The domain of the parameter. */
++  static final class Domain extends Param.Domain<Integer> {
++    /** The radix of the number. */
++    final int radix;
++
++    Domain(final String paramName) {
++      this(paramName, 10);
++    }
++
++    Domain(final String paramName, final int radix) {
++      super(paramName);
++      this.radix = radix;
++    }
++
++    @Override
++    public String getDomain() {
++      return "<" + NULL + " | int in radix " + radix + ">";
++    }
++
++    @Override
++    Integer parse(final String str) {
++      return NULL.equals(str)? null: Integer.parseInt(str, radix);
++    }
++
++    /** Convert an Integer to a String. */ 
++    String toString(final Integer n) {
++      return n == null? NULL: Integer.toString(n, radix);
++    }
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/LongParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/LongParam.java
+new file mode 100644
+index 0000000..8a3e0f5
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/LongParam.java
+@@ -0,0 +1,60 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Long parameter. */
++abstract class LongParam extends Param<Long, LongParam.Domain> {
++  LongParam(final Domain domain, final Long value) {
++    super(domain, value);
++  }
++  
++  @Override
++  public String toString() {
++    return getName() + "=" + domain.toString(getValue());
++  }
++
++  /** The domain of the parameter. */
++  static final class Domain extends Param.Domain<Long> {
++    /** The radix of the number. */
++    final int radix;
++
++    Domain(final String paramName) {
++      this(paramName, 10);
++    }
++
++    Domain(final String paramName, final int radix) {
++      super(paramName);
++      this.radix = radix;
++    }
++
++    @Override
++    public String getDomain() {
++      return "<" + NULL + " | short in radix " + radix + ">";
++    }
++
++    @Override
++    Long parse(final String str) {
++      return NULL.equals(str)? null: Long.parseLong(str, radix);
++    }
++
++    /** Convert a Short to a String. */ 
++    String toString(final Long n) {
++      return n == null? NULL: Long.toString(n, radix);
++    }
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java
+new file mode 100644
+index 0000000..d43da07
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ModificationTimeParam.java
+@@ -0,0 +1,49 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Modification time parameter. */
++public class ModificationTimeParam extends LongParam {
++  /** Parameter name. */
++  public static final String NAME = "modificationTime";
++  /** Default parameter value. */
++  public static final String DEFAULT = "-1";
++
++  private static final Domain DOMAIN = new Domain(NAME);
++
++  /**
++   * Constructor.
++   * @param value the parameter value.
++   */
++  public ModificationTimeParam(final Long value) {
++    super(DOMAIN, value);
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public ModificationTimeParam(final String str) {
++    this(DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/OverwriteParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/OverwriteParam.java
+new file mode 100644
+index 0000000..f6945bb
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/OverwriteParam.java
+@@ -0,0 +1,49 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Overwrite parameter. */
++public class OverwriteParam extends BooleanParam {
++  /** Parameter name. */
++  public static final String NAME = "overwrite";
++  /** Default parameter value. */
++  public static final String DEFAULT = FALSE;
++
++  private static final Domain DOMAIN = new Domain(NAME);
++
++  /**
++   * Constructor.
++   * @param value the parameter value.
++   */
++  public OverwriteParam(final Boolean value) {
++    super(DOMAIN, value);
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public OverwriteParam(final String str) {
++    this(DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/OwnerParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/OwnerParam.java
+new file mode 100644
+index 0000000..a1c10aa
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/OwnerParam.java
+@@ -0,0 +1,41 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Owner parameter. */
++public class OwnerParam extends StringParam {
++  /** Parameter name. */
++  public static final String NAME = "owner";
++  /** Default parameter value. */
++  public static final String DEFAULT = "";
++
++  private static final Domain DOMAIN = new Domain(NAME, null);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public OwnerParam(final String str) {
++    super(DOMAIN, str == null || str.equals(DEFAULT)? null: str);
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/Param.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/Param.java
+new file mode 100644
+index 0000000..b5fd1da
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/Param.java
+@@ -0,0 +1,104 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import java.util.Arrays;
++import java.util.Comparator;
++
++
++/** Base class of parameters. */
++public abstract class Param<T, D extends Param.Domain<T>> {
++  static final String NULL = "null";
++  
++  static final Comparator<Param<?,?>> NAME_CMP = new Comparator<Param<?,?>>() {
++    @Override
++    public int compare(Param<?, ?> left, Param<?, ?> right) {
++      return left.getName().compareTo(right.getName());
++    }
++  };
++
++  /** Convert the parameters to a sorted String. */
++  public static String toSortedString(final String separator,
++      final Param<?, ?>... parameters) {
++    Arrays.sort(parameters, NAME_CMP);
++    final StringBuilder b = new StringBuilder();
++    for(Param<?, ?> p : parameters) {
++      if (p.getValue() != null) {
++        b.append(separator).append(p);
++      }
++    }
++    return b.toString();
++  }
++
++  /** The domain of the parameter. */
++  final D domain;
++  /** The actual parameter value. */
++  final T value;
++
++  Param(final D domain, final T value) {
++    this.domain = domain;
++    this.value = value;
++  }
++
++  /** @return the parameter value. */
++  public final T getValue() {
++    return value;
++  }
++
++  /** @return the parameter name. */
++  public abstract String getName();
++
++  @Override
++  public String toString() {
++    return getName() + "=" + value;
++  }
++
++  /** Base class of parameter domains. */
++  static abstract class Domain<T> {
++    /** Parameter name. */
++    final String paramName;
++    
++    Domain(final String paramName) {
++      this.paramName = paramName;
++    }
++ 
++    /** @return the parameter name. */
++    public final String getParamName() {
++      return paramName;
++    }
++
++    /** @return a string description of the domain of the parameter. */
++    public abstract String getDomain();
++
++    /** @return the parameter value represented by the string. */
++    abstract T parse(String str);
++
++    /** Parse the given string.
++     * @return the parameter value represented by the string.
++     */
++    public final T parse(final String varName, final String str) {
++      try {
++        return str != null && str.trim().length() > 0 ? parse(str) : null;
++      } catch(Exception e) {
++        throw new IllegalArgumentException("Failed to parse \"" + str
++            + "\" for the parameter " + varName
++            + ".  The value must be in the domain " + getDomain(), e);
++      }
++    }
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PermissionParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PermissionParam.java
+new file mode 100644
+index 0000000..264e602
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PermissionParam.java
+@@ -0,0 +1,57 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import org.apache.hadoop.fs.permission.FsPermission;
++
++/** Permission parameter, use a Short to represent a FsPermission. */
++public class PermissionParam extends ShortParam {
++  /** Parameter name. */
++  public static final String NAME = "permission";
++  /** Default parameter value. */
++  public static final String DEFAULT = NULL;
++
++  private static final Domain DOMAIN = new Domain(NAME, 8);
++  
++  /**
++   * Constructor.
++   * @param value the parameter value.
++   */
++  public PermissionParam(final FsPermission value) {
++    super(DOMAIN, value == null? null: value.toShort());
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public PermissionParam(final String str) {
++    super(DOMAIN, DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++
++  /** @return the represented FsPermission. */
++  public FsPermission getFsPermission() {
++    final Short mode = getValue();
++    return mode == null? FsPermission.getDefault(): new FsPermission(mode);
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PostOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PostOpParam.java
+new file mode 100644
+index 0000000..116d6af
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PostOpParam.java
+@@ -0,0 +1,74 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import java.net.HttpURLConnection;
++
++/** Http POST operation parameter. */
++public class PostOpParam extends HttpOpParam<PostOpParam.Op> {
++  /** Parameter name. */
++  public static final String NAME = "postOp";
++
++  /** Post operations. */
++  public static enum Op implements HttpOpParam.Op {
++    APPEND(HttpURLConnection.HTTP_OK),
++
++    NULL(HttpURLConnection.HTTP_NOT_IMPLEMENTED);
++
++    final int expectedHttpResponseCode;
++
++    Op(final int expectedHttpResponseCode) {
++      this.expectedHttpResponseCode = expectedHttpResponseCode;
++    }
++
++    @Override
++    public Type getType() {
++      return Type.POST;
++    }
++
++    @Override
++    public boolean getDoOutput() {
++      return true;
++    }
++
++    @Override
++    public int getExpectedHttpResponseCode() {
++      return expectedHttpResponseCode;
++    }
++
++    /** @return a URI query string. */
++    public String toQueryString() {
++      return NAME + "=" + this;
++    }
++  }
++
++  private static final Domain<Op> DOMAIN = new Domain<PostOpParam.Op>(NAME, Op.class);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public PostOpParam(final String str) {
++    super(DOMAIN, DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java
+new file mode 100644
+index 0000000..00703fe
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/PutOpParam.java
+@@ -0,0 +1,84 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import java.net.HttpURLConnection;
++
++/** Http POST operation parameter. */
++public class PutOpParam extends HttpOpParam<PutOpParam.Op> {
++  /** Parameter name. */
++  public static final String NAME = "putOp";
++
++  /** Put operations. */
++  public static enum Op implements HttpOpParam.Op {
++    CREATE(true, HttpURLConnection.HTTP_CREATED),
++
++    MKDIRS(false, HttpURLConnection.HTTP_OK),
++    RENAME(false, HttpURLConnection.HTTP_OK),
++    SETREPLICATION(false, HttpURLConnection.HTTP_OK),
++
++    SETOWNER(false, HttpURLConnection.HTTP_OK),
++    SETPERMISSION(false, HttpURLConnection.HTTP_OK),
++    SETTIMES(false, HttpURLConnection.HTTP_OK),
++    
++    NULL(false, HttpURLConnection.HTTP_NOT_IMPLEMENTED);
++
++    final boolean doOutput;
++    final int expectedHttpResponseCode;
++
++    Op(final boolean doOutput, final int expectedHttpResponseCode) {
++      this.doOutput = doOutput;
++      this.expectedHttpResponseCode = expectedHttpResponseCode;
++    }
++
++    @Override
++    public HttpOpParam.Type getType() {
++      return HttpOpParam.Type.PUT;
++    }
++
++    @Override
++    public boolean getDoOutput() {
++      return doOutput;
++    }
++
++    @Override
++    public int getExpectedHttpResponseCode() {
++      return expectedHttpResponseCode;
++    }
++
++    @Override
++    public String toQueryString() {
++      return NAME + "=" + this;
++    }
++  }
++
++  private static final Domain<Op> DOMAIN = new Domain<Op>(NAME, Op.class);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public PutOpParam(final String str) {
++    super(DOMAIN, DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/RecursiveParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/RecursiveParam.java
+new file mode 100644
+index 0000000..4890a61
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/RecursiveParam.java
+@@ -0,0 +1,49 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Recursive parameter. */
++public class RecursiveParam extends BooleanParam {
++  /** Parameter name. */
++  public static final String NAME = "recursive";
++  /** Default parameter value. */
++  public static final String DEFAULT = FALSE;
++
++  private static final Domain DOMAIN = new Domain(NAME);
++
++  /**
++   * Constructor.
++   * @param value the parameter value.
++   */
++  public RecursiveParam(final Boolean value) {
++    super(DOMAIN, value);
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public RecursiveParam(final String str) {
++    this(DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ReplicationParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ReplicationParam.java
+new file mode 100644
+index 0000000..e13aec8
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ReplicationParam.java
+@@ -0,0 +1,49 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Replication parameter. */
++public class ReplicationParam extends ShortParam {
++  /** Parameter name. */
++  public static final String NAME = "replication";
++  /** Default parameter value. */
++  public static final String DEFAULT = NULL;
++
++  private static final Domain DOMAIN = new Domain(NAME);
++
++  /**
++   * Constructor.
++   * @param value the parameter value.
++   */
++  public ReplicationParam(final Short value) {
++    super(DOMAIN, value);
++  }
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public ReplicationParam(final String str) {
++    this(DOMAIN.parse(str));
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/ShortParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ShortParam.java
+new file mode 100644
+index 0000000..af3e72f
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/ShortParam.java
+@@ -0,0 +1,60 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** Short parameter. */
++abstract class ShortParam extends Param<Short, ShortParam.Domain> {
++  ShortParam(final Domain domain, final Short value) {
++    super(domain, value);
++  }
++  
++  @Override
++  public String toString() {
++    return getName() + "=" + domain.toString(getValue());
++  }
++
++  /** The domain of the parameter. */
++  static final class Domain extends Param.Domain<Short> {
++    /** The radix of the number. */
++    final int radix;
++
++    Domain(final String paramName) {
++      this(paramName, 10);
++    }
++
++    Domain(final String paramName, final int radix) {
++      super(paramName);
++      this.radix = radix;
++    }
++
++    @Override
++    public String getDomain() {
++      return "<" + NULL + " | short in radix " + radix + ">";
++    }
++
++    @Override
++    Short parse(final String str) {
++      return NULL.equals(str)? null: Short.parseShort(str, radix);
++    }
++
++    /** Convert a Short to a String. */ 
++    String toString(final Short n) {
++      return n == null? NULL: Integer.toString(n, radix);
++    }
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/StringParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/StringParam.java
+new file mode 100644
+index 0000000..d4303f1
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/StringParam.java
+@@ -0,0 +1,54 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import java.util.regex.Pattern;
++
++/** String parameter. */
++abstract class StringParam extends Param<String, StringParam.Domain> {
++  StringParam(final Domain domain, String str) {
++    super(domain, domain.parse(str));
++  }
++
++  /** The domain of the parameter. */
++  static final class Domain extends Param.Domain<String> {
++    /** The pattern defining the domain; null . */
++    private final Pattern pattern;
++
++    Domain(final String paramName, final Pattern pattern) {
++      super(paramName);
++      this.pattern = pattern;
++    }
++
++    @Override
++    public final String getDomain() {
++      return pattern == null ? "<String>" : pattern.pattern();
++    }
++
++    @Override
++    final String parse(final String str) {
++      if (pattern != null) {
++        if (!pattern.matcher(str).matches()) {
++          throw new IllegalArgumentException("Invalid value: \"" + str
++              + "\" does not belong to the domain " + getDomain());
++        }
++      }
++      return str;
++    }
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/UriFsPathParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/UriFsPathParam.java
+new file mode 100644
+index 0000000..762b6e2
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/UriFsPathParam.java
+@@ -0,0 +1,45 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** The FileSystem path parameter. */
++public class UriFsPathParam extends StringParam {
++  /** Parameter name. */
++  public static final String NAME = "path";
++
++  private static final Domain DOMAIN = new Domain(NAME, null);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public UriFsPathParam(String str) {
++    super(DOMAIN, str);
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++
++  /** @return the absolute path. */
++  public final String getAbsolutePath() {
++    final String path = getValue();
++    return path == null? null: "/" + path;
++  }
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserParam.java
+new file mode 100644
+index 0000000..ec05662
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserParam.java
+@@ -0,0 +1,41 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++/** User parameter. */
++public class UserParam extends StringParam {
++  /** Parameter name. */
++  public static final String NAME = "user.name";
++  /** Default parameter value. */
++  public static final String DEFAULT = "";
++
++  private static final Domain DOMAIN = new Domain(NAME, null);
++
++  /**
++   * Constructor.
++   * @param str a string representation of the parameter value.
++   */
++  public UserParam(final String str) {
++    super(DOMAIN, str == null || str.equals(DEFAULT)? null: str);
++  }
++
++  @Override
++  public String getName() {
++    return NAME;
++  }
++}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserProvider.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserProvider.java
+new file mode 100644
+index 0000000..43c66e4
+--- /dev/null
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserProvider.java
+@@ -0,0 +1,73 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web.resources;
++
++import java.lang.reflect.Type;
++import java.security.Principal;
++
++import javax.ws.rs.core.Context;
++import javax.ws.rs.ext.Provider;
++
++import com.sun.jersey.api.core.HttpContext;
++import com.sun.jersey.core.spi.component.ComponentContext;
++import com.sun.jersey.core.spi.component.ComponentScope;
++import com.sun.jersey.server.impl.inject.AbstractHttpContextInjectable;
++import com.sun.jersey.spi.inject.Injectable;
++import com.sun.jersey.spi.inject.InjectableProvider;
++
++@Provider
++public class UserProvider extends AbstractHttpContextInjectable<Principal>
++    implements InjectableProvider<Context, Type> {
++
++  @Override
++  public Principal getValue(final HttpContext context) {
++    //get principal from the request
++    final Principal principal = context.getRequest().getUserPrincipal();
++    if (principal != null) {
++      return principal;
++    }
++
++    //get username from the parameter
++    final String username = context.getRequest().getQueryParameters().getFirst(
++        UserParam.NAME);
++    if (username != null) {
++      final UserParam userparam = new UserParam(username);
++      return new Principal() {
++        @Override
++        public String getName() {
++          return userparam.getValue();
++        }
++      };
++    }
++
++    //user not found
++    return null;
++  }
++
++  @Override
++  public ComponentScope getScope() {
++    return ComponentScope.PerRequest;
++  }
++
++  @Override
++  public Injectable<Principal> getInjectable(
++      final ComponentContext componentContext, final Context context,
++      final Type type) {
++    return type.equals(Principal.class)? this : null;
++  }
++}
+\ No newline at end of file
+diff --git a/src/test/org/apache/hadoop/fs/FSMainOperationsBaseTest.java b/src/test/org/apache/hadoop/fs/FSMainOperationsBaseTest.java
+index 6a175e3..4b16ae9 100644
+--- a/src/test/org/apache/hadoop/fs/FSMainOperationsBaseTest.java
++++ b/src/test/org/apache/hadoop/fs/FSMainOperationsBaseTest.java
+@@ -57,8 +57,6 @@ public abstract class FSMainOperationsBaseTest  {
+   private static String TEST_DIR_AXX = "test/hadoop/axx";
+   private static int numBlocks = 2;
+   
+-  static  final String LOCAL_FS_ROOT_URI = "file:///tmp/test";
+-  
+   
+   protected static FileSystem fSys;
+   
+@@ -78,7 +76,7 @@ public abstract class FSMainOperationsBaseTest  {
+     }     
+   };
+   
+-  private static byte[] data = getFileData(numBlocks,
++  protected static final byte[] data = getFileData(numBlocks,
+       getDefaultBlockSize());
+   
+   @Before
+@@ -89,7 +87,6 @@ public abstract class FSMainOperationsBaseTest  {
+   @After
+   public void tearDown() throws Exception {
+     fSys.delete(new Path(getAbsoluteTestRootPath(fSys), new Path("test")), true);
+-    fSys.delete(new Path(LOCAL_FS_ROOT_URI), true);
+   }
+   
+   
+@@ -165,7 +162,7 @@ public abstract class FSMainOperationsBaseTest  {
+     
+     // Try a URI
+ 
+-    absoluteDir = new Path(LOCAL_FS_ROOT_URI + "/existingDir");
++    absoluteDir = new Path(fSys.getUri() + "/test/existingDir");
+     fSys.mkdirs(absoluteDir);
+     fSys.setWorkingDirectory(absoluteDir);
+     Assert.assertEquals(absoluteDir, fSys.getWorkingDirectory());
+@@ -585,7 +582,7 @@ public abstract class FSMainOperationsBaseTest  {
+     writeReadAndDelete(getDefaultBlockSize() * 2);
+   }
+   
+-  private void writeReadAndDelete(int len) throws IOException {
++  protected void writeReadAndDelete(int len) throws IOException {
+     Path path = getTestRootPath(fSys, "test/hadoop/file");
+     
+     fSys.mkdirs(path.getParent());
+diff --git a/src/test/org/apache/hadoop/fs/FileSystemContractBaseTest.java b/src/test/org/apache/hadoop/fs/FileSystemContractBaseTest.java
+index 8bdeb3b..f8fa097 100644
+--- a/src/test/org/apache/hadoop/fs/FileSystemContractBaseTest.java
++++ b/src/test/org/apache/hadoop/fs/FileSystemContractBaseTest.java
+@@ -45,7 +45,7 @@ import org.apache.hadoop.fs.Path;
+ public abstract class FileSystemContractBaseTest extends TestCase {
+   
+   protected FileSystem fs;
+-  private byte[] data = new byte[getBlockSize() * 2]; // two blocks of data
++  protected byte[] data = new byte[getBlockSize() * 2]; // two blocks of data
+   {
+     for (int i = 0; i < data.length; i++) {
+       data[i] = (byte) (i % 10);
+@@ -210,7 +210,7 @@ public abstract class FileSystemContractBaseTest extends TestCase {
+     writeReadAndDelete(getBlockSize() * 2);
+   }
+   
+-  private void writeReadAndDelete(int len) throws IOException {
++  protected void writeReadAndDelete(int len) throws IOException {
+     Path path = path("/test/hadoop/file");
+     
+     fs.mkdirs(path.getParent());
+@@ -251,7 +251,7 @@ public abstract class FileSystemContractBaseTest extends TestCase {
+     assertEquals("Length", data.length, fs.getFileStatus(path).getLen());
+     
+     try {
+-      fs.create(path, false);
++      fs.create(path, false).close();
+       fail("Should throw IOException.");
+     } catch (IOException e) {
+       // Expected
+diff --git a/src/test/org/apache/hadoop/hdfs/MiniDFSCluster.java b/src/test/org/apache/hadoop/hdfs/MiniDFSCluster.java
+index cecc4ae..a14ce2f 100644
+--- a/src/test/org/apache/hadoop/hdfs/MiniDFSCluster.java
++++ b/src/test/org/apache/hadoop/hdfs/MiniDFSCluster.java
+@@ -46,6 +46,7 @@ import org.apache.hadoop.net.DNSToSwitchMapping;
+ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.net.StaticMapping;
+ import org.apache.hadoop.security.authorize.ProxyUsers;
++import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.util.StringUtils;
+ import org.apache.hadoop.util.ToolRunner;
+@@ -332,6 +333,7 @@ public class MiniDFSCluster {
+                              boolean manageDfsDirs, StartupOption operation, 
+                              String[] racks, String[] hosts,
+                              long[] simulatedCapacities) throws IOException {
++    conf.set("slave.host.name", "127.0.0.1");
+ 
+     int curDatanodesNum = dataNodes.size();
+     // for mincluster's the default initialDelay for BRs is 0
+@@ -809,6 +811,18 @@ public class MiniDFSCluster {
+   }
+ 
+   /**
++   * @return a {@link WebHdfsFileSystem} object.
++   */
++  public WebHdfsFileSystem getWebHdfsFileSystem() throws IOException {
++    final String str = WebHdfsFileSystem.SCHEME  + "://" + conf.get("dfs.http.address");
++    try {
++      return (WebHdfsFileSystem)FileSystem.get(new URI(str), conf); 
++    } catch (URISyntaxException e) {
++      throw new IOException(e);
++    }
++  }
++
++  /**
+    *  @return a {@link HftpFileSystem} object as specified user. 
+    */
+   public HftpFileSystem getHftpFileSystemAs(final String username,
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestFSMainOperationsWebHdfs.java b/src/test/org/apache/hadoop/hdfs/web/TestFSMainOperationsWebHdfs.java
+new file mode 100644
+index 0000000..1a67bf6
+--- /dev/null
++++ b/src/test/org/apache/hadoop/hdfs/web/TestFSMainOperationsWebHdfs.java
+@@ -0,0 +1,115 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web;
++
++
++import static org.apache.hadoop.fs.FileSystemTestHelper.exists;
++import static org.apache.hadoop.fs.FileSystemTestHelper.getDefaultBlockSize;
++import static org.apache.hadoop.fs.FileSystemTestHelper.getTestRootPath;
++
++import java.io.IOException;
++
++import org.apache.commons.logging.impl.Log4JLogger;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FSDataInputStream;
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.FSMainOperationsBaseTest;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.MiniDFSCluster;
++import org.apache.hadoop.hdfs.web.resources.ExceptionHandler;
++import org.apache.log4j.Level;
++import org.junit.Assert;
++import org.junit.Test;
++
++public class TestFSMainOperationsWebHdfs extends FSMainOperationsBaseTest {
++  {
++    ((Log4JLogger)ExceptionHandler.LOG).getLogger().setLevel(Level.ALL);
++  }
++
++  private static final MiniDFSCluster cluster;
++  private static final Path defaultWorkingDirectory;
++
++  static {
++    Configuration conf = new Configuration();
++    try {
++      cluster = new MiniDFSCluster(conf, 2, true, null);
++      fSys = cluster.getWebHdfsFileSystem();
++      defaultWorkingDirectory = fSys.getWorkingDirectory();
++    } catch (IOException e) {
++      throw new RuntimeException(e);
++    }
++  }
++
++  @Override
++  protected Path getDefaultWorkingDirectory() {
++    return defaultWorkingDirectory;
++  }
++
++  /** Override the following method without using position read. */
++  @Override
++  protected void writeReadAndDelete(int len) throws IOException {
++    Path path = getTestRootPath(fSys, "test/hadoop/file");
++    fSys.mkdirs(path.getParent());
++
++    FSDataOutputStream out = 
++      fSys.create(path, false, 4096, (short) 1, getDefaultBlockSize() );
++    out.write(data, 0, len);
++    out.close();
++
++    Assert.assertTrue("Exists", exists(fSys, path));
++    Assert.assertEquals("Length", len, fSys.getFileStatus(path).getLen());
++
++    FSDataInputStream in = fSys.open(path);
++    for (int i = 0; i < len; i++) {
++      final int b  = in.read();
++      Assert.assertEquals("Position " + i, data[i], b);
++    }
++    in.close();
++    Assert.assertTrue("Deleted", fSys.delete(path, false));
++    Assert.assertFalse("No longer exists", exists(fSys, path));
++  }
++
++  //copied from trunk.
++  @Test
++  public void testMkdirsFailsForSubdirectoryOfExistingFile() throws Exception {
++    Path testDir = getTestRootPath(fSys, "test/hadoop");
++    Assert.assertFalse(exists(fSys, testDir));
++    fSys.mkdirs(testDir);
++    Assert.assertTrue(exists(fSys, testDir));
++    
++    createFile(getTestRootPath(fSys, "test/hadoop/file"));
++    
++    Path testSubDir = getTestRootPath(fSys, "test/hadoop/file/subdir");
++    try {
++      fSys.mkdirs(testSubDir);
++      Assert.fail("Should throw IOException.");
++    } catch (IOException e) {
++      // expected
++    }
++    Assert.assertFalse(exists(fSys, testSubDir));
++    
++    Path testDeepSubDir = getTestRootPath(fSys, "test/hadoop/file/deep/sub/dir");
++    try {
++      fSys.mkdirs(testDeepSubDir);
++      Assert.fail("Should throw IOException.");
++    } catch (IOException e) {
++      // expected
++    }
++    Assert.assertFalse(exists(fSys, testDeepSubDir));
++  }
++}
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestJsonUtil.java b/src/test/org/apache/hadoop/hdfs/web/TestJsonUtil.java
+new file mode 100644
+index 0000000..bcbfec6
+--- /dev/null
++++ b/src/test/org/apache/hadoop/hdfs/web/TestJsonUtil.java
+@@ -0,0 +1,55 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.web;
++
++import org.apache.hadoop.fs.FileStatus;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.hdfs.DFSUtil;
++import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
++import org.apache.hadoop.hdfs.web.JsonUtil;
++import org.junit.Assert;
++import org.junit.Test;
++
++public class TestJsonUtil {
++  static FileStatus toFileStatus(HdfsFileStatus f, String parent) {
++    return new FileStatus(f.getLen(), f.isDir(), f.getReplication(),
++        f.getBlockSize(), f.getModificationTime(), f.getAccessTime(),
++        f.getPermission(), f.getOwner(), f.getGroup(),
++        new Path(f.getFullName(parent)));
++  }
++
++  @Test
++  public void testHdfsFileStatus() {
++    final long now = System.currentTimeMillis();
++    final String parent = "/dir";
++    final HdfsFileStatus status = new HdfsFileStatus(1001L, false, 3, 1L<<26,
++        now, now + 10, new FsPermission((short)0644), "user", "group",
++        DFSUtil.string2Bytes("foo"));
++    final FileStatus fstatus = toFileStatus(status, parent);
++    System.out.println("status  = " + status);
++    System.out.println("fstatus = " + fstatus);
++    final String json = JsonUtil.toJsonString(status);
++    System.out.println("json    = " + json.replace(",", ",\n  "));
++    final HdfsFileStatus s2 = JsonUtil.toFileStatus(JsonUtil.parse(json));
++    final FileStatus fs2 = toFileStatus(s2, parent);
++    System.out.println("s2      = " + s2);
++    System.out.println("fs2     = " + fs2);
++    Assert.assertEquals(fstatus, fs2);
++  }
++}
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+new file mode 100644
+index 0000000..835b857
+--- /dev/null
++++ b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+@@ -0,0 +1,86 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.hdfs.web;
++
++import java.io.IOException;
++
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FSDataInputStream;
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.FileSystemContractBaseTest;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.MiniDFSCluster;
++import org.apache.hadoop.security.UserGroupInformation;
++
++public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
++  private static final MiniDFSCluster cluster;
++  private String defaultWorkingDirectory;
++
++  static {
++    Configuration conf = new Configuration();
++    try {
++      cluster = new MiniDFSCluster(conf, 2, true, null);
++    } catch (IOException e) {
++      throw new RuntimeException(e);
++    }
++  }
++
++  @Override
++  protected void setUp() throws Exception {
++    fs = cluster.getWebHdfsFileSystem();
++    defaultWorkingDirectory = "/user/"
++        + UserGroupInformation.getCurrentUser().getShortUserName();
++  }
++
++  @Override
++  protected String getDefaultWorkingDirectory() {
++    return defaultWorkingDirectory;
++  }
++
++  /** Override the following method without using position read. */
++  @Override
++  protected void writeReadAndDelete(int len) throws IOException {
++    Path path = path("/test/hadoop/file");
++    
++    fs.mkdirs(path.getParent());
++
++    FSDataOutputStream out = fs.create(path, false,
++        fs.getConf().getInt("io.file.buffer.size", 4096), 
++        (short) 1, getBlockSize());
++    out.write(data, 0, len);
++    out.close();
++
++    assertTrue("Exists", fs.exists(path));
++    assertEquals("Length", len, fs.getFileStatus(path).getLen());
++
++    FSDataInputStream in = fs.open(path);
++    for (int i = 0; i < len; i++) {
++      final int b = in.read();
++      assertEquals("Position " + i, data[i], b);
++    }
++    in.close();
++    
++    assertTrue("Deleted", fs.delete(path, false));
++    assertFalse("No longer exists", fs.exists(path));
++  }
++
++  //The following test failed for HftpFileSystem,
++  //Disable it for WebHdfsFileSystem
++  public void testListStatusReturnsNullForNonExistentFile() {}
++}
+-- 
+1.7.0.4
+

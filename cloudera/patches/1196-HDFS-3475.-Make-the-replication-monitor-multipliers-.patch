@@ -1,0 +1,145 @@
+From bc244743995b77d0021de0f018daadbe983553bf Mon Sep 17 00:00:00 2001
+From: Harsh J <harsh@cloudera.com>
+Date: Thu, 28 Jun 2012 20:03:42 +0530
+Subject: [PATCH 1196/1344] HDFS-3475. Make the replication monitor multipliers configurable.
+
+Reason: Customer Request
+Ref: CDH-6396
+Author: Harsh J
+---
+ src/hdfs/hdfs-default.xml                          |   31 ++++++++++++++++++++
+ src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java |    8 +++++
+ .../hadoop/hdfs/server/namenode/FSNamesystem.java  |   29 ++++++++++++++++--
+ 3 files changed, 64 insertions(+), 4 deletions(-)
+
+diff --git a/src/hdfs/hdfs-default.xml b/src/hdfs/hdfs-default.xml
+index eb20ff1..09b1166 100644
+--- a/src/hdfs/hdfs-default.xml
++++ b/src/hdfs/hdfs-default.xml
+@@ -512,4 +512,35 @@ creations/deletions), or "all".</description>
+   </description>
+ </property>
+ 
++<property>
++  <name>dfs.namenode.invalidate.work.pct.per.iteration</name>
++  <value>0.32</value>
++  <description>
++    *Note*: Advanced property. Change with caution.
++    This determines the percentage amount of block
++    invalidations (deletes) to do over a single DN heartbeat
++    deletion command. The final deletion count is determined by applying this
++    percentage to the number of live nodes in the system.
++    The resultant number is the number of blocks from the deletion list
++    chosen for proper invalidation over a single heartbeat.
++    Value should be a positive, non-zero percentage in float notation (X.Yf),
++    with 1.0f meaning 100%.
++  </description>
++</property>
++
++<property>
++  <name>dfs.namenode.replication.work.multiplier.per.iteration</name>
++  <value>2</value>
++  <description>
++    *Note*: Advanced property. Change with caution.
++    This determines the total amount of block transfers to begin in
++    parallel at a DN, for replication, when such a command list is being
++    sent over a DN heartbeat by the NN. The actual number is obtained by
++    multiplying this multiplier with the total number of live nodes in the
++    cluster. The result number is the number of blocks to begin transfers
++    immediately for, per DN heartbeat. This number can be any positive,
++    non-zero integer.
++  </description>
++</property>
++
+ </configuration>
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+index c2760df..5b5a65f 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSConfigKeys.java
+@@ -137,6 +137,14 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
+   public static final String  DFS_NAMENODE_CHECKPOINT_EDITS_DIR_KEY = "dfs.namenode.checkpoint.edits.dir";
+   public static final String  DFS_CLIENT_LOCAL_INTERFACES = "dfs.client.local.interfaces";
+ 
++  // Replication monitoring related keys
++  public static final String DFS_NAMENODE_INVALIDATE_WORK_PCT_PER_ITERATION =
++      "dfs.namenode.invalidate.work.pct.per.iteration";
++  public static final int DFS_NAMENODE_INVALIDATE_WORK_PCT_PER_ITERATION_DEFAULT = 32;
++  public static final String DFS_NAMENODE_REPLICATION_WORK_MULTIPLIER_PER_ITERATION =
++      "dfs.namenode.replication.work.multiplier.per.iteration";
++  public static final int DFS_NAMENODE_REPLICATION_WORK_MULTIPLIER_PER_ITERATION_DEFAULT = 2;
++
+   //Code in hdfs is not updated to use these keys.
+   public static final String  DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_RETRIES_KEY = "dfs.client.block.write.locateFollowingBlock.retries";
+   public static final int     DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_RETRIES_DEFAULT = 5;
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index 79dab6b..ccd3f5d 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -42,6 +42,7 @@ import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.SecretManager.InvalidToken;
+ import org.apache.hadoop.security.token.delegation.DelegationKey;
++import org.apache.hadoop.thirdparty.guava.common.base.Preconditions;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager;
+ import org.apache.hadoop.util.*;
+@@ -281,6 +282,10 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+   private long heartbeatExpireInterval;
+   //replicationRecheckInterval is how often namenode checks for new replication work
+   private long replicationRecheckInterval;
++
++  float blocksInvalidateWorkPct;
++  int blocksReplWorkMultiplier;
++
+   // default block size of a file
+   private long defaultBlockSize = 0;
+   // allow file appending (for test coverage)
+@@ -510,6 +515,24 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+         DFSConfigKeys.DFS_BLOCK_INVALIDATE_LIMIT_KEY, this.blockInvalidateLimit);
+     LOG.info(DFSConfigKeys.DFS_BLOCK_INVALIDATE_LIMIT_KEY + "=" + this.blockInvalidateLimit);
+ 
++    this.blocksInvalidateWorkPct = conf.getFloat(
++      DFSConfigKeys.DFS_NAMENODE_INVALIDATE_WORK_PCT_PER_ITERATION,
++      DFSConfigKeys.DFS_NAMENODE_INVALIDATE_WORK_PCT_PER_ITERATION_DEFAULT);
++    Preconditions.checkArgument(
++      (this.blocksInvalidateWorkPct > 0),
++      DFSConfigKeys.DFS_NAMENODE_INVALIDATE_WORK_PCT_PER_ITERATION +
++      " = '" + this.blocksInvalidateWorkPct + "' is invalid. " +
++      "It should be a positive, non-zero float value " +
++      "indicating a percentage.");
++    this.blocksReplWorkMultiplier = conf.getInt(
++      DFSConfigKeys.DFS_NAMENODE_REPLICATION_WORK_MULTIPLIER_PER_ITERATION,
++      DFSConfigKeys.DFS_NAMENODE_REPLICATION_WORK_MULTIPLIER_PER_ITERATION_DEFAULT);
++    Preconditions.checkArgument(
++        (this.blocksReplWorkMultiplier > 0),
++        DFSConfigKeys.DFS_NAMENODE_REPLICATION_WORK_MULTIPLIER_PER_ITERATION +
++        " = '" + this.blocksReplWorkMultiplier + "' is invalid. " +
++        "It should be a positive, non-zero integer value.");
++
+     this.accessTimePrecision = conf.getLong("dfs.access.time.precision", 0);
+     this.allowBrokenAppend = conf.getBoolean("dfs.support.broken.append", false);
+     if (conf.getBoolean("dfs.support.append", false)) {
+@@ -2729,8 +2752,6 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+    * Periodically calls computeReplicationWork().
+    */
+   class ReplicationMonitor implements Runnable {
+-    static final int INVALIDATE_WORK_PCT_PER_ITERATION = 32;
+-    static final float REPLICATION_WORK_MULTIPLIER_PER_ITERATION = 2;
+     public void run() {
+       while (fsRunning) {
+         try {
+@@ -2775,9 +2796,9 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+       return workFound;
+     synchronized(heartbeats) {
+       blocksToProcess = (int)(heartbeats.size() 
+-          * ReplicationMonitor.REPLICATION_WORK_MULTIPLIER_PER_ITERATION);
++          * this.blocksReplWorkMultiplier);
+       nodesToProcess = (int)Math.ceil((double)heartbeats.size() 
+-          * ReplicationMonitor.INVALIDATE_WORK_PCT_PER_ITERATION / 100);
++          * this.blocksInvalidateWorkPct);
+     }
+ 
+     workFound = computeReplicationWork(blocksToProcess); 
+-- 
+1.7.0.4
+

@@ -1,0 +1,117 @@
+From b7b8b103bfb79c12319b6190a6a95a106f30cc9a Mon Sep 17 00:00:00 2001
+From: Karthik Kambatla <kasha@cloudera.com>
+Date: Mon, 24 Sep 2012 18:12:11 -0700
+Subject: [PATCH 1342/1344] CDH-8171. Backport HADOOP-8833. hadoop fs -text doesn't work because
+       	  of HADOOP-8449
+
+Reason: Bug
+Ref: CDH-8171
+Author: Karthik Kambatla / Harsh J
+(cherry picked from commit ed14b285108e523cecf447b802777589e75eeab3)
+---
+ src/core/org/apache/hadoop/fs/FsShell.java        |    1 +
+ src/test/org/apache/hadoop/hdfs/TestDFSShell.java |   47 ++++++++++++++++++++-
+ 2 files changed, 47 insertions(+), 1 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/fs/FsShell.java b/src/core/org/apache/hadoop/fs/FsShell.java
+index 9413a45..04bae01 100644
+--- a/src/core/org/apache/hadoop/fs/FsShell.java
++++ b/src/core/org/apache/hadoop/fs/FsShell.java
+@@ -415,6 +415,7 @@ public class FsShell extends Configured implements Tool {
+         CompressionCodecFactory cf = new CompressionCodecFactory(getConf());
+         CompressionCodec codec = cf.getCodec(p);
+         if (codec != null) {
++	  i.seek(0);
+           return codec.createInputStream(i);
+         }
+         break;
+diff --git a/src/test/org/apache/hadoop/hdfs/TestDFSShell.java b/src/test/org/apache/hadoop/hdfs/TestDFSShell.java
+index 64ca199..cfb5936 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestDFSShell.java
++++ b/src/test/org/apache/hadoop/hdfs/TestDFSShell.java
+@@ -31,6 +31,7 @@ import java.util.Arrays;
+ import java.util.List;
+ import java.util.Random;
+ import java.util.Scanner;
++import java.util.zip.DeflaterOutputStream;
+ import java.util.zip.GZIPOutputStream;
+ 
+ import junit.framework.TestCase;
+@@ -51,7 +52,10 @@ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.io.SequenceFile;
+ import org.apache.hadoop.io.SequenceFile.CompressionType;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.compress.BZip2Codec;
++import org.apache.hadoop.io.compress.CompressionCodec;
+ import org.apache.hadoop.security.UserGroupInformation;
++import org.apache.hadoop.util.ReflectionUtils;
+ import org.apache.hadoop.util.StringUtils;
+ import org.apache.hadoop.util.ToolRunner;
+ 
+@@ -551,6 +555,8 @@ public class TestDFSShell extends TestCase {
+       FileSystem fs = cluster.getFileSystem();
+       Path root = new Path("/texttest");
+       fs.mkdirs(root);
++      
++      // Test the gzip type of files. Magic Detection.
+       OutputStream zout = new GZIPOutputStream(
+           fs.create(new Path(root, "file.gz")));
+       Random r = new Random();
+@@ -577,7 +583,7 @@ public class TestDFSShell extends TestCase {
+           Arrays.equals(file.toByteArray(), out.toByteArray()));
+ 
+       // Create a sequence file with a gz extension, to test proper
+-      // container detection
++      // container detection, magic detection
+       SequenceFile.Writer writer = SequenceFile.createWriter(
+           fs,
+           conf,
+@@ -596,6 +602,45 @@ public class TestDFSShell extends TestCase {
+       assertTrue("Output doesn't match input",
+         Arrays.equals("Foo\tBar\n".getBytes(), out.toByteArray()));
+       out.reset();
++      
++      // Test deflate. Extension-based detection.
++      OutputStream dout = new DeflaterOutputStream(fs.create(new Path(root,
++          "file.deflate")));
++      byte[] outbytes = "foo".getBytes();
++      dout.write(outbytes);
++      dout.close();
++      out = new ByteArrayOutputStream();
++      System.setOut(new PrintStream(out));
++      argv = new String[2];
++      argv[0] = "-text";
++      argv[1] = new Path(root, "file.deflate").toString();
++      ret = ToolRunner.run(new FsShell(conf), argv);
++      assertEquals("'-text " + argv[1] + " returned " + ret, 0, ret);
++      assertTrue("Output doesn't match input",
++          Arrays.equals(outbytes, out.toByteArray()));
++      out.reset();
++
++      // Test a simple codec. Extension based detection. We use
++      // Bzip2 cause its non-native.
++      CompressionCodec codec = (CompressionCodec) ReflectionUtils.newInstance(
++          BZip2Codec.class, conf);
++      String extension = codec.getDefaultExtension();
++      Path p = new Path(root, "file." + extension);
++      OutputStream fout = new DataOutputStream(codec.createOutputStream(fs
++          .create(p, true)));
++      byte[] writebytes = "foo".getBytes();
++      fout.write(writebytes);
++      fout.close();
++      out = new ByteArrayOutputStream();
++      System.setOut(new PrintStream(out));
++      argv = new String[2];
++      argv[0] = "-text";
++      argv[1] = new Path(root, p).toString();
++      ret = ToolRunner.run(new FsShell(conf), argv);
++      assertEquals("'-text " + argv[1] + " returned " + ret, 0, ret);
++      assertTrue("Output doesn't match input",
++          Arrays.equals(writebytes, out.toByteArray()));
++      out.reset();
+     } finally {
+       if (null != bak) {
+         System.setOut(bak);
+-- 
+1.7.0.4
+

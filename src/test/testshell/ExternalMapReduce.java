@@ -74,7 +74,7 @@ public class ExternalMapReduce extends Configured implements Tool {
       //fork off ls to see if the file exists.
       // java file.exists() will not work on 
       // cygwin since it is a symlink
-      String[] argv = new String[8];
+      String[] argv = new String[7];
       argv[0] = "ls";
       argv[1] = "files_tmp";
       argv[2] = "localfilelink";
@@ -82,7 +82,6 @@ public class ExternalMapReduce extends Configured implements Tool {
       argv[4] = "tarlink";
       argv[5] = "ziplink";
       argv[6] = "test.tgz";
-      argv[7] = "jarlink";
       Process p = Runtime.getRuntime().exec(argv);
       int ret = -1;
       try {
@@ -92,10 +91,6 @@ public class ExternalMapReduce extends Configured implements Tool {
       }
       if (ret != 0) {
         throw new IOException("files_tmp does not exist");
-      }
-      File file = new File("./jarlink/test.txt");
-      if (!file.canExecute()) {
-        throw new IOException("jarlink/test.txt is not executable");
       }
     }
   }

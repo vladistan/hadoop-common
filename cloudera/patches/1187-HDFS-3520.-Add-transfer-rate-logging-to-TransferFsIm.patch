@@ -1,0 +1,51 @@
+From 5c950bf0d9975469c71621a969ecaa6feb8dc20b Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Mon, 11 Jun 2012 09:52:56 -0700
+Subject: [PATCH 1187/1344] HDFS-3520. Add transfer rate logging to TransferFsImage.
+
+Logging the transfer rate for images and edits in TransferFsImage is
+useful for debugging network issues, especially when using
+dfs.datanode.balance.bandwidthPerSec.
+
+Author: Eli Collins
+Ref: CDH-6036
+---
+ .../hdfs/server/namenode/TransferFsImage.java      |    8 ++++++++
+ 1 files changed, 8 insertions(+), 0 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
+index 16215c1..ef9cec8 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
+@@ -32,6 +32,7 @@ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.hdfs.protocol.FSConstants;
+ import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.hdfs.util.DataTransferThrottler;
++import org.apache.hadoop.hdfs.server.common.Util;
+ import org.apache.hadoop.hdfs.server.namenode.SecondaryNameNode.ErrorSimulator;
+ import org.apache.hadoop.io.MD5Hash;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -188,6 +189,7 @@ class TransferFsImage implements FSConstants {
+     //
+     // open connection to remote server
+     //
++    long startTime = Util.monotonicNow();
+     URL url = new URL(str.toString());
+     
+     // Avoid Krb bug with cross-realm hosts
+@@ -243,6 +245,12 @@ class TransferFsImage implements FSConstants {
+                               advertisedSize);
+       }
+     }
++    double xferSec = Math.max(
++        ((float)(Util.monotonicNow() - startTime)) / 1000.0, 0.001);
++    long xferKb = received / 1024;
++    LOG.info(String.format("Transfer took %.2fs at %.2f KB/s",
++        xferSec, xferKb / xferSec));
++
+     return digester == null ? null : new MD5Hash(digester.digest());
+   }
+ 
+-- 
+1.7.0.4
+

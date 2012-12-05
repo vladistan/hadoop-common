@@ -1,0 +1,184 @@
+From e9ab2b24a46a8f0c9bf99691c976a80e9d0613a9 Mon Sep 17 00:00:00 2001
+From: Matthew J. Foley <mattf@apache.org>
+Date: Thu, 6 Oct 2011 17:54:12 +0000
+Subject: [PATCH 1238/1344] HDFS-2404. Webhdfs liststatus json response is not correct. Contributed by Suresh Srinivas.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1179722 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 6315e7cb3bf4087c19bd376cc727ab10ab2def98)
+
+Author: Suresh Srinivas
+Ref: CDH-4806
+---
+ .../web/resources/NamenodeWebHdfsMethods.java      |   10 +++---
+ src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java  |   38 ++++++++++---------
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |    8 ++--
+ .../org/apache/hadoop/hdfs/web/TestJsonUtil.java   |    4 +-
+ 4 files changed, 31 insertions(+), 29 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index 730f03d..55c0df9 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -420,7 +420,7 @@ public class NamenodeWebHdfsMethods {
+     case GETFILESTATUS:
+     {
+       final HdfsFileStatus status = namenode.getFileInfo(fullpath);
+-      final String js = JsonUtil.toJsonString(status);
++      final String js = JsonUtil.toJsonString(status, true);
+       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
+     }
+     case LISTSTATUS:
+@@ -476,22 +476,22 @@ public class NamenodeWebHdfsMethods {
+       @Override
+       public void write(final OutputStream outstream) throws IOException {
+         final PrintStream out = new PrintStream(outstream);
+-        out.println("{\"" + HdfsFileStatus[].class.getSimpleName() + "\":[");
++        out.println("{\"" + HdfsFileStatus.class.getSimpleName() + "\":[");
+ 
+         final HdfsFileStatus[] partial = first.getPartialListing();
+         if (partial.length > 0) {
+-          out.print(JsonUtil.toJsonString(partial[0]));
++          out.print(JsonUtil.toJsonString(partial[0], false));
+         }
+         for(int i = 1; i < partial.length; i++) {
+           out.println(',');
+-          out.print(JsonUtil.toJsonString(partial[i]));
++          out.print(JsonUtil.toJsonString(partial[i], false));
+         }
+ 
+         for(DirectoryListing curr = first; curr.hasMore(); ) { 
+           curr = getDirectoryListing(np, p, curr.getLastName());
+           for(HdfsFileStatus s : curr.getPartialListing()) {
+             out.println(',');
+-            out.print(JsonUtil.toJsonString(s));
++            out.print(JsonUtil.toJsonString(s, false));
+           }
+         }
+         
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+index 11fcb84..1252876 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+@@ -133,32 +133,34 @@ public class JsonUtil {
+   }
+ 
+   /** Convert a HdfsFileStatus object to a Json string. */
+-  public static String toJsonString(final HdfsFileStatus status) {
++  public static String toJsonString(final HdfsFileStatus status,
++      boolean includeType) {
+     if (status == null) {
+       return null;
+-    } else {
+-      final Map<String, Object> m = new TreeMap<String, Object>();
+-      m.put("localName", status.getLocalName());
+-      m.put("isDir", status.isDir());
+-      m.put("len", status.getLen());
+-      m.put("owner", status.getOwner());
+-      m.put("group", status.getGroup());
+-      m.put("permission", toString(status.getPermission()));
+-      m.put("accessTime", status.getAccessTime());
+-      m.put("modificationTime", status.getModificationTime());
+-      m.put("blockSize", status.getBlockSize());
+-      m.put("replication", status.getReplication());
+-      return toJsonString(HdfsFileStatus.class, m);
+     }
++    final Map<String, Object> m = new TreeMap<String, Object>();
++    m.put("localName", status.getLocalName());
++    m.put("isDir", status.isDir());
++    m.put("len", status.getLen());
++    m.put("owner", status.getOwner());
++    m.put("group", status.getGroup());
++    m.put("permission", toString(status.getPermission()));
++    m.put("accessTime", status.getAccessTime());
++    m.put("modificationTime", status.getModificationTime());
++    m.put("blockSize", status.getBlockSize());
++    m.put("replication", status.getReplication());
++    return includeType ? toJsonString(HdfsFileStatus.class, m) : 
++      JSON.toString(m);
+   }
+ 
+   /** Convert a Json map to a HdfsFileStatus object. */
+-  public static HdfsFileStatus toFileStatus(final Map<?, ?> json) {
++  public static HdfsFileStatus toFileStatus(final Map<?, ?> json, boolean includesType) {
+     if (json == null) {
+       return null;
+     }
+ 
+-    final Map<?, ?> m = (Map<?, ?>)json.get(HdfsFileStatus.class.getSimpleName());
++    final Map<?, ?> m = includesType ? 
++        (Map<?, ?>)json.get(HdfsFileStatus.class.getSimpleName()) : json;
+     final String localName = (String) m.get("localName");
+     final boolean isDir = (Boolean) m.get("isDir");
+     final long len = (Long) m.get("len");
+@@ -273,7 +275,7 @@ public class JsonUtil {
+       return array;
+     }
+   }
+-
++  
+   /** Convert a LocatedBlock to a Json map. */
+   private static Map<String, Object> toJsonMap(final LocatedBlock locatedblock
+       ) throws IOException {
+@@ -452,4 +454,4 @@ public class JsonUtil {
+ 
+     return checksum;
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 946466c..142e359 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -336,7 +336,7 @@ public class WebHdfsFileSystem extends FileSystem
+   private HdfsFileStatus getHdfsFileStatus(Path f) throws IOException {
+     final HttpOpParam.Op op = GetOpParam.Op.GETFILESTATUS;
+     final Map<String, Object> json = run(op, f);
+-    final HdfsFileStatus status = JsonUtil.toFileStatus(json);
++    final HdfsFileStatus status = JsonUtil.toFileStatus(json, true);
+     if (status == null) {
+       throw new FileNotFoundException("File does not exist: " + f);
+     }
+@@ -483,14 +483,14 @@ public class WebHdfsFileSystem extends FileSystem
+     final HttpOpParam.Op op = GetOpParam.Op.LISTSTATUS;
+     final Map<?, ?> json  = run(op, f);
+     final Object[] array = (Object[])json.get(
+-        HdfsFileStatus[].class.getSimpleName());
++        HdfsFileStatus.class.getSimpleName());
+ 
+     //convert FileStatus
+     final FileStatus[] statuses = new FileStatus[array.length];
+     for(int i = 0; i < array.length; i++) {
+       @SuppressWarnings("unchecked")
+       final Map<String, Object> m = (Map<String, Object>)array[i];
+-      statuses[i] = makeQualified(JsonUtil.toFileStatus(m), f);
++      statuses[i] = makeQualified(JsonUtil.toFileStatus(m, false), f);
+     }
+     return statuses;
+   }
+@@ -638,4 +638,4 @@ public class WebHdfsFileSystem extends FileSystem
+       });
+     }
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestJsonUtil.java b/src/test/org/apache/hadoop/hdfs/web/TestJsonUtil.java
+index ee42da5..4d18d2f 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/TestJsonUtil.java
++++ b/src/test/org/apache/hadoop/hdfs/web/TestJsonUtil.java
+@@ -46,9 +46,9 @@ public class TestJsonUtil {
+     final FileStatus fstatus = toFileStatus(status, parent);
+     System.out.println("status  = " + status);
+     System.out.println("fstatus = " + fstatus);
+-    final String json = JsonUtil.toJsonString(status);
++    final String json = JsonUtil.toJsonString(status, true);
+     System.out.println("json    = " + json.replace(",", ",\n  "));
+-    final HdfsFileStatus s2 = JsonUtil.toFileStatus((Map<?, ?>)JSON.parse(json));
++    final HdfsFileStatus s2 = JsonUtil.toFileStatus((Map<?, ?>)JSON.parse(json), true);
+     final FileStatus fs2 = toFileStatus(s2, parent);
+     System.out.println("s2      = " + s2);
+     System.out.println("fs2     = " + fs2);
+-- 
+1.7.0.4
+

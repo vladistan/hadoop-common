@@ -21,6 +21,7 @@ package org.apache.hadoop.filecache;
 import java.io.*;
 import java.util.*;
 import org.apache.hadoop.conf.*;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.*;
 import org.apache.hadoop.fs.*;
 import org.apache.hadoop.fs.FileSystem;
@@ -172,8 +173,7 @@ public class DistributedCache {
   public static final String CACHE_SYMLINK = "mapred.create.symlink";
   
   /**
-   * Returns {@link FileStatus} of a given cache file on hdfs. Internal to 
-   * MapReduce.
+   * Returns {@link FileStatus} of a given cache file on hdfs.
    * @param conf configuration
    * @param cache cache file 
    * @return <code>FileStatus</code> of a given cache file on hdfs
@@ -423,16 +423,9 @@ public class DistributedCache {
    * Add a file path to the current set of classpath entries. It adds the file
    * to cache as well.  Intended to be used by user code.
    *
-   * @deprecated
-   *
-   * Please use {@link #addFileToClassPath(Path, Configuration, FileSystem)} 
-   * instead.  The {@code FileSystem} should be obtained within an
-   * appropriate {@code doAs}.
-   * 
    * @param file Path of the file to be added
    * @param conf Configuration that contains the classpath setting
    */
-  @Deprecated
   public static void addFileToClassPath(Path file, Configuration conf)
         throws IOException {
     addFileToClassPath(file, conf, file.getFileSystem(conf));
@@ -482,16 +475,9 @@ public class DistributedCache {
    * Add an archive path to the current set of classpath entries. It adds the
    * archive to cache as well.  Intended to be used by user code.
    *
-   * @deprecated
-   *
-   * Please use {@link #addArchiveToClassPath(Path, Configuration, FileSystem)} 
-   * instead.  The {@code FileSystem} should be obtained within an
-   * appropriate {@code doAs}.
-   * 
    * @param archive Path of the archive to be added
    * @param conf Configuration that contains the classpath setting
    */
-  @Deprecated
   public static void addArchiveToClassPath
          (Path archive, Configuration conf)
       throws IOException {

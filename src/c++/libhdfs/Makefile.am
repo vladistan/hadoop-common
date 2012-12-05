@@ -22,8 +22,7 @@ ACLOCAL_AMFLAGS = -I m4
 lib_LTLIBRARIES = libhdfs.la
 libhdfs_la_SOURCES = hdfs.c hdfsJniHelper.c hdfs.h
 
-#check_PROGRAMS = hdfs_test hdfs_read hdfs_write
-check_PROGRAMS = hdfs_test hdfs_read hdfs_write
+check_PROGRAMS = hdfs_test hdfs_read hdfs_write test_libhdfs_threaded
 
 hdfs_test_SOURCES = hdfs_test.c hdfs.h
 hdfs_test_LDADD = ${libdir}/libhdfs.la 
@@ -33,6 +32,9 @@ hdfs_read_LDADD = ${libdir}/libhdfs.la
 
 hdfs_write_SOURCES = hdfs_write.c
 hdfs_write_LDADD = ${libdir}/libhdfs.la 
+
+test_libhdfs_threaded_SOURCES = tests/test_libhdfs_threaded.c
+test_libhdfs_threaded_LDADD = ${libdir}/libhdfs.la
 
 test: hdfs_test hdfs_read hdfs_write 
 	${LIBHDFS_SRC_DIR}/tests/test-libhdfs.sh	

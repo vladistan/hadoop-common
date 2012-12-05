@@ -1,0 +1,55 @@
+From 9e066657bfbfb63c2cac43dbcddcdaac22d6e23b Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Sat, 14 Jul 2012 11:20:07 -0700
+Subject: [PATCH 1306/1344] HDFS-1997. Image transfer process misreports client side exceptions.
+
+If the image transfer process receives a client-side error when
+transferring edit logs, it will throw an exception before it has
+completely read all of the input from the server-side servlet. Then, the
+finally clause will throw a new error, since the received length is less
+than the length given in the header. This masks the client-side
+exception and makes it look like a network error or a server-side
+problem.
+
+Reason: Bug
+Author: Todd Lipcon
+Ref: CDH-5682
+---
+ .../hdfs/server/namenode/TransferFsImage.java      |    7 ++++++-
+ 1 files changed, 6 insertions(+), 1 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
+index ef9cec8..0db079a 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/TransferFsImage.java
+@@ -211,6 +211,7 @@ class TransferFsImage implements FSConstants {
+       stream = new DigestInputStream(stream, digester);
+     }
+     FileOutputStream[] output = null;
++    boolean finishedReceiving = false;
+ 
+     try {
+       if (localPath != null) {
+@@ -229,6 +230,7 @@ class TransferFsImage implements FSConstants {
+           }
+         }
+       }
++      finishedReceiving = true;
+     } finally {
+       stream.close();
+       if (output != null) {
+@@ -239,7 +241,10 @@ class TransferFsImage implements FSConstants {
+           }
+         }
+       }
+-      if (received != advertisedSize) {
++      if (finishedReceiving && received != advertisedSize) {
++        // only throw this exception if we think we read all of it on our end
++        // -- otherwise a client-side IOException would be masked by this
++        // exception that makes it look like a server-side 
+         throw new IOException("File " + str + " received length " + received +
+                               " is not of the advertised size " +
+                               advertisedSize);
+-- 
+1.7.0.4
+

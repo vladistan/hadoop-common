@@ -1,0 +1,636 @@
+From a23fbfda2de402ec540de3e0429acfb55bd7e2c7 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Wed, 27 Jun 2012 16:18:06 -0700
+Subject: [PATCH 1213/1344] Amend HDFS-235. Bring HftpFileSystem in-line with branch-1 pre WebHDFS
+ (before HDFS-2317). This reverts parts of the HDFS-235 backport which
+ get restored in a later change.
+
+Author: Eli Collins
+Ref: CDH-4806
+---
+ .../apache/hadoop/hdfs/ByteRangeInputStream.java   |  152 ----------------
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |  128 ++++++++++-----
+ .../org/apache/hadoop/hdfs/HsftpFileSystem.java    |   18 ++-
+ .../hadoop/hdfs/TestByteRangeInputStream.java      |  183 --------------------
+ .../org/apache/hadoop/hdfs/TestHftpFileSystem.java |    6 +-
+ 5 files changed, 102 insertions(+), 385 deletions(-)
+ delete mode 100644 src/hdfs/org/apache/hadoop/hdfs/ByteRangeInputStream.java
+ delete mode 100644 src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/ByteRangeInputStream.java b/src/hdfs/org/apache/hadoop/hdfs/ByteRangeInputStream.java
+deleted file mode 100644
+index 614e7f3..0000000
+--- a/src/hdfs/org/apache/hadoop/hdfs/ByteRangeInputStream.java
++++ /dev/null
+@@ -1,152 +0,0 @@
+-/**
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package org.apache.hadoop.hdfs;
+-
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.net.HttpURLConnection;
+-import java.net.URL;
+-import org.apache.hadoop.fs.FSInputStream;
+-
+-/**
+- * To support HTTP byte streams, a new connection to an HTTP server needs to be
+- * created each time. This class hides the complexity of those multiple 
+- * connections from the client. Whenever seek() is called, a new connection
+- * is made on the successive read(). The normal input stream functions are 
+- * connected to the currently active input stream. 
+- */
+-class ByteRangeInputStream extends FSInputStream {
+-  
+-  /**
+-   * This class wraps a URL to allow easy mocking when testing. The URL class
+-   * cannot be easily mocked because it is public.
+-   */
+-  static class URLOpener {
+-    protected URL url;
+-  
+-    public URLOpener(URL u) {
+-      url = u;
+-    }
+-  
+-    public void setURL(URL u) {
+-      url = u;
+-    }
+-  
+-    public URL getURL() {
+-      return url;
+-    }
+-  
+-    public HttpURLConnection openConnection() throws IOException {
+-      return (HttpURLConnection)url.openConnection();
+-    }  
+-  }
+-  
+-  enum StreamStatus {
+-    NORMAL, SEEK
+-  }
+-  protected InputStream in;
+-  protected URLOpener originalURL;
+-  protected URLOpener resolvedURL;
+-  protected long startPos = 0;
+-  protected long currentPos = 0;
+-  protected StreamStatus status = StreamStatus.SEEK;
+-
+-  ByteRangeInputStream(final URL url) {
+-    this(new URLOpener(url), new URLOpener(null));
+-  }
+-  
+-  ByteRangeInputStream(URLOpener o, URLOpener r) {
+-    this.originalURL = o;
+-    this.resolvedURL = r;
+-  }
+-  
+-  private InputStream getInputStream() throws IOException {
+-    if (status != StreamStatus.NORMAL) {
+-      if (in != null) {
+-        in.close();
+-        in = null;
+-      }
+-      
+-      // Use the original url if no resolved url exists, if it
+-      // is the first time a request is made.
+-      final URLOpener opener =
+-        (resolvedURL.getURL() == null) ? originalURL : resolvedURL;
+-        
+-      final HttpURLConnection connection = opener.openConnection();
+-      connection.setRequestMethod("GET");
+-      if (startPos != 0) {
+-        connection.setRequestProperty("Range", "bytes="+startPos+"-");
+-      }
+-      connection.connect();
+-      in = connection.getInputStream();
+-      
+-      int respCode = connection.getResponseCode();
+-      if (startPos != 0 && respCode != HttpURLConnection.HTTP_PARTIAL) {
+-        // We asked for a byte range but did not receive a partial content
+-        // response...
+-        throw new IOException("HTTP_PARTIAL expected, received " + respCode);
+-      } else if (startPos == 0 && respCode != HttpURLConnection.HTTP_OK) {
+-        // We asked for all bytes from the beginning but didn't receive a 200
+-        // response (none of the other 2xx codes are valid here)
+-        throw new IOException("HTTP_OK expected, received " + respCode);
+-      }
+-      
+-      resolvedURL.setURL(connection.getURL());
+-      status = StreamStatus.NORMAL;
+-    }
+-    
+-    return in;
+-  }
+-  
+-  public int read() throws IOException {
+-    int ret = getInputStream().read();
+-    if (ret != -1) {
+-     currentPos++;
+-    }
+-    return ret;
+-  }
+-  
+-  /**
+-   * Seek to the given offset from the start of the file.
+-   * The next read() will be from that location.  Can't
+-   * seek past the end of the file.
+-   */
+-  public void seek(long pos) throws IOException {
+-    if (pos != currentPos) {
+-      startPos = pos;
+-      currentPos = pos;
+-      status = StreamStatus.SEEK;
+-    }
+-  }
+-
+-  /**
+-   * Return the current offset from the start of the file.
+-   */
+-  public long getPos() throws IOException {
+-    return currentPos;
+-  }
+-
+-  /**
+-   * Seeks a different copy of the data.  Returns true if
+-   * found a new source, false otherwise.
+-   */
+-  public boolean seekToNewSource(long targetPos) throws IOException {
+-    return false;
+-  }
+-}
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index 0f92352..04fd872 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -41,6 +41,7 @@ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.ContentSummary;
+ import org.apache.hadoop.fs.FSDataInputStream;
+ import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.FSInputStream;
+ import org.apache.hadoop.fs.FileChecksum;
+ import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
+@@ -50,6 +51,7 @@ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.server.namenode.JspHelper;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
++import org.apache.hadoop.hdfs.server.namenode.StreamFile;
+ import org.apache.hadoop.hdfs.tools.DelegationTokenFetcher;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.ipc.RemoteException;
+@@ -68,7 +70,6 @@ import org.xml.sax.SAXException;
+ import org.xml.sax.XMLReader;
+ import org.xml.sax.helpers.DefaultHandler;
+ import org.xml.sax.helpers.XMLReaderFactory;
+-import org.apache.hadoop.hdfs.ByteRangeInputStream;
+ 
+ /** An implementation of a protocol for accessing filesystems over HTTP.
+  * The following implementation provides a limited, read-only interface
+@@ -177,6 +178,7 @@ public class HftpFileSystem extends FileSystem {
+           }
+         }
+       }
++      
+       //since we don't already have a token, go get one over https
+       if (delegationToken == null) {
+         setDelegationToken(getDelegationToken(null));
+@@ -255,9 +257,9 @@ public class HftpFileSystem extends FileSystem {
+    * 
+    * @return user_shortname,group1,group2...
+    */
+-  private String getEncodedUgiParameter() {
++  private String getUgiParameter() {
+     StringBuilder ugiParamenter = new StringBuilder(
+-        ServletUtil.encodeQueryValue(ugi.getShortUserName()));
++      ServletUtil.encodeQueryValue(ugi.getShortUserName()));
+     for(String g: ugi.getGroupNames()) {
+       ugiParamenter.append(",");
+       ugiParamenter.append(ServletUtil.encodeQueryValue(g));
+@@ -266,45 +268,33 @@ public class HftpFileSystem extends FileSystem {
+   }
+ 
+   /**
+-   * Return a URL pointing to given path on the namenode.
+-   *
+-   * @param path to obtain the URL for
+-   * @param query string to append to the path
+-   * @return namenode URL referring to the given path
+-   * @throws IOException on error constructing the URL
+-   */
+-  URL getNamenodeURL(String path, String query) throws IOException {
+-    final URL url = new URL("http", nnAddr.getHostName(),
+-        nnAddr.getPort(), path + '?' + query);
+-    if (LOG.isTraceEnabled()) {
+-      LOG.trace("url=" + url);
+-    }
+-    return url;
+-  }
+-
+-  /**
+    * Open an HTTP connection to the namenode to read file data and metadata.
+    * @param path The path component of the URL
+    * @param query The query component of the URL
+    */
+   protected HttpURLConnection openConnection(String path, String query)
+       throws IOException {
+-    query = addDelegationTokenParam(query);
+-    final URL url = getNamenodeURL(path, query);
+-    HttpURLConnection connection = (HttpURLConnection)url.openConnection();
+-    connection.setRequestMethod("GET");
+-    connection.connect();
+-    return connection;
++    try {
++      query = updateQuery(query);
++      final URL url = new URI("http", null, nnAddr.getHostName(),
++          nnAddr.getPort(), path, query, null).toURL();
++      if (LOG.isTraceEnabled()) {
++        LOG.trace("url=" + url);
++      }
++      return (HttpURLConnection)url.openConnection();
++    } catch (URISyntaxException e) {
++      throw (IOException)new IOException().initCause(e);
++    }
+   }
+-
+-  protected String addDelegationTokenParam(String query) throws IOException {
++  
++  protected String updateQuery(String query) throws IOException {
+     String tokenString = null;
+     if (UserGroupInformation.isSecurityEnabled()) {
+       synchronized (this) {
+         if (delegationToken != null) {
+           tokenString = delegationToken.encodeToUrlString();
+           return (query + JspHelper.getDelegationTokenUrlParam(tokenString));
+-        }
++        } // else we are talking to an insecure cluster
+       }
+     }
+     return query;
+@@ -312,10 +302,64 @@ public class HftpFileSystem extends FileSystem {
+ 
+   @Override
+   public FSDataInputStream open(Path f, int buffersize) throws IOException {
+-    String path = "/data" + ServletUtil.encodePath(f.toUri().getPath());
+-    String query = addDelegationTokenParam("ugi=" + getEncodedUgiParameter());
+-    URL u = getNamenodeURL(path, query);    
+-    return new FSDataInputStream(new ByteRangeInputStream(u));
++    final HttpURLConnection connection = openConnection(
++        "/data" + ServletUtil.encodePath(f.toUri().getPath()),
++        "ugi=" + getUgiParameter());
++    final InputStream in;
++    try {
++      connection.setRequestMethod("GET");
++      connection.connect();
++      in = connection.getInputStream();
++    } catch(IOException ioe) {
++      final int code = connection.getResponseCode();
++      final String s = connection.getResponseMessage();
++      throw s == null? ioe:
++          new IOException(s + " (error code=" + code + ")", ioe);
++    }
++
++    final String cl = connection.getHeaderField(StreamFile.CONTENT_LENGTH);
++    final long filelength = cl == null? -1: Long.parseLong(cl);
++    if (LOG.isDebugEnabled()) {
++      LOG.debug("filelength = " + filelength);
++    }
++
++    return new FSDataInputStream(new FSInputStream() {
++        long currentPos = 0;
++
++        private void update(final boolean isEOF, final int n
++            ) throws IOException {
++          if (!isEOF) {
++            currentPos += n;
++          } else if (currentPos < filelength) {
++            throw new IOException("Got EOF but byteread = " + currentPos
++                + " < filelength = " + filelength);
++          }
++        }
++        public int read() throws IOException {
++          final int b = in.read();
++          update(b == -1, 1);
++          return b;
++        }
++        public int read(byte[] b, int off, int len) throws IOException {
++          final int n = in.read(b, off, len);
++          update(n == -1, n);
++          return n;
++        }
++
++        public void close() throws IOException {
++          in.close();
++        }
++
++        public void seek(long pos) throws IOException {
++          throw new IOException("Can't seek!");
++        }
++        public long getPos() throws IOException {
++          throw new IOException("Position unknown!");
++        }
++        public boolean seekToNewSource(long targetPos) throws IOException {
++          return false;
++        }
++      });
+   }
+ 
+   /** Class to parse and store a listing reply from the server. */
+@@ -363,9 +407,11 @@ public class HftpFileSystem extends FileSystem {
+       try {
+         XMLReader xr = XMLReaderFactory.createXMLReader();
+         xr.setContentHandler(this);
+-        HttpURLConnection connection = openConnection(
+-            "/listPaths" + ServletUtil.encodePath(path),
+-            "ugi=" + getEncodedUgiParameter() + (recur ? "&recursive=yes" : ""));
++        HttpURLConnection connection = openConnection("/listPaths" + ServletUtil.encodePath(path),
++            "ugi=" + getUgiParameter() + (recur? "&recursive=yes" : ""));
++        connection.setRequestMethod("GET");
++        connection.connect();
++
+         InputStream resp = connection.getInputStream();
+         xr.parse(new InputSource(resp));
+       } catch(SAXException e) {
+@@ -428,11 +474,14 @@ public class HftpFileSystem extends FileSystem {
+ 
+     private FileChecksum getFileChecksum(String f) throws IOException {
+       final HttpURLConnection connection = openConnection(
+-          "/fileChecksum" + ServletUtil.encodePath(f), 
+-          "ugi=" + getEncodedUgiParameter());
++          "/fileChecksum" + ServletUtil.encodePath(f), "ugi=" + getUgiParameter());
+       try {
+         final XMLReader xr = XMLReaderFactory.createXMLReader();
+         xr.setContentHandler(this);
++
++        connection.setRequestMethod("GET");
++        connection.connect();
++
+         xr.parse(new InputSource(connection.getInputStream()));
+       } catch(SAXException e) {
+         final Exception embedded = e.getException();
+@@ -526,8 +575,7 @@ public class HftpFileSystem extends FileSystem {
+      */
+     private ContentSummary getContentSummary(String path) throws IOException {
+       final HttpURLConnection connection = openConnection(
+-          "/contentSummary" + ServletUtil.encodePath(path), 
+-          "ugi=" + getEncodedUgiParameter());
++          "/contentSummary" + ServletUtil.encodePath(path), "ugi=" + getUgiParameter());
+       InputStream in = null;
+       try {
+         in = connection.getInputStream();        
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
+index edcb2da..9280a09 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HsftpFileSystem.java
+@@ -67,13 +67,17 @@ public class HsftpFileSystem extends HftpFileSystem {
+   @Override
+   protected HttpURLConnection openConnection(String path, String query)
+       throws IOException {
+-    query = addDelegationTokenParam(query);
+-    final URL url = new URL("https", nnAddr.getHostName(), 
+-        nnAddr.getPort(), path + '?' + query);
+-    HttpsURLConnection conn = (HttpsURLConnection)url.openConnection();
+-    // bypass hostname verification
+-    conn.setHostnameVerifier(new DummyHostnameVerifier());
+-    return (HttpURLConnection)conn;
++    try {
++      query = updateQuery(query);
++      final URL url = new URI("https", null, nnAddr.getHostName(),
++          nnAddr.getPort(), path, query, null).toURL();
++      HttpsURLConnection conn = (HttpsURLConnection)url.openConnection();
++      // bypass hostname verification
++      conn.setHostnameVerifier(new DummyHostnameVerifier());
++      return (HttpURLConnection)conn;
++    } catch (URISyntaxException e) {
++      throw (IOException)new IOException().initCause(e);
++    }
+   }
+ 
+   @Override
+diff --git a/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java b/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java
+deleted file mode 100644
+index 02c79c0..0000000
+--- a/src/test/org/apache/hadoop/hdfs/TestByteRangeInputStream.java
++++ /dev/null
+@@ -1,183 +0,0 @@
+-/**
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package org.apache.hadoop.hdfs;
+-
+-import java.io.ByteArrayInputStream;
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.net.HttpURLConnection;
+-import java.net.MalformedURLException;
+-import java.net.URL;
+-
+-import org.apache.hadoop.hdfs.ByteRangeInputStream;
+-import org.apache.hadoop.hdfs.ByteRangeInputStream.URLOpener;
+-
+-import org.junit.Test;
+-import static org.junit.Assert.*;
+-
+-class MockHttpURLConnection extends HttpURLConnection {
+-  MockURL m;
+-  
+-  public MockHttpURLConnection(URL u, MockURL m) {
+-    super(u); 
+-    this.m = m;
+-  }
+-  
+-  public boolean usingProxy(){
+-    return false;
+-  }
+-  
+-  public void disconnect() {
+-  }
+-  
+-  public void connect() throws IOException {
+-    m.setMsg("Connect: "+url+", Range: "+getRequestProperty("Range"));
+-  }
+-  
+-  public InputStream getInputStream() throws IOException {
+-    return new ByteArrayInputStream("asdf".getBytes());
+-  } 
+-
+-  public URL getURL() {
+-    URL u = null;
+-    try {
+-      u = new URL("http://resolvedurl/");
+-    } catch (Exception e) {
+-      System.out.println(e.getMessage());
+-    }
+-    return u;
+-  }
+-  
+-  public int getResponseCode() {
+-    if (m.responseCode != -1) {
+-      return m.responseCode;
+-    } else {
+-      if (getRequestProperty("Range") == null) {
+-        return 200;
+-      } else {
+-        return 206;
+-      }
+-    }
+-  }
+-  
+-}
+-
+-class MockURL extends URLOpener {
+-  String msg;
+-  public int responseCode = -1;
+-  
+-  public MockURL(URL u) {
+-    super(u);
+-  }
+-
+-  public MockURL(String s) throws MalformedURLException {
+-    this(new URL(s));
+-  }
+-
+-  public HttpURLConnection openConnection() throws IOException {
+-    return new MockHttpURLConnection(url, this);
+-  }    
+-
+-  public void setMsg(String s) {
+-    msg = s;
+-  }
+-  
+-  public String getMsg() {
+-    return msg;
+-  }
+-}
+-
+-public class TestByteRangeInputStream {
+-
+-  @Test
+-  public void testByteRange() throws IOException, InterruptedException {
+-    MockURL o = new MockURL("http://test/");
+-    MockURL r =  new MockURL((URL)null);
+-    ByteRangeInputStream is = new ByteRangeInputStream(o, r);
+-
+-    assertEquals("getPos wrong", 0, is.getPos());
+-
+-    is.read();
+-
+-    assertEquals("Initial call made incorrectly", 
+-                 "Connect: http://test/, Range: null",
+-                 o.getMsg());
+-
+-    assertEquals("getPos should be 1 after reading one byte", 1, is.getPos());
+-
+-    o.setMsg(null);
+-
+-    is.read();
+-
+-    assertEquals("getPos should be 2 after reading two bytes", 2, is.getPos());
+-
+-    assertNull("No additional connections should have been made (no seek)",
+-               o.getMsg());
+-
+-    r.setMsg(null);
+-    r.setURL(new URL("http://resolvedurl/"));
+-    
+-    is.seek(100);
+-    is.read();
+-
+-    assertEquals("Seek to 100 bytes made incorrectly", 
+-                 "Connect: http://resolvedurl/, Range: bytes=100-",
+-                 r.getMsg());
+-
+-    assertEquals("getPos should be 101 after reading one byte", 101, is.getPos());
+-
+-    r.setMsg(null);
+-
+-    is.seek(101);
+-    is.read();
+-
+-    assertNull("Seek to 101 should not result in another request", r.getMsg());
+-
+-    r.setMsg(null);
+-    is.seek(2500);
+-    is.read();
+-
+-    assertEquals("Seek to 2500 bytes made incorrectly", 
+-                 "Connect: http://resolvedurl/, Range: bytes=2500-",
+-                 r.getMsg());
+-
+-    r.responseCode = 200;
+-    is.seek(500);
+-    
+-    try {
+-      is.read();
+-      fail("Exception should be thrown when 200 response is given "
+-           + "but 206 is expected");
+-    } catch (IOException e) {
+-      assertEquals("Should fail because incorrect response code was sent",
+-                   "HTTP_PARTIAL expected, received 200", e.getMessage());
+-    }
+-
+-    r.responseCode = 206;
+-    is.seek(0);
+-
+-    try {
+-      is.read();
+-      fail("Exception should be thrown when 206 response is given "
+-           + "but 200 is expected");
+-    } catch (IOException e) {
+-      assertEquals("Should fail because incorrect response code was sent",
+-                   "HTTP_OK expected, received 206", e.getMessage());
+-    }
+-  }
+-}
+diff --git a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+index 3cfcc98..18c8985 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
++++ b/src/test/org/apache/hadoop/hdfs/TestHftpFileSystem.java
+@@ -147,10 +147,10 @@ public class TestHftpFileSystem {
+     String locationName = locations[0].getNames()[0];
+ 
+     // Connect to the NN to get redirected
+-    URL u = hftpFs.getNamenodeURL(
+-        "/data" + ServletUtil.encodePath(path.toUri().getPath()), 
++
++    HttpURLConnection conn = hftpFs.openConnection(
++        "/data" + ServletUtil.encodePath(path.toUri().getPath()),
+         "ugi=userx,groupy");
+-    HttpURLConnection conn = (HttpURLConnection)u.openConnection();
+     HttpURLConnection.setFollowRedirects(true);
+     conn.connect();
+     conn.getInputStream();
+-- 
+1.7.0.4
+

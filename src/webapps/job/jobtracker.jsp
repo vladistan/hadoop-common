@@ -1,3 +1,22 @@
+<%
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file 
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+%>
 <%@ page
   contentType="text/html; charset=UTF-8"
   import="javax.servlet.*"
@@ -19,9 +38,9 @@
   String trackerName = 
            StringUtils.simpleHostname(tracker.getJobTrackerMachine());
   JobQueueInfo[] queues = tracker.getQueues();
-  Vector<JobInProgress> runningJobs = tracker.runningJobs();
-  Vector<JobInProgress> completedJobs = tracker.completedJobs();
-  Vector<JobInProgress> failedJobs = tracker.failedJobs();
+  List<JobInProgress> runningJobs = tracker.getRunningJobs();
+  List<JobInProgress> completedJobs = tracker.getCompletedJobs();
+  List<JobInProgress> failedJobs = tracker.getFailedJobs();
 %>
 <%!
   private static DecimalFormat percentFormat = new DecimalFormat("##0.00");
@@ -41,7 +60,6 @@
               "<th>Map Task Capacity</th>" +
               "<th>Reduce Task Capacity</th><th>Avg. Tasks/Node</th>" + 
               "<th>Blacklisted Nodes</th>" +
-              "<th>Graylisted Nodes</th>" +
               "<th>Excluded Nodes</th></tr>\n");
     out.print("<tr><td>" + metrics.getRunningMaps() + "</td><td>" +
               metrics.getRunningReduces() + "</td><td>" + 
@@ -57,8 +75,6 @@
               "</td><td>" + tasksPerNode +
               "</td><td><a href=\"machines.jsp?type=blacklisted\">" +
               metrics.getBlackListedTaskTrackerCount() + "</a>" +
-              "</td><td><a href=\"machines.jsp?type=graylisted\">" +
-              metrics.getGrayListedTaskTrackerCount() + "</a>" +
               "</td><td><a href=\"machines.jsp?type=excluded\">" +
               metrics.getDecommissionedTaskTrackerCount() + "</a>" +
               "</td></tr></table>\n");
@@ -82,6 +98,7 @@
 <head>
 <title><%= trackerName %> Hadoop Map/Reduce Administration</title>
 <link rel="stylesheet" type="text/css" href="/static/hadoop.css">
+<link rel="icon" type="image/vnd.microsoft.icon" href="/static/images/favicon.ico" />
 <script type="text/javascript" src="/static/jobtracker.js"></script>
 <script type='text/javascript' src='/static/sorttable.js'></script>
 </head>
@@ -104,9 +121,10 @@
 <b>State:</b> <%= status.getJobTrackerState() %><br>
 <b>Started:</b> <%= new Date(tracker.getStartTime())%><br>
 <b>Version:</b> <%= VersionInfo.getVersion()%>,
-                r<%= VersionInfo.getRevision()%><br>
+                <%= VersionInfo.getRevision()%><br>
 <b>Compiled:</b> <%= VersionInfo.getDate()%> by 
-                 <%= VersionInfo.getUser()%><br>
+                 <%= VersionInfo.getUser()%> from
+                 <%= VersionInfo.getBranch()%><br>
 <b>Identifier:</b> <%= tracker.getTrackerIdentifier()%><br>                 
                    
 <hr>
@@ -178,8 +196,7 @@ if (failedJobs.size() > 0) {
 <hr>
 
 <h2 id="local_logs">Local Logs</h2>
-<a href="logs/">Log</a> directory,
-<a href="<%=JobHistoryServer.getHistoryUrlPrefix(tracker.conf)%>/jobhistoryhome.jsp">
+<a href="logs/">Log</a> directory, <a href="jobhistory.jsp">
 Job Tracker History</a>
 
 <%

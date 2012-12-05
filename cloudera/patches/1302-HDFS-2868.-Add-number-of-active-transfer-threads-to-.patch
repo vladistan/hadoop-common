@@ -1,0 +1,60 @@
+From 0e9bd7094e40e47103650e1371f162283da76bfa Mon Sep 17 00:00:00 2001
+From: Harsh J <harsh@cloudera.com>
+Date: Fri, 13 Jul 2012 09:57:05 +0530
+Subject: [PATCH 1302/1344] HDFS-2868. Add number of active transfer threads to the DataNode status.
+
+Reason: Community Request
+Ref: DISTRO-414
+Author: Harsh J
+---
+ .../hadoop/hdfs/server/datanode/DataNode.java      |    1 +
+ .../hdfs/server/datanode/DataNodeMXBean.java       |    6 ++++++
+ .../hdfs/server/datanode/TestDataNodeMXBean.java   |    5 +++++
+ 3 files changed, 12 insertions(+), 0 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+index ea0c311..0bc06b0 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+@@ -932,6 +932,7 @@ public class DataNode extends Configured
+   }
+     
+   /** Number of concurrent xceivers per node. */
++  @Override // DataNodeMXBean
+   public int getXceiverCount() {
+     return threadGroup == null ? 0 : threadGroup.activeCount();
+   }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNodeMXBean.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNodeMXBean.java
+index b1627ab..5854d35 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNodeMXBean.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNodeMXBean.java
+@@ -63,4 +63,10 @@ public interface DataNodeMXBean {
+    * @return the volume info
+    */
+   public String getVolumeInfo();
++
++  /**
++  * Returns an estimate of the number of Datanode threads
++  * actively transferring blocks.
++  */
++  public int getXceiverCount();
+ }
+diff --git a/src/test/org/apache/hadoop/hdfs/server/datanode/TestDataNodeMXBean.java b/src/test/org/apache/hadoop/hdfs/server/datanode/TestDataNodeMXBean.java
+index f460336..1846c36 100644
+--- a/src/test/org/apache/hadoop/hdfs/server/datanode/TestDataNodeMXBean.java
++++ b/src/test/org/apache/hadoop/hdfs/server/datanode/TestDataNodeMXBean.java
+@@ -65,6 +65,11 @@ public class TestDataNodeMXBean {
+       String volumeInfo = (String)mbs.getAttribute(mxbeanName, "VolumeInfo");
+       Assert.assertEquals(replaceDigits(datanode.getVolumeInfo()),
+           replaceDigits(volumeInfo));
++      // Ensure mxbean's XceiverCount is same as the DataNode's
++      // live value.
++      int xceiverCount = (Integer)mbs.getAttribute(mxbeanName,
++        "XceiverCount");
++      Assert.assertEquals(datanode.getXceiverCount(), xceiverCount);
+     } finally {
+       if (cluster != null) {cluster.shutdown();}
+     }
+-- 
+1.7.0.4
+

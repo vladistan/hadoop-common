@@ -1,0 +1,38 @@
+From e699064b100a1d94e826cd0f5f5b53e5dca2217a Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Thu, 17 May 2012 18:10:18 -0700
+Subject: [PATCH 1182/1344] HDFS-3330. If GetImageServlet throws an Error or RTE, response should
+ not have HTTP "OK" status. (todd via eli)
+
+Currently in GetImageServlet, we catch Exception but not other Errors or
+RTEs. So, if the code ends up throwing one of these exceptions, the
+"response.sendError()" code doesn't run, but the finally clause does
+run. This results in the servlet returning HTTP 200 OK and an empty
+response, which causes the client to think it got a successful image
+transfer.
+
+Reason: Bug
+Author: Todd Lipcon
+Ref: CDH-5350
+---
+ .../hdfs/server/namenode/GetImageServlet.java      |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java
+index 4a20ddb..294fd3b 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/GetImageServlet.java
+@@ -130,8 +130,8 @@ public class GetImageServlet extends HttpServlet {
+         }
+       });
+ 
+-    } catch (Exception ie) {
+-      String errMsg = "GetImage failed. " + StringUtils.stringifyException(ie);
++    } catch (Throwable t) {
++      String errMsg = "GetImage failed. " + StringUtils.stringifyException(t);
+       response.sendError(HttpServletResponse.SC_GONE, errMsg);
+       throw new IOException(errMsg);
+     } finally {
+-- 
+1.7.0.4
+

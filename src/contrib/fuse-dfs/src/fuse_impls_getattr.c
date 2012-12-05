@@ -19,38 +19,41 @@
 #include "fuse_dfs.h"
 #include "fuse_impls.h"
 #include "fuse_stat_struct.h"
+#include "fuse_connect.h"
 
 int dfs_getattr(const char *path, struct stat *st)
 {
+  struct hdfsConn *conn = NULL;
+  hdfsFS fs;
+  int ret;
+  hdfsFileInfo *info;
+
   TRACE1("getattr", path)
-
-  // retrieve dfs specific data
   dfs_context *dfs = (dfs_context*)fuse_get_context()->private_data;
-
-  // check params and the context var
   assert(dfs);
   assert(path);
   assert(st);
 
-  // if not connected, try to connect and fail out if we can't.
-  if (NULL == dfs->fs && NULL == (dfs->fs = hdfsConnect(dfs->nn_hostname,dfs->nn_port))) {
-    syslog(LOG_ERR, "ERROR: could not connect to %s:%d %s:%d\n", dfs->nn_hostname, dfs->nn_port,__FILE__, __LINE__);
-    return -EIO;
+  ret = fuseConnectAsThreadUid(&conn);
+  if (ret) {
+    fprintf(stderr, "fuseConnectAsThreadUid: failed to open a libhdfs "
+            "connection!  error %d.\n", ret);
+    ret = -EIO;
+    goto cleanup;
   }
-
-  // call the dfs API to get the actual information
-  hdfsFileInfo *info = hdfsGetPathInfo(dfs->fs,path);
-
+  fs = hdfsConnGetFs(conn);
+   
+  info = hdfsGetPathInfo(fs,path);
   if (NULL == info) {
-    return -ENOENT;
+    ret = -ENOENT;
+    goto cleanup;
   }
-
   fill_stat_structure(&info[0], st);
 
   // setup hard link info - for a file it is 1 else num entries in a dir + 2 (for . and ..)
   if (info[0].mKind == kObjectKindDirectory) {
     int numEntries = 0;
-    hdfsFileInfo *info = hdfsListDirectory(dfs->fs,path,&numEntries);
+    hdfsFileInfo *info = hdfsListDirectory(fs,path,&numEntries);
 
     if (info) {
       hdfsFreeFileInfo(info,numEntries);
@@ -64,5 +67,9 @@ int dfs_getattr(const char *path, struct stat *st)
   // free the info pointer
   hdfsFreeFileInfo(info,1);
 
-  return 0;
+cleanup:
+  if (conn) {
+    hdfsConnRelease(conn);
+  }
+  return ret;
 }

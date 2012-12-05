@@ -1,0 +1,135 @@
+From 56af77f6398ab32800f863d784cc2c52091c4d3a Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Tue, 26 Jun 2012 10:49:22 +0000
+Subject: [PATCH 1277/1344] HDFS-3516. Check content-type in WebHdfsFileSystem.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1353928 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 8d183134fb001db0d6a29c35c511c17c704a3c7d)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |   24 ++++++++++++++++---
+ .../hdfs/web/TestWebHdfsFileSystemContract.java    |   20 ++++++++++++++++
+ .../apache/hadoop/hdfs/web/WebHdfsTestUtil.java    |    4 +-
+ 3 files changed, 42 insertions(+), 6 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 34bf770..6fa08ef 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -32,6 +32,8 @@ import java.net.URL;
+ import java.util.Map;
+ import java.util.StringTokenizer;
+ 
++import javax.ws.rs.core.MediaType;
++
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+@@ -226,9 +228,23 @@ public class WebHdfsFileSystem extends FileSystem
+     return f.isAbsolute()? f: new Path(workingDir, f);
+   }
+ 
+-  static Map<?, ?> jsonParse(final InputStream in) throws IOException {
++  static Map<?, ?> jsonParse(final HttpURLConnection c, final boolean useErrorStream
++      ) throws IOException {
++    if (c.getContentLength() == 0) {
++      return null;
++    }
++    final InputStream in = useErrorStream? c.getErrorStream(): c.getInputStream();
+     if (in == null) {
+-      throw new IOException("The input stream is null.");
++      throw new IOException("The " + (useErrorStream? "error": "input") + " stream is null.");
++    }
++    final String contentType = c.getContentType();
++    if (contentType != null) {
++      final MediaType parsed = MediaType.valueOf(contentType);
++      if (!MediaType.APPLICATION_JSON_TYPE.isCompatible(parsed)) {
++        throw new IOException("Content-Type \"" + contentType
++            + "\" is incompatible with \"" + MediaType.APPLICATION_JSON
++            + "\" (parsed=\"" + parsed + "\")");
++      }
+     }
+     return (Map<?, ?>)JSON.parse(new InputStreamReader(in));
+   }
+@@ -239,7 +255,7 @@ public class WebHdfsFileSystem extends FileSystem
+     if (code != op.getExpectedHttpResponseCode()) {
+       final Map<?, ?> m;
+       try {
+-        m = jsonParse(conn.getErrorStream());
++        m = jsonParse(conn, true);
+       } catch(IOException e) {
+         throw new IOException("Unexpected HTTP response: code=" + code + " != "
+             + op.getExpectedHttpResponseCode() + ", " + op.toQueryString()
+@@ -395,7 +411,7 @@ public class WebHdfsFileSystem extends FileSystem
+     final HttpURLConnection conn = httpConnect(op, fspath, parameters);
+     try {
+       final Map<?, ?> m = validateResponse(op, conn);
+-      return m != null? m: jsonParse(conn.getInputStream());
++      return m != null? m: jsonParse(conn, false);
+     } finally {
+       conn.disconnect();
+     }
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+index f4015af..d9e153f 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
++++ b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+@@ -293,6 +293,10 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+     final Path root = new Path("/");
+     final Path dir = new Path("/test/testUrl");
+     assertTrue(webhdfs.mkdirs(dir));
++    final Path file = new Path("/test/file");
++    final FSDataOutputStream out = webhdfs.create(file);
++    out.write(1);
++    out.close();
+ 
+     {//test GETHOMEDIRECTORY
+       final URL url = webhdfs.toUrl(GetOpParam.Op.GETHOMEDIRECTORY, root);
+@@ -354,5 +358,21 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+       assertEquals((short)0755, webhdfs.getFileStatus(dir).getPermission().toShort());
+       conn.disconnect();
+     }
++
++    {//test jsonParse with non-json type.
++      final HttpOpParam.Op op = GetOpParam.Op.OPEN;
++      final URL url = webhdfs.toUrl(op, file);
++      final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
++      conn.setRequestMethod(op.getType().toString());
++      conn.connect();
++
++      try {
++        WebHdfsFileSystem.jsonParse(conn, false);
++        fail();
++      } catch(IOException ioe) {
++        WebHdfsFileSystem.LOG.info("GOOD", ioe);
++      }
++      conn.disconnect();
++    }
+   }
+ }
+diff --git a/src/test/org/apache/hadoop/hdfs/web/WebHdfsTestUtil.java b/src/test/org/apache/hadoop/hdfs/web/WebHdfsTestUtil.java
+index d177b18..f7b5e1a 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/WebHdfsTestUtil.java
++++ b/src/test/org/apache/hadoop/hdfs/web/WebHdfsTestUtil.java
+@@ -48,7 +48,7 @@ public class WebHdfsTestUtil {
+ 
+   public static WebHdfsFileSystem getWebHdfsFileSystemAs(
+       final UserGroupInformation ugi, final Configuration conf
+-      ) throws IOException, URISyntaxException, InterruptedException {
++      ) throws IOException, InterruptedException {
+     return ugi.doAs(new PrivilegedExceptionAction<WebHdfsFileSystem>() {
+       @Override
+       public WebHdfsFileSystem run() throws Exception {
+@@ -69,7 +69,7 @@ public class WebHdfsTestUtil {
+       final int expectedResponseCode) throws IOException {
+     conn.connect();
+     Assert.assertEquals(expectedResponseCode, conn.getResponseCode());
+-    return WebHdfsFileSystem.jsonParse(conn.getInputStream());
++    return WebHdfsFileSystem.jsonParse(conn, false);
+   }
+   
+   public static HttpURLConnection twoStepWrite(HttpURLConnection conn,
+-- 
+1.7.0.4
+

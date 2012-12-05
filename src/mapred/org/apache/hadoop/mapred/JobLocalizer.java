@@ -94,7 +94,7 @@ public class JobLocalizer {
   public JobLocalizer(JobConf ttConf, String user, String jobid)
       throws IOException {
     this(ttConf, user, jobid,
-        ttConf.getStrings(JobConf.MAPRED_LOCAL_DIR_PROPERTY));
+        ttConf.getTrimmedStrings(JobConf.MAPRED_LOCAL_DIR_PROPERTY));
   }
 
   public JobLocalizer(JobConf ttConf, String user, String jobid,
@@ -271,11 +271,19 @@ public class JobLocalizer {
       //Download job.jar
       userFs.copyToLocalFile(jarFilePath, localJarFile);
       localJobConf.setJar(localJarFile.toString());
-      // Also un-jar the job.jar files. We un-jar it so that classes inside
-      // sub-directories, for e.g., lib/, classes/ are available on class-path
-      RunJar.unJar(new File(localJarFile.toString()),
-          new File(localJarFile.getParent().toString()));
-      FileUtil.chmod(localJarFile.getParent().toString(), "ugo+rx", true);
+      // also unjar the parts of the job.jar that need to end up on the
+      // classpath, or explicitly requested by the user.
+      RunJar.unJar(
+        new File(localJarFile.toString()),
+        new File(localJarFile.getParent().toString()),
+        localJobConf.getJarUnpackPattern());
+      try {
+        FileUtil.chmod(localJarFile.getParent().toString(), "ugo+rx", true);
+      } catch (InterruptedException ie) {
+        // This exception is never actually thrown, but the signature says
+        // it is, and we can't make the incompatible change within CDH
+        throw new IOException("Interrupted while chmodding", ie);
+      }
     }
   }
 

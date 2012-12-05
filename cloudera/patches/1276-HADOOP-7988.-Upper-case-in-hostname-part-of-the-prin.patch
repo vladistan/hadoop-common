@@ -1,0 +1,52 @@
+From 8854748d039fa34f4c356cb5e498aded903d42b8 Mon Sep 17 00:00:00 2001
+From: Jitendra Nath Pandey <jitendra@apache.org>
+Date: Sat, 28 Jan 2012 02:44:12 +0000
+Subject: [PATCH 1276/1344] HADOOP-7988. Upper case in hostname part of the principals doesn't work with kerberos.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1236963 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit fed700123b4b04e7e92b8c90a0fc7ec53342fc75)
+
+Author: Jitendra Pandey
+Ref: CDH-4806
+---
+ .../org/apache/hadoop/security/SecurityUtil.java   |    2 +-
+ .../apache/hadoop/security/TestSecurityUtil.java   |   10 ++++++++++
+ 2 files changed, 11 insertions(+), 1 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/security/SecurityUtil.java b/src/core/org/apache/hadoop/security/SecurityUtil.java
+index 56fe5d3..01537b8 100644
+--- a/src/core/org/apache/hadoop/security/SecurityUtil.java
++++ b/src/core/org/apache/hadoop/security/SecurityUtil.java
+@@ -209,7 +209,7 @@ public class SecurityUtil {
+     if (fqdn == null || fqdn.equals("") || fqdn.equals("0.0.0.0")) {
+       fqdn = getLocalHostName();
+     }
+-    return components[0] + "/" + fqdn + "@" + components[2];
++    return components[0] + "/" + fqdn.toLowerCase() + "@" + components[2];
+   }
+   
+   static String getLocalHostName() throws UnknownHostException {
+diff --git a/src/test/org/apache/hadoop/security/TestSecurityUtil.java b/src/test/org/apache/hadoop/security/TestSecurityUtil.java
+index 4b5ac50..0d583ec 100644
+--- a/src/test/org/apache/hadoop/security/TestSecurityUtil.java
++++ b/src/test/org/apache/hadoop/security/TestSecurityUtil.java
+@@ -84,6 +84,16 @@ public class TestSecurityUtil {
+   }
+   
+   @Test
++  public void testPrincipalsWithLowerCaseHosts() throws IOException {
++    String service = "xyz/";
++    String realm = "@REALM";
++    String principalInConf = service + SecurityUtil.HOSTNAME_PATTERN + realm;
++    String hostname = "FooHost";
++    String principal = service + hostname.toLowerCase() + realm;
++    verify(principalInConf, hostname, principal);
++  }
++  
++  @Test
+   public void testLocalHostNameForNullOrWild() throws Exception {
+     String local = SecurityUtil.getLocalHostName();
+     assertEquals("hdfs/" + local + "@REALM", SecurityUtil.getServerPrincipal(
+-- 
+1.7.0.4
+

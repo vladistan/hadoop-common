@@ -1,0 +1,27 @@
+From b735b6afa972ba807da56961586ef2091351c4f6 Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Thu, 28 Jun 2012 11:42:57 -0700
+Subject: [PATCH 1219/1344] Amend HDFS-2333. Put getNumCurrentReplicas back to public access for the tests.
+
+Author: Eli Collins
+Ref: CDH-4806
+---
+ src/hdfs/org/apache/hadoop/hdfs/DFSClient.java |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+index ad97a60..018afee 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+@@ -3972,7 +3972,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+      * block is not yet allocated, then this API will return 0 because there are
+      * no replicas in the pipeline.
+      */
+-    int getNumCurrentReplicas() throws IOException {
++    public int getNumCurrentReplicas() throws IOException {
+       synchronized(dataQueue) {
+         if (nodes == null) {
+           return blockReplication;
+-- 
+1.7.0.4
+

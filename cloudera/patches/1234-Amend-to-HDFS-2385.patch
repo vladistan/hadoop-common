@@ -1,0 +1,177 @@
+From 915021e5982b88e1af4e1fae474c15dabff12350 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Thu, 6 Oct 2011 03:01:31 +0000
+Subject: [PATCH 1234/1344] Amend to HDFS-2385.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1179490 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 1cf4f9eb3af05ceaf7f7186b86fbc97dba549230)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java       |   13 +++++++
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |   17 ++-------
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |   36 +++++++++++---------
+ 3 files changed, 37 insertions(+), 29 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java b/src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java
+index c8add49..03d51b3 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSUtil.java
+@@ -19,6 +19,9 @@
+ package org.apache.hadoop.hdfs;
+ 
+ import java.io.UnsupportedEncodingException;
++import java.net.InetSocketAddress;
++import java.net.URI;
++import java.net.URISyntaxException;
+ import java.util.StringTokenizer;
+ 
+ import org.apache.hadoop.fs.BlockLocation;
+@@ -110,5 +113,15 @@ public class DFSUtil {
+     }
+     return blkLocations;
+   }
++
++  /** Create a URI from the scheme and address */
++  public static URI createUri(String scheme, InetSocketAddress address) {
++    try {
++      return new URI(scheme, null, address.getHostName(), address.getPort(),
++          null, null, null);
++    } catch (URISyntaxException ue) {
++      throw new IllegalArgumentException(ue);
++    }
++  }
+ }
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index d5a1535..ceeea35 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -150,7 +150,7 @@ public class HftpFileSystem extends FileSystem
+     this.ugi = UserGroupInformation.getCurrentUser();
+     this.nnAddr = getNamenodeAddr(name);
+     this.nnSecureAddr = getNamenodeSecureAddr(name);
+-    this.hftpURI = createUri(name.getScheme(), nnAddr);
++    this.hftpURI = DFSUtil.createUri(name.getScheme(), nnAddr);
+     
+     if (UserGroupInformation.isSecurityEnabled()) {
+       initDelegationToken();
+@@ -193,15 +193,6 @@ public class HftpFileSystem extends FileSystem
+         nnAddr, ugi, getConf());
+   }
+   
+-  private static URI createUri(String scheme, InetSocketAddress addr) {
+-    URI uri = null;
+-    try {
+-      uri = new URI(scheme, null, addr.getHostName(), addr.getPort(), null, null, null);
+-    } catch (URISyntaxException ue) {
+-      throw new IllegalArgumentException(ue);
+-    }
+-    return uri;
+-  }
+ 
+   @Override
+   public Token<?> getRenewToken() {
+@@ -225,12 +216,12 @@ public class HftpFileSystem extends FileSystem
+   @Override
+   public synchronized Token<?> getDelegationToken(final String renewer
+                                                   ) throws IOException {
+-    final String nnHttpUrl = createUri("https", nnSecureAddr).toString();
+     try {
+       //Renew TGT if needed
+       ugi.checkTGTAndReloginFromKeytab();
+       return ugi.doAs(new PrivilegedExceptionAction<Token<?>>() {
+         public Token<?> run() throws IOException {
++          final String nnHttpUrl = DFSUtil.createUri("https", nnSecureAddr).toString();
+           Credentials c;
+           try {
+             c = DelegationTokenFetcher.getDTfromRemote(nnHttpUrl, renewer);
+@@ -684,7 +675,7 @@ public class HftpFileSystem extends FileSystem
+       // use https to renew the token
+       InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
+       return DelegationTokenFetcher.renewDelegationToken(
+-          createUri("https", serviceAddr).toString(),
++          DFSUtil.createUri("https", serviceAddr).toString(),
+           (Token<DelegationTokenIdentifier>) token
+       );
+     }
+@@ -698,7 +689,7 @@ public class HftpFileSystem extends FileSystem
+       // use https to cancel the token
+       InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
+       DelegationTokenFetcher.cancelDelegationToken(
+-          createUri("https", serviceAddr).toString(), 
++          DFSUtil.createUri("https", serviceAddr).toString(), 
+           (Token<DelegationTokenIdentifier>) token
+       );
+     }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 0d909e6..17223d9 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -593,24 +593,30 @@ public class WebHdfsFileSystem extends FileSystem
+     public boolean isManaged(Token<?> token) throws IOException {
+       return true;
+     }
+-  
++
++    private static WebHdfsFileSystem getWebHdfs(
++        final Token<?> token, final Configuration conf
++        ) throws IOException, InterruptedException, URISyntaxException {
++      
++      final InetSocketAddress nnAddr = SecurityUtil.getTokenServiceAddr(token);
++      final URI uri = DFSUtil.createUri(WebHdfsFileSystem.SCHEME, nnAddr);
++      return (WebHdfsFileSystem)FileSystem.get(uri, conf);
++    }
++
+     @Override
+     public long renew(final Token<?> token, final Configuration conf
+         ) throws IOException, InterruptedException {
+       final UserGroupInformation ugi = UserGroupInformation.getLoginUser();
+       // update the kerberos credentials, if they are coming from a keytab
+       ugi.checkTGTAndReloginFromKeytab();
+-  
+-      final String uri = WebHdfsFileSystem.SCHEME  + "://"
+-          + conf.get("dfs.http.address");
+-      final WebHdfsFileSystem webhdfs = ugi.doAs(new PrivilegedExceptionAction<WebHdfsFileSystem>() {
++
++      return ugi.doAs(new PrivilegedExceptionAction<Long>() {
+         @Override
+-        public WebHdfsFileSystem run() throws Exception {
+-          return (WebHdfsFileSystem)FileSystem.get(new URI(uri), conf);
++        public Long run() throws Exception {
++          final WebHdfsFileSystem webhdfs = getWebHdfs(token, conf);
++          return webhdfs.renewDelegationToken(token);
+         }
+       });
+-      
+-      return webhdfs.renewDelegationToken(token);
+     }
+   
+     @Override
+@@ -620,16 +626,14 @@ public class WebHdfsFileSystem extends FileSystem
+       // update the kerberos credentials, if they are coming from a keytab
+       ugi.checkTGTAndReloginFromKeytab();
+ 
+-      final String uri = WebHdfsFileSystem.SCHEME  + "://"
+-          + conf.get("dfs.http.address");
+-      final WebHdfsFileSystem webhdfs = ugi.doAs(new PrivilegedExceptionAction<WebHdfsFileSystem>() {
++      ugi.doAs(new PrivilegedExceptionAction<Void>() {
+         @Override
+-        public WebHdfsFileSystem run() throws Exception {
+-          return (WebHdfsFileSystem)FileSystem.get(new URI(uri), conf);
++        public Void run() throws Exception {
++          final WebHdfsFileSystem webhdfs = getWebHdfs(token, conf);
++          webhdfs.cancelDelegationToken(token);
++          return null;
+         }
+       });
+-
+-      webhdfs.cancelDelegationToken(token);
+     }
+   }
+ }
+\ No newline at end of file
+-- 
+1.7.0.4
+

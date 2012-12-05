@@ -19,22 +19,29 @@ package org.apache.hadoop.hdfs.server.namenode;
 
 import junit.framework.TestCase;
 import java.io.*;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Iterator;
 import java.util.Random;
+
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.spy;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.FSConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLog.EditLogFileOutputStream;
 import org.apache.hadoop.hdfs.server.namenode.FSImage.NameNodeFile;
 import org.apache.hadoop.hdfs.server.namenode.SecondaryNameNode.ErrorSimulator;
 import org.apache.hadoop.hdfs.server.common.HdfsConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSImage.NameNodeDirType;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
+import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -130,7 +137,77 @@ public class TestCheckpoint extends TestCase {
     }
     resurrectNameDir(first); // put back namedir
   }
+  /**
+   * Tests EditLogFileOutputStream doesn't throw NullPointerException on being
+   * closed twice.
+   * See https://issues.apache.org/jira/browse/HDFS-2011
+   */
+  public void testEditLogFileOutputStreamCloses()
+    throws IOException,NullPointerException {
+    System.out.println("Testing EditLogFileOutputStream doesn't throw " +
+                       "NullPointerException on being closed twice");
+    File editLogStreamFile = null;
+    try {
+      editLogStreamFile = new File(System.getProperty("test.build.data","/tmp"),
+                                   "editLogStream.dat");
+      EditLogFileOutputStream editLogStream =
+                             new EditLogFileOutputStream(editLogStreamFile);
+      editLogStream.close();
+      //Closing an twice should not throw a NullPointerException
+      editLogStream.close();
+    } finally {
+      if (editLogStreamFile != null)
+        // Cleanup the editLogStream.dat file we created
+          editLogStreamFile.delete();
+    }
+    System.out.println("Successfully tested EditLogFileOutputStream doesn't " +
+           "throw NullPointerException on being closed twice");
+  }
 
+  /**
+   * Checks that an IOException in NNStorage.setCheckpointTimeInStorage is handled
+   * correctly (by removing the storage directory)
+   * See https://issues.apache.org/jira/browse/HDFS-2011
+   */
+  public void testSetCheckpointTimeInStorageHandlesIOException() throws Exception {
+    System.out.println("Check IOException handled correctly by setCheckpointTimeInStorage");
+    FSImage nnStorage = new FSImage();
+    ArrayList<File> fsImageDirs = new ArrayList<File>();
+    ArrayList<File> editsDirs = new ArrayList<File>();
+    File filePath1 =
+      new File(System.getProperty("test.build.data", "/tmp"), "storageDirToCheck");
+    assertTrue("Couldn't create directory storageDirToCheck",
+               filePath1.exists() || filePath1.mkdirs());
+    try {
+      fsImageDirs.add(filePath1);
+      // Initialize NNStorage
+      nnStorage.setStorageDirectories(fsImageDirs, editsDirs);
+      assertTrue("List of storage directories didn't have storageDirToCheck.",
+                 nnStorage.dirIterator(NameNodeDirType.EDITS).next().getRoot().
+                 toString().indexOf("storageDirToCheck") != -1);
+      assertTrue("List of removed storage directories wasn't empty",
+                 nnStorage.getRemovedStorageDirs().isEmpty());
+    } finally {
+      // Delete storage directory to cause IOException in setCheckpointTimeInStorage
+      assertTrue("Couldn't remove directory " + filePath1.getAbsolutePath(),
+                 FileUtil.fullyDelete(filePath1));
+    }
+
+    // Stub out fatalExit as we'll trigger it below, incrementCheckpointTime
+    // will notice there are no edit streams.
+    FSEditLog spyLog = spy(nnStorage.getEditLog());
+    doNothing().when(spyLog).fatalExit(anyString());
+    nnStorage.setEditLog(spyLog);
+
+    // Just call setCheckpointTimeInStorage using any random number
+    nnStorage.incrementCheckpointTime();
+    List<StorageDirectory> listRsd = nnStorage.getRemovedStorageDirs();
+    assertTrue("Removed directory wasn't what was expected",
+               listRsd.size() > 0 && listRsd.get(listRsd.size() - 1).getRoot().
+               toString().indexOf("storageDirToCheck") != -1);
+    System.out.println("Successfully checked IOException is handled correctly "
+                       + "by setCheckpointTimeInStorage");
+  }
   /*
    * Simulate namenode crashing after rolling edit log.
    */
@@ -286,14 +363,14 @@ public class TestCheckpoint extends TestCase {
 
       try {
         secondary.doCheckpoint();  // this should fail
-        assertTrue(false);
+        fail();
       } catch (IOException e) {
       }
       ErrorSimulator.clearErrorSimulation(0);
       secondary.shutdown(); // secondary namenode crash!
 
       // start new instance of secondary and verify that 
-      // a new rollEditLog suceedes inspite of the fact that 
+      // a new rollEditLog succeeds in spite of the fact that 
       // edits.new already exists.
       //
       secondary = startSecondaryNameNode(conf);
@@ -382,6 +459,55 @@ public class TestCheckpoint extends TestCase {
     }
   }
 
+  /**
+   * Simulate namenode failing to send the whole file
+   * secondary namenode sometimes assumed it received all of it
+   */
+  @SuppressWarnings("deprecation")
+  void testNameNodeImageSendFail(Configuration conf)
+    throws IOException {
+    System.out.println("Starting testNameNodeImageSendFail");
+    Path file1 = new Path("checkpointww.dat");
+    MiniDFSCluster cluster = new MiniDFSCluster(conf, numDatanodes, 
+                                                false, null);
+    cluster.waitActive();
+    FileSystem fileSys = cluster.getFileSystem();
+    try {
+      assertTrue(!fileSys.exists(file1));
+      //
+      // Make the checkpoint fail after rolling the edit log.
+      //
+      SecondaryNameNode secondary = startSecondaryNameNode(conf);
+      ErrorSimulator.setErrorSimulation(3);
+
+      try {
+        secondary.doCheckpoint();  // this should fail
+        fail("Did not get expected exception");
+      } catch (IOException e) {
+        // We only sent part of the image. Have to trigger this exception
+        assertTrue(e.getMessage().contains("is not of the advertised size"));
+      }
+      ErrorSimulator.clearErrorSimulation(3);
+      secondary.shutdown(); // secondary namenode crash!
+
+      // start new instance of secondary and verify that 
+      // a new rollEditLog suceedes inspite of the fact that 
+      // edits.new already exists.
+      //
+      secondary = startSecondaryNameNode(conf);
+      secondary.doCheckpoint();  // this should work correctly
+      secondary.shutdown();
+
+      //
+      // Create a new file
+      //
+      writeFile(fileSys, file1, replication);
+      checkFile(fileSys, file1, replication);
+    } finally {
+      fileSys.close();
+      cluster.shutdown();
+    }
+  }
   /**
    * Test different startup scenarios.
    * <p><ol>
@@ -592,7 +718,7 @@ public class TestCheckpoint extends TestCase {
       // Take a checkpoint
       //
       SecondaryNameNode secondary = startSecondaryNameNode(conf);
-      ErrorSimulator.initializeErrorSimulationEvent(3);
+      ErrorSimulator.initializeErrorSimulationEvent(4);
       secondary.doCheckpoint();
       secondary.shutdown();
     } finally {
@@ -646,6 +772,7 @@ public class TestCheckpoint extends TestCase {
 
     // file2 is left behind.
 
+    testNameNodeImageSendFail(conf);
     testSecondaryNamenodeError1(conf);
     testSecondaryNamenodeError2(conf);
     testSecondaryNamenodeError3(conf);
@@ -706,6 +833,78 @@ public class TestCheckpoint extends TestCase {
       cluster.waitActive();
       fs = (DistributedFileSystem)(cluster.getFileSystem());
       checkFile(fs, file, replication);
+    } finally {
+      if(fs != null) fs.close();
+      if(cluster!= null) cluster.shutdown();
+    }
+  }
+
+  /**
+   * Test multiple 2NNs running, where the second 2NN reports the address of the
+   * first 2NN when doing the image upload to the NN. This case will happen when
+   * multiple 2NNs are started with the default configs, which has them report
+   * their address to the NN as being "127.0.0.1".
+   */
+  public void testMultipleSecondaryNameNodes() throws IOException {
+    MiniDFSCluster cluster = null;
+    FileSystem fs = null;
+    try {
+      Configuration conf = new Configuration();
+      cluster = new MiniDFSCluster(conf, 0, true, null);
+      cluster.waitActive();
+      fs = cluster.getFileSystem();
+      
+      Path testPath1 = new Path("/tmp/foo");
+      Path testPath2 = new Path("/tmp/bar");
+
+      assertTrue(fs.mkdirs(testPath1));
+      
+      // Start up a 2NN and do a checkpoint.
+      SecondaryNameNode snn1 = startSecondaryNameNode(conf);
+      snn1.doCheckpoint();
+      
+      assertTrue(testPath1 + " should still exist after good checkpoint",
+          fs.exists(testPath1));
+      assertTrue(fs.mkdirs(testPath2));
+      assertTrue(testPath2 + " should exist", fs.exists(testPath2));
+      
+      
+      // Simulate a checkpoint by a second 2NN, but which tells the NN to grab
+      // the new merged fsimage from the original 2NN.
+      NameNode namenode = cluster.getNameNode();
+      CheckpointSignature sig = (CheckpointSignature)namenode.rollEditLog();
+      
+      String fileid = "putimage=1&port=" +
+          SecondaryNameNode.getHttpAddress(conf).getPort() +
+          "&machine=" + SecondaryNameNode.getHttpAddress(conf).getHostName() +
+          "&token=" + sig.toString() +
+          "&newChecksum=" + MD5Hash.digest("this will be a bad checksum".getBytes());
+      
+      try {
+        TransferFsImage.getFileClient(NameNode.getInfoServer(conf), fileid,
+            (File[])null, false);
+        namenode.rollFsImage();
+        fail();
+      } catch (IOException e) {
+        // This is expected.
+        System.out.println("Got expected exception " + e);
+      }
+      
+      // The in-memory NN state should still be fine. We've only messed with the
+      // HDFS metadata on the local FS.
+      assertTrue(testPath1 + " should exist after bad checkpoint, before restart",
+          fs.exists(testPath1));
+      assertTrue(testPath2 + " should exist after bad checkpoint, before restart",
+          fs.exists(testPath2));
+      
+      cluster.restartNameNode();
+      
+      // After restarting the NN, it will read the HDFS metadata from disk.
+      // Things should still be good.
+      assertTrue(testPath1 + " should exist after bad checkpoint, after restart",
+          fs.exists(testPath1));
+      assertTrue(testPath2 + " should exist after bad checkpoint, after restart",
+          fs.exists(testPath2));
     } finally {
       if(fs != null) fs.close();
       if(cluster!= null) cluster.shutdown();

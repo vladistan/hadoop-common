@@ -40,11 +40,17 @@ public class TestStreamingKeyValue extends TestCase
     "roses are \tred\t\n\tviolets are blue\nbunnies are pink\n" +
     "this is for testing a big\tinput line\n" +
     "small input\n";
-  protected String outputExpect = 
+  private final static String outputWithoutKey = 
     "\tviolets are blue\nbunnies are pink\t\n" + 
     "roses are \tred\t\n" +
     "small input\t\n" +
     "this is for testing a big\tinput line\n";
+  private final static String outputWithKey = 
+    "0\troses are \tred\t\n" +  
+    "16\t\tviolets are blue\n" +
+    "34\tbunnies are pink\n" +
+    "51\tthis is for testing a big\tinput line\n" +
+    "88\tsmall input\n";
 
   private StreamJob job;
 
@@ -63,19 +69,20 @@ public class TestStreamingKeyValue extends TestCase
     out.close();
   }
 
-  protected String[] genArgs() {
+  protected String[] genArgs(boolean ignoreKey) {
     return new String[] {
       "-input", INPUT_FILE.getAbsolutePath(),
       "-output", OUTPUT_DIR.getAbsolutePath(),
       "-mapper", "cat",
       "-jobconf", "keep.failed.task.files=true",
       "-jobconf", "stream.non.zero.exit.is.failure=true",
-      "-jobconf", "stream.tmpdir="+System.getProperty("test.build.data","/tmp")
+      "-jobconf", "stream.tmpdir="+System.getProperty("test.build.data","/tmp"),
+      "-jobconf", "stream.map.input.ignoreKey="+ignoreKey,
     };
   }
   
-  public void testCommandLine()
-  {
+  public void runStreamJob(final String outputExpect, boolean ignoreKey)
+      throws Exception {
     String outFileName = "part-00000";
     File outFile = null;
     try {
@@ -89,35 +96,38 @@ public class TestStreamingKeyValue extends TestCase
 
       // During tests, the default Configuration will use a local mapred
       // So don't specify -config or -cluster
-      job = new StreamJob(genArgs(), mayExit);      
+      job = new StreamJob(genArgs(ignoreKey), mayExit);      
       job.go();
       outFile = new File(OUTPUT_DIR, outFileName).getAbsoluteFile();
       String output = StreamUtil.slurp(outFile);
       System.err.println("outEx1=" + outputExpect);
       System.err.println("  out1=" + output);
       assertEquals(outputExpect, output);
-    } catch(Exception e) {
-      failTrace(e);
-    } finally { 
-      try {
-        INPUT_FILE.delete();
-        FileUtil.fullyDelete(OUTPUT_DIR.getAbsoluteFile());
-      } catch(Exception e) {
-        failTrace(e);
-      }
+    } finally {
+      INPUT_FILE.delete();
+      FileUtil.fullyDelete(OUTPUT_DIR.getAbsoluteFile());
     }
   }
 
-  private void failTrace(Exception e)
+  /**
+   * Run the job with the indicating the input format key should be emitted. 
+   */
+  public void testCommandLineWithKey() throws Exception
   {
-    StringWriter sw = new StringWriter();
-    e.printStackTrace(new PrintWriter(sw));
-    fail(sw.toString());
+    runStreamJob(outputWithKey, false);
   }
 
+  /**
+   * Run the job the default way (the input format key is not emitted).
+   */
+  public void testCommandLineWithoutKey() throws Exception
+  {
+      runStreamJob(outputWithoutKey, true);
+  }
+  
   public static void main(String[]args) throws Exception
-  {
-    new TestStreamingKeyValue().testCommandLine();
+  {    
+    new TestStreamingKeyValue().testCommandLineWithKey();
+    new TestStreamingKeyValue().testCommandLineWithoutKey();
   }
-
 }

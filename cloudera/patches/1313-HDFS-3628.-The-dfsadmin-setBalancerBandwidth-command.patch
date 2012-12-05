@@ -1,0 +1,27 @@
+From 3d9fd619e95717ee26f087d76fc33fa4c6f868f8 Mon Sep 17 00:00:00 2001
+From: Harsh J <harsh@cloudera.com>
+Date: Wed, 11 Jul 2012 17:06:13 +0530
+Subject: [PATCH 1313/1344] HDFS-3628. The dfsadmin -setBalancerBandwidth command on branch-1 does not check for superuser privileges.
+
+Reason: New feature
+Ref: CDH-5768
+Author: Harsh J
+---
+ .../hadoop/hdfs/server/namenode/FSNamesystem.java  |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index 73d936f..f53ea65 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -726,6 +726,7 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+    * @throws IOException
+    */
+   public void setBalancerBandwidth(long bandwidth) throws IOException {
++    checkSuperuserPrivilege();
+     synchronized(datanodeMap) {
+       for (DatanodeDescriptor nodeInfo : datanodeMap.values()) {
+         nodeInfo.setBalancerBandwidth(bandwidth);
+-- 
+1.7.0.4
+

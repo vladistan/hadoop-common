@@ -1,0 +1,78 @@
+From 36354ae7c54f3c41c0901bf001761f22234903d4 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Wed, 28 Sep 2011 04:52:47 +0000
+Subject: [PATCH 1284/1344] HDFS-2368.  Move SPNEGO conf properties from hdfs-default.xml to hdfs-site.xml.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1176720 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 11c9a616125d72f5cb4369b294c2c28ed2015843)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ example-confs/conf.secure/hdfs-site.xml |   20 ++++++++++++++++++++
+ src/hdfs/hdfs-default.xml               |   20 --------------------
+ 2 files changed, 20 insertions(+), 20 deletions(-)
+
+diff --git a/example-confs/conf.secure/hdfs-site.xml b/example-confs/conf.secure/hdfs-site.xml
+index 0ce87e7..b23a4f6 100644
+--- a/example-confs/conf.secure/hdfs-site.xml
++++ b/example-confs/conf.secure/hdfs-site.xml
+@@ -161,6 +161,26 @@
+   </property>
+ 
+   <property>
++    <name>dfs.web.authentication.kerberos.principal</name>
++    <value>HTTP/_HOST@${local.realm}</value>
++    <description>
++      The HTTP Kerberos principal used by Hadoop-Auth in the HTTP endpoint.
++
++      The HTTP Kerberos principal MUST start with 'HTTP/' per Kerberos
++      HTTP SPENGO specification.
++    </description>
++  </property>
++
++  <property>
++    <name>dfs.web.authentication.kerberos.keytab</name>
++    <value>/etc/security/keytabs/nn.service.keytab</value>
++    <description>
++      The Kerberos keytab file with the credentials for the
++      HTTP Kerberos principal used by Hadoop-Auth in the HTTP endpoint.
++    </description>
++  </property>
++
++  <property>
+     <name>dfs.namenode.keytab.file</name>
+     <value>/var/local/hadoop/hdfs.keytab</value>
+     <description>
+diff --git a/src/hdfs/hdfs-default.xml b/src/hdfs/hdfs-default.xml
+index a87fde4..09b1166 100644
+--- a/src/hdfs/hdfs-default.xml
++++ b/src/hdfs/hdfs-default.xml
+@@ -543,24 +543,4 @@ creations/deletions), or "all".</description>
+   </description>
+ </property>
+ 
+-<property>
+-  <name>dfs.web.authentication.kerberos.principal</name>
+-  <value>HTTP/${dfs.web.hostname}@${kerberos.realm}</value>
+-  <description>
+-    The HTTP Kerberos principal used by Hadoop-Auth in the HTTP endpoint.
+-
+-    The HTTP Kerberos principal MUST start with 'HTTP/' per Kerberos
+-    HTTP SPENGO specification.
+-  </description>
+-</property>
+-
+-<property>
+-  <name>dfs.web.authentication.kerberos.keytab</name>
+-  <value>${user.home}/dfs.web.keytab</value>
+-  <description>
+-    The Kerberos keytab file with the credentials for the
+-    HTTP Kerberos principal used by Hadoop-Auth in the HTTP endpoint.
+-  </description>
+-</property>
+-
+ </configuration>
+-- 
+1.7.0.4
+

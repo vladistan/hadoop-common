@@ -1,0 +1,44 @@
+From dc21de40fa1a751d076dc6dc5fb78fd856520f47 Mon Sep 17 00:00:00 2001
+From: Alejandro Abdelnur <tucu@apache.org>
+Date: Mon, 16 Jul 2012 17:30:50 +0000
+Subject: [PATCH 1305/1344] HADOOP-8552. Conflict: Same security.log.file for multiple users. (kkambatl via tucu)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1362154 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit c1f59496ccba92261d85cc274450e5c759f0129d)
+
+Reason: Resolve potential conflict between security log files of multiple users
+Ref: CDH-6242
+Author: Karthik Kambatla
+---
+ conf/log4j.properties                      |    2 +-
+ example-confs/conf.secure/log4j.properties |    1 +
+ 2 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/conf/log4j.properties b/conf/log4j.properties
+index 85b3880..6c6ecfc 100644
+--- a/conf/log4j.properties
++++ b/conf/log4j.properties
+@@ -61,7 +61,7 @@ log4j.appender.TLA.layout.ConversionPattern=%d{ISO8601} %p %c: %m%n
+ #
+ #Security audit appender
+ #
+-hadoop.security.log.file=SecurityAuth.audit
++hadoop.security.log.file=SecurityAuth-${user.name}.audit
+ log4j.appender.DRFAS=org.apache.log4j.DailyRollingFileAppender 
+ log4j.appender.DRFAS.File=${hadoop.log.dir}/${hadoop.security.log.file}
+ 
+diff --git a/example-confs/conf.secure/log4j.properties b/example-confs/conf.secure/log4j.properties
+index a1975d0..91e3de1 100644
+--- a/example-confs/conf.secure/log4j.properties
++++ b/example-confs/conf.secure/log4j.properties
+@@ -69,6 +69,7 @@ log4j.appender.EventCounter=org.apache.hadoop.metrics.jvm.EventCounter
+ security.audit.logger=INFO,console
+ log4j.category.SecurityLogger=${security.audit.logger}
+ log4j.additivity.SecurityLogger=false
++hadoop.security.log.file=SecurityAuth-${user.name}.audit
+ log4j.appender.DRFAS=org.apache.log4j.DailyRollingFileAppender 
+ log4j.appender.DRFAS.File=/var/local/hadoop/logs/${hadoop.id.str}/${hadoop.id.str}-auth.log
+ log4j.appender.DRFAS.layout=org.apache.log4j.PatternLayout
+-- 
+1.7.0.4
+

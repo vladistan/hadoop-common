@@ -1,0 +1,47 @@
+From e41233127a15a3bc88c8b474c8f667c270c70e1d Mon Sep 17 00:00:00 2001
+From: Matthew J. Foley <mattf@apache.org>
+Date: Mon, 7 May 2012 03:33:56 +0000
+Subject: [PATCH 1198/1344] HADOOP-8151. Error handling in snappy decompressor throws invalid exceptions. Contributed by Matt Foley.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1334868 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 16d81bd39694985f73d2b3c2ed227d5b3146bcfe)
+---
+ .../hadoop/io/compress/snappy/SnappyCompressor.c   |    2 +-
+ .../hadoop/io/compress/snappy/SnappyDecompressor.c |    6 +++---
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/native/src/org/apache/hadoop/io/compress/snappy/SnappyCompressor.c b/src/native/src/org/apache/hadoop/io/compress/snappy/SnappyCompressor.c
+index 13991c2..42eb7c5 100644
+--- a/src/native/src/org/apache/hadoop/io/compress/snappy/SnappyCompressor.c
++++ b/src/native/src/org/apache/hadoop/io/compress/snappy/SnappyCompressor.c
+@@ -116,7 +116,7 @@ JNIEXPORT jint JNICALL Java_org_apache_hadoop_io_compress_snappy_SnappyCompresso
+ 
+   snappy_status ret = dlsym_snappy_compress(uncompressed_bytes, uncompressed_direct_buf_len, compressed_bytes, &compressed_direct_buf_len);
+   if (ret != SNAPPY_OK){
+-    THROW(env, "Ljava/lang/InternalError", "Could not compress data. Buffer length is too small.");
++    THROW(env, "java/lang/InternalError", "Could not compress data. Buffer length is too small.");
+   }
+ 
+   (*env)->SetIntField(env, thisj, SnappyCompressor_uncompressedDirectBufLen, 0);
+diff --git a/src/native/src/org/apache/hadoop/io/compress/snappy/SnappyDecompressor.c b/src/native/src/org/apache/hadoop/io/compress/snappy/SnappyDecompressor.c
+index 767c5f4..54ef94b 100644
+--- a/src/native/src/org/apache/hadoop/io/compress/snappy/SnappyDecompressor.c
++++ b/src/native/src/org/apache/hadoop/io/compress/snappy/SnappyDecompressor.c
+@@ -116,11 +116,11 @@ JNIEXPORT jint JNICALL Java_org_apache_hadoop_io_compress_snappy_SnappyDecompres
+ 
+   snappy_status ret = dlsym_snappy_uncompress(compressed_bytes, compressed_direct_buf_len, uncompressed_bytes, &uncompressed_direct_buf_len);
+   if (ret == SNAPPY_BUFFER_TOO_SMALL){
+-    THROW(env, "Ljava/lang/InternalError", "Could not decompress data. Buffer length is too small.");
++    THROW(env, "java/lang/InternalError", "Could not decompress data. Buffer length is too small.");
+   } else if (ret == SNAPPY_INVALID_INPUT){
+-    THROW(env, "Ljava/lang/InternalError", "Could not decompress data. Input is invalid.");
++    THROW(env, "java/lang/InternalError", "Could not decompress data. Input is invalid.");
+   } else if (ret != SNAPPY_OK){
+-    THROW(env, "Ljava/lang/InternalError", "Could not decompress data.");
++    THROW(env, "java/lang/InternalError", "Could not decompress data.");
+   }
+ 
+   (*env)->SetIntField(env, thisj, SnappyDecompressor_compressedDirectBufLen, 0);
+-- 
+1.7.0.4
+

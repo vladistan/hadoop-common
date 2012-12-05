@@ -1,0 +1,162 @@
+From be11ca8d823cad17b935da93d784221e5d051eea Mon Sep 17 00:00:00 2001
+From: Matthew J. Foley <mattf@apache.org>
+Date: Thu, 15 Dec 2011 09:00:17 +0000
+Subject: [PATCH 1235/1344] HDFS-2589. Remove unnecessary hftp token fetch and renewal thread. Contributed by Daryn Sharp.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1214663 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit fda6370f93668b974c14de2801a0ef56ec0c3d3b)
+
+Author: Daryn Sharp
+Ref: CDH-4806
+---
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |   10 ++--
+ .../token/delegation/DelegationTokenRenewer.java   |   12 ++++-
+ .../security/token/TestDelegationTokenRenewer.java |   43 ++++++++++++++++++++
+ 3 files changed, 57 insertions(+), 8 deletions(-)
+ create mode 100644 src/test/org/apache/hadoop/hdfs/security/token/TestDelegationTokenRenewer.java
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index ceeea35..22efa64 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -82,12 +82,12 @@ public class HftpFileSystem extends FileSystem
+ 
+   static {
+     HttpURLConnection.setFollowRedirects(true);
+-    dtRenewer.start();
+   }
+ 
+   public static final Text TOKEN_KIND = new Text("HFTP delegation");
+   
+   protected UserGroupInformation ugi; 
++  private boolean remoteIsInsecure = false;
+   private URI hftpURI;
+ 
+   protected InetSocketAddress nnAddr;
+@@ -151,10 +151,6 @@ public class HftpFileSystem extends FileSystem
+     this.nnAddr = getNamenodeAddr(name);
+     this.nnSecureAddr = getNamenodeSecureAddr(name);
+     this.hftpURI = DFSUtil.createUri(name.getScheme(), nnAddr);
+-    
+-    if (UserGroupInformation.isSecurityEnabled()) {
+-      initDelegationToken();
+-    }
+   }
+   
+   protected void initDelegationToken() throws IOException {
+@@ -230,6 +226,7 @@ public class HftpFileSystem extends FileSystem
+             " using https.");
+             LOG.debug("error was ", e);
+             //Maybe the server is in unsecure mode (that's bad but okay)
++            remoteIsInsecure = true;
+             return null;
+           }
+           for (Token<? extends TokenIdentifier> t : c.getAllTokens()) {
+@@ -298,6 +295,9 @@ public class HftpFileSystem extends FileSystem
+     String tokenString = null;
+     if (UserGroupInformation.isSecurityEnabled()) {
+       synchronized (this) {
++        if (delegationToken == null && !remoteIsInsecure) {
++          initDelegationToken();
++        }    
+         if (delegationToken != null) {
+           tokenString = delegationToken.encodeToUrlString();
+           return (query + JspHelper.getDelegationTokenUrlParam(tokenString));
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java
+index 17c96d0..6e26ffc 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java
+@@ -24,7 +24,7 @@ import java.util.concurrent.DelayQueue;
+ import java.util.concurrent.Delayed;
+ import java.util.concurrent.TimeUnit;
+ 
+-import org.apache.hadoop.classification.InterfaceAudience;
++//import org.apache.hadoop.classification.InterfaceAudience;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+@@ -32,7 +32,7 @@ import org.apache.hadoop.security.token.TokenIdentifier;
+ /**
+  * A daemon thread that waits for the next file system to renew.
+  */
+-@InterfaceAudience.Private
++//@InterfaceAudience.Private
+ public class DelegationTokenRenewer<T extends FileSystem & DelegationTokenRenewer.Renewable>
+     extends Thread {
+   /** The renewable interface used by the renewer. */
+@@ -126,9 +126,15 @@ public class DelegationTokenRenewer<T extends FileSystem & DelegationTokenRenewe
+     setDaemon(true);
+   }
+ 
++  @Override
++  public void start() {
++    return; // lazy start when addRenewAction is actually called
++  }
++  
+   /** Add a renew action to the queue. */
+   public void addRenewAction(final T fs) {
+     queue.add(new RenewAction<T>(fs));
++    if (!isAlive()) super.start();
+   }
+ 
+   @Override
+@@ -148,4 +154,4 @@ public class DelegationTokenRenewer<T extends FileSystem & DelegationTokenRenewe
+       }
+     }
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/src/test/org/apache/hadoop/hdfs/security/token/TestDelegationTokenRenewer.java b/src/test/org/apache/hadoop/hdfs/security/token/TestDelegationTokenRenewer.java
+new file mode 100644
+index 0000000..2877337
+--- /dev/null
++++ b/src/test/org/apache/hadoop/hdfs/security/token/TestDelegationTokenRenewer.java
+@@ -0,0 +1,43 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.hdfs.security.token;
++
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import org.apache.hadoop.hdfs.HftpFileSystem;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenRenewer;
++import org.junit.Test;
++
++/**
++ * 
++ */
++public class TestDelegationTokenRenewer {
++
++  @Test
++  public void testLazyRenewerStartup() {
++    DelegationTokenRenewer<HftpFileSystem> dtr =
++        new DelegationTokenRenewer<HftpFileSystem>(HftpFileSystem.class);
++    assertFalse(dtr.isAlive());
++    dtr.start();
++    assertFalse(dtr.isAlive());
++    dtr.addRenewAction(null);
++    assertTrue(dtr.isAlive());
++  }
++}
+\ No newline at end of file
+-- 
+1.7.0.4
+

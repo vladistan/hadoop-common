@@ -1,0 +1,38 @@
+From 5fbb76241fe2596d60d2a521eca745db5f44065b Mon Sep 17 00:00:00 2001
+From: Owen O'Malley <omalley@apache.org>
+Date: Wed, 14 Sep 2011 15:58:51 +0000
+Subject: [PATCH 1216/1344] HDFS-2328. HFTP throws NPE if security is enabled locally, but not
+ remotely. (omalley)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1170698 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 8bcc11291205e956d2f884fbd0791e142a44e7a6)
+
+Author: Owen O'Malley
+Ref: CDH-4806
+---
+ .../org/apache/hadoop/hdfs/HftpFileSystem.java     |    9 ++++++---
+ 1 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+index d0e6712..5c4ebeb 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/HftpFileSystem.java
+@@ -181,9 +181,12 @@ public class HftpFileSystem extends FileSystem {
+       
+       //since we don't already have a token, go get one over https
+       if (delegationToken == null) {
+-        setDelegationToken(getDelegationToken(null));
+-        renewer.addTokenToRenew(this);
+-        LOG.debug("Created new DT for " + delegationToken.getService());
++        Token<?> newToken = getDelegationToken(null);
++        if (newToken != null) {
++          setDelegationToken(newToken);
++          renewer.addTokenToRenew(this);
++          LOG.debug("Created new DT for " + delegationToken.getService());
++        }
+       } else {
+         LOG.debug("Found existing DT for " + delegationToken.getService());        
+       }
+-- 
+1.7.0.4
+

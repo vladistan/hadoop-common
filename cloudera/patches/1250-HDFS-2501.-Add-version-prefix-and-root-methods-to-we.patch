@@ -1,0 +1,423 @@
+From 9d01b05b8d8ac4f31e1ad9bf05ebe834fb98cde4 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Wed, 26 Oct 2011 05:20:45 +0000
+Subject: [PATCH 1250/1344] HDFS-2501. Add version prefix and root methods to webhdfs.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1189029 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit f5bdc978ab57a4489b9131c4409baeec1b45c9dc)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../hadoop/hdfs/server/datanode/DataNode.java      |    2 +-
+ .../web/resources/DatanodeWebHdfsMethods.java      |   61 ++++++++++
+ .../hadoop/hdfs/server/namenode/NameNode.java      |    2 +-
+ .../web/resources/NamenodeWebHdfsMethods.java      |  119 ++++++++++++-------
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |    9 +-
+ .../hdfs/web/TestWebHdfsFileSystemContract.java    |   41 +++++++
+ 6 files changed, 184 insertions(+), 50 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+index 3af773b..3905641 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+@@ -516,7 +516,7 @@ public class DataNode extends Configured
+         DFSConfigKeys.DFS_WEBHDFS_ENABLED_DEFAULT)) {
+       infoServer.addJerseyResourcePackage(DatanodeWebHdfsMethods.class
+           .getPackage().getName() + ";" + Param.class.getPackage().getName(),
+-          "/" + WebHdfsFileSystem.PATH_PREFIX + "/*");
++          WebHdfsFileSystem.PATH_PREFIX + "/*");
+     }
+     this.infoServer.start();
+     // adjust info port
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+index 1197cb0..d20156b 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -76,9 +76,36 @@ import com.sun.jersey.spi.container.ResourceFilters;
+ public class DatanodeWebHdfsMethods {
+   public static final Log LOG = LogFactory.getLog(DatanodeWebHdfsMethods.class);
+ 
++  private static final UriFsPathParam ROOT = new UriFsPathParam("");
++
+   private @Context ServletContext context;
+   private @Context HttpServletResponse response;
+ 
++  /** Handle HTTP PUT request for the root. */
++  @PUT
++  @Path("/")
++  @Consumes({"*/*"})
++  @Produces({MediaType.APPLICATION_JSON})
++  public Response putRoot(
++      final InputStream in,
++      @Context final UserGroupInformation ugi,
++      @QueryParam(PutOpParam.NAME) @DefaultValue(PutOpParam.DEFAULT)
++          final PutOpParam op,
++      @QueryParam(PermissionParam.NAME) @DefaultValue(PermissionParam.DEFAULT)
++          final PermissionParam permission,
++      @QueryParam(OverwriteParam.NAME) @DefaultValue(OverwriteParam.DEFAULT)
++          final OverwriteParam overwrite,
++      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
++          final BufferSizeParam bufferSize,
++      @QueryParam(ReplicationParam.NAME) @DefaultValue(ReplicationParam.DEFAULT)
++          final ReplicationParam replication,
++      @QueryParam(BlockSizeParam.NAME) @DefaultValue(BlockSizeParam.DEFAULT)
++          final BlockSizeParam blockSize
++      ) throws IOException, InterruptedException {
++    return put(in, ugi, ROOT, op, permission, overwrite, bufferSize,
++        replication, blockSize);
++  }
++
+   /** Handle HTTP PUT request. */
+   @PUT
+   @Path("{" + UriFsPathParam.NAME + ":.*}")
+@@ -143,6 +170,22 @@ public class DatanodeWebHdfsMethods {
+     });
+   }
+ 
++  /** Handle HTTP POST request for the root for the root. */
++  @POST
++  @Path("/")
++  @Consumes({"*/*"})
++  @Produces({MediaType.APPLICATION_JSON})
++  public Response postRoot(
++      final InputStream in,
++      @Context final UserGroupInformation ugi,
++      @QueryParam(PostOpParam.NAME) @DefaultValue(PostOpParam.DEFAULT)
++          final PostOpParam op,
++      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
++          final BufferSizeParam bufferSize
++      ) throws IOException, InterruptedException {
++    return post(in, ugi, ROOT, op, bufferSize);
++  }
++
+   /** Handle HTTP POST request. */
+   @POST
+   @Path("{" + UriFsPathParam.NAME + ":.*}")
+@@ -194,6 +237,24 @@ public class DatanodeWebHdfsMethods {
+     });
+   }
+ 
++  /** Handle HTTP GET request for the root. */
++  @GET
++  @Path("/")
++  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
++  public Response getRoot(
++      @Context final UserGroupInformation ugi,
++      @QueryParam(GetOpParam.NAME) @DefaultValue(GetOpParam.DEFAULT)
++          final GetOpParam op,
++      @QueryParam(OffsetParam.NAME) @DefaultValue(OffsetParam.DEFAULT)
++          final OffsetParam offset,
++      @QueryParam(LengthParam.NAME) @DefaultValue(LengthParam.DEFAULT)
++          final LengthParam length,
++      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
++          final BufferSizeParam bufferSize
++      ) throws IOException, InterruptedException {
++    return get(ugi, ROOT, op, offset, length, bufferSize); 
++  }
++
+   /** Handle HTTP GET request. */
+   @GET
+   @Path("{" + UriFsPathParam.NAME + ":.*}")
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+index 3d44696..ae2de75 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NameNode.java
+@@ -408,7 +408,7 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
+                 //add SPNEGO authentication filter for webhdfs
+                 final String name = "SPNEGO";
+                 final String classname =  AuthFilter.class.getName();
+-                final String pathSpec = "/" + WebHdfsFileSystem.PATH_PREFIX + "/*";
++                final String pathSpec = WebHdfsFileSystem.PATH_PREFIX + "/*";
+                 Map<String, String> params = getAuthFilterParams(conf);
+                 defineFilter(webAppContext, name, classname, params,
+                     new String[]{pathSpec});
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index 89b1a81..d9044c9 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -96,6 +96,8 @@ import com.sun.jersey.spi.container.ResourceFilters;
+ public class NamenodeWebHdfsMethods {
+   public static final Log LOG = LogFactory.getLog(NamenodeWebHdfsMethods.class);
+ 
++  private static final UriFsPathParam ROOT = new UriFsPathParam("");
++
+   private static final ThreadLocal<String> REMOTE_ADDRESS = new ThreadLocal<String>(); 
+ 
+   /** @return the remote client address. */
+@@ -171,7 +173,7 @@ public class NamenodeWebHdfsMethods {
+     final String query = op.toQueryString()
+         + '&' + new UserParam(ugi) + delegationQuery
+         + Param.toSortedString("&", parameters);
+-    final String uripath = "/" + WebHdfsFileSystem.PATH_PREFIX + path;
++    final String uripath = WebHdfsFileSystem.PATH_PREFIX + path;
+ 
+     final URI uri = new URI("http", null, dn.getHostName(), dn.getInfoPort(),
+         uripath, query, null);
+@@ -180,6 +182,45 @@ public class NamenodeWebHdfsMethods {
+     }
+     return uri;
+   }
++  
++  /** Handle HTTP PUT request for the root. */
++  @PUT
++  @Path("/")
++  @Consumes({"*/*"})
++  @Produces({MediaType.APPLICATION_JSON})
++  public Response putRoot(
++      @Context final UserGroupInformation ugi,
++      @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
++          final DelegationParam delegation,
++      @QueryParam(PutOpParam.NAME) @DefaultValue(PutOpParam.DEFAULT)
++          final PutOpParam op,
++      @QueryParam(DestinationParam.NAME) @DefaultValue(DestinationParam.DEFAULT)
++          final DestinationParam destination,
++      @QueryParam(OwnerParam.NAME) @DefaultValue(OwnerParam.DEFAULT)
++          final OwnerParam owner,
++      @QueryParam(GroupParam.NAME) @DefaultValue(GroupParam.DEFAULT)
++          final GroupParam group,
++      @QueryParam(PermissionParam.NAME) @DefaultValue(PermissionParam.DEFAULT)
++          final PermissionParam permission,
++      @QueryParam(OverwriteParam.NAME) @DefaultValue(OverwriteParam.DEFAULT)
++          final OverwriteParam overwrite,
++      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
++          final BufferSizeParam bufferSize,
++      @QueryParam(ReplicationParam.NAME) @DefaultValue(ReplicationParam.DEFAULT)
++          final ReplicationParam replication,
++      @QueryParam(BlockSizeParam.NAME) @DefaultValue(BlockSizeParam.DEFAULT)
++          final BlockSizeParam blockSize,
++      @QueryParam(ModificationTimeParam.NAME) @DefaultValue(ModificationTimeParam.DEFAULT)
++          final ModificationTimeParam modificationTime,
++      @QueryParam(AccessTimeParam.NAME) @DefaultValue(AccessTimeParam.DEFAULT)
++          final AccessTimeParam accessTime,
++      @QueryParam(TokenArgumentParam.NAME) @DefaultValue(TokenArgumentParam.DEFAULT)
++          final TokenArgumentParam delegationTokenArgument
++      ) throws IOException, InterruptedException {
++    return put(ugi, delegation, ROOT, op, destination, owner, group,
++        permission, overwrite, bufferSize, replication, blockSize,
++        modificationTime, accessTime, delegationTokenArgument);
++  }
+ 
+   /** Handle HTTP PUT request. */
+   @PUT
+@@ -304,6 +345,23 @@ public class NamenodeWebHdfsMethods {
+     });
+   }
+ 
++  /** Handle HTTP POST request for the root. */
++  @POST
++  @Path("/")
++  @Consumes({"*/*"})
++  @Produces({MediaType.APPLICATION_JSON})
++  public Response postRoot(
++      @Context final UserGroupInformation ugi,
++      @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
++          final DelegationParam delegation,
++      @QueryParam(PostOpParam.NAME) @DefaultValue(PostOpParam.DEFAULT)
++          final PostOpParam op,
++      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
++          final BufferSizeParam bufferSize
++      ) throws IOException, InterruptedException {
++    return post(ugi, delegation, ROOT, op, bufferSize);
++  }
++
+   /** Handle HTTP POST request. */
+   @POST
+   @Path("{" + UriFsPathParam.NAME + ":.*}")
+@@ -355,52 +413,11 @@ public class NamenodeWebHdfsMethods {
+     });
+   }
+ 
+-  private static final UriFsPathParam ROOT = new UriFsPathParam("");
+-  
+-  /** Handle HTTP PUT request for root. */
+-  @PUT
+-  @Path("/")
+-  @Consumes({"*/*"})
+-  @Produces({MediaType.APPLICATION_JSON})
+-  public Response putRoot(
+-      @Context final UserGroupInformation ugi,
+-      @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
+-          final DelegationParam delegation,
+-      @QueryParam(PutOpParam.NAME) @DefaultValue(PutOpParam.DEFAULT)
+-          final PutOpParam op,
+-      @QueryParam(DestinationParam.NAME) @DefaultValue(DestinationParam.DEFAULT)
+-          final DestinationParam destination,
+-      @QueryParam(OwnerParam.NAME) @DefaultValue(OwnerParam.DEFAULT)
+-          final OwnerParam owner,
+-      @QueryParam(GroupParam.NAME) @DefaultValue(GroupParam.DEFAULT)
+-          final GroupParam group,
+-      @QueryParam(PermissionParam.NAME) @DefaultValue(PermissionParam.DEFAULT)
+-          final PermissionParam permission,
+-      @QueryParam(OverwriteParam.NAME) @DefaultValue(OverwriteParam.DEFAULT)
+-          final OverwriteParam overwrite,
+-      @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
+-          final BufferSizeParam bufferSize,
+-      @QueryParam(ReplicationParam.NAME) @DefaultValue(ReplicationParam.DEFAULT)
+-          final ReplicationParam replication,
+-      @QueryParam(BlockSizeParam.NAME) @DefaultValue(BlockSizeParam.DEFAULT)
+-          final BlockSizeParam blockSize,
+-      @QueryParam(ModificationTimeParam.NAME) @DefaultValue(ModificationTimeParam.DEFAULT)
+-          final ModificationTimeParam modificationTime,
+-      @QueryParam(AccessTimeParam.NAME) @DefaultValue(AccessTimeParam.DEFAULT)
+-          final AccessTimeParam accessTime,
+-      @QueryParam(TokenArgumentParam.NAME) @DefaultValue(TokenArgumentParam.DEFAULT)
+-          final TokenArgumentParam delegationTokenArgument
+-      ) throws IOException, InterruptedException {
+-    return put(ugi, delegation, ROOT, op, destination, owner, group,
+-        permission, overwrite, bufferSize, replication, blockSize,
+-        modificationTime, accessTime, delegationTokenArgument);
+-  }
+-
+   /** Handle HTTP GET request for the root. */
+   @GET
+   @Path("/")
+   @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+-  public Response root(
++  public Response getRoot(
+       @Context final UserGroupInformation ugi,
+       @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
+           final DelegationParam delegation,
+@@ -557,9 +574,23 @@ public class NamenodeWebHdfsMethods {
+     };
+   }
+ 
++  /** Handle HTTP DELETE request for the root. */
++  @DELETE
++  @Path("/")
++  @Produces(MediaType.APPLICATION_JSON)
++  public Response deleteRoot(
++      @Context final UserGroupInformation ugi,
++      @QueryParam(DeleteOpParam.NAME) @DefaultValue(DeleteOpParam.DEFAULT)
++          final DeleteOpParam op,
++      @QueryParam(RecursiveParam.NAME) @DefaultValue(RecursiveParam.DEFAULT)
++          final RecursiveParam recursive
++      ) throws IOException, InterruptedException {
++    return delete(ugi, ROOT, op, recursive);
++  }
++
+   /** Handle HTTP DELETE request. */
+   @DELETE
+-  @Path("{path:.*}")
++  @Path("{" + UriFsPathParam.NAME + ":.*}")
+   @Produces(MediaType.APPLICATION_JSON)
+   public Response delete(
+       @Context final UserGroupInformation ugi,
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 6d9c0e3..12c0994 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -28,7 +28,6 @@ import java.net.InetSocketAddress;
+ import java.net.URI;
+ import java.net.URISyntaxException;
+ import java.net.URL;
+-import java.security.PrivilegedExceptionAction;
+ import java.util.Map;
+ 
+ import org.apache.commons.logging.Log;
+@@ -58,7 +57,6 @@ import org.apache.hadoop.hdfs.server.namenode.SafeModeException;
+ import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
+ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+ import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
+-import org.apache.hadoop.hdfs.web.resources.TokenArgumentParam;
+ import org.apache.hadoop.hdfs.web.resources.DeleteOpParam;
+ import org.apache.hadoop.hdfs.web.resources.DestinationParam;
+ import org.apache.hadoop.hdfs.web.resources.GetOpParam;
+@@ -76,6 +74,7 @@ import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+ import org.apache.hadoop.hdfs.web.resources.RecursiveParam;
+ import org.apache.hadoop.hdfs.web.resources.RenewerParam;
+ import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
++import org.apache.hadoop.hdfs.web.resources.TokenArgumentParam;
+ import org.apache.hadoop.hdfs.web.resources.UserParam;
+ import org.apache.hadoop.io.Text;
+ import org.apache.hadoop.ipc.RemoteException;
+@@ -98,8 +97,10 @@ public class WebHdfsFileSystem extends FileSystem
+   public static final Log LOG = LogFactory.getLog(WebHdfsFileSystem.class);
+   /** File System URI: {SCHEME}://namenode:port/path/to/file */
+   public static final String SCHEME = "webhdfs";
++  /** WebHdfs version. */
++  public static final int VERSION = 1;
+   /** Http URI: http://namenode:port/{PATH_PREFIX}/path/to/file */
+-  public static final String PATH_PREFIX = SCHEME;
++  public static final String PATH_PREFIX = "/" + SCHEME + "/v" + VERSION;
+ 
+   /** SPNEGO authenticator */
+   private static final KerberosUgiAuthenticator AUTH = new KerberosUgiAuthenticator();
+@@ -272,7 +273,7 @@ public class WebHdfsFileSystem extends FileSystem
+   URL toUrl(final HttpOpParam.Op op, final Path fspath,
+       final Param<?,?>... parameters) throws IOException {
+     //initialize URI path and query
+-    final String path = "/" + PATH_PREFIX
++    final String path = PATH_PREFIX
+         + (fspath == null? "/": makeQualified(fspath).toUri().getPath());
+     final String query = op.toQueryString()
+         + '&' + new UserParam(ugi)
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+index d6a94eb..b52eb6c 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
++++ b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsFileSystemContract.java
+@@ -30,15 +30,19 @@ import java.security.PrivilegedExceptionAction;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.BlockLocation;
+ import org.apache.hadoop.fs.FSDataInputStream;
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.FileSystemContractBaseTest;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.MiniDFSCluster;
++import org.apache.hadoop.hdfs.web.resources.GetOpParam;
+ import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+ import org.apache.hadoop.security.AccessControlException;
+ import org.apache.hadoop.security.UserGroupInformation;
++import org.junit.Assert;
+ 
+ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+   private static final Configuration conf = new Configuration();
+@@ -236,4 +240,41 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
+       }
+     }
+   }
++
++  public void testRootDir() throws IOException {
++    final Path root = new Path("/");
++
++    final WebHdfsFileSystem webhdfs = (WebHdfsFileSystem)fs;
++    final URL url = webhdfs.toUrl(GetOpParam.Op.NULL, root);
++    WebHdfsFileSystem.LOG.info("null url=" + url);
++    Assert.assertTrue(url.toString().contains("v1"));
++
++    //test root permission
++    final FileStatus status = fs.getFileStatus(root);
++    assertTrue(status != null);
++    assertEquals(0777, status.getPermission().toShort());
++
++    //delete root 
++    assertFalse(fs.delete(root, true));
++
++    //create file using root path 
++    try {
++      final FSDataOutputStream out = fs.create(root);
++      out.write(1);
++      out.close();
++      fail();
++    } catch(IOException e) {
++      WebHdfsFileSystem.LOG.info("This is expected.", e);
++    }
++
++    //open file using root path 
++    try {
++      final FSDataInputStream in = fs.open(root);
++      in.read();
++      fail();
++      fail();
++    } catch(IOException e) {
++      WebHdfsFileSystem.LOG.info("This is expected.", e);
++    }
++  }
+ }
+-- 
+1.7.0.4
+

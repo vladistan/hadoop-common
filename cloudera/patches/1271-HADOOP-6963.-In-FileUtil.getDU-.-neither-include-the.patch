@@ -1,0 +1,107 @@
+From 5fa17c6c25274bb2982dd32200666530da4c05ab Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Thu, 5 Apr 2012 19:48:04 +0000
+Subject: [PATCH 1271/1344] HADOOP-6963. In FileUtil.getDU(..), neither include the size of directories nor follow symbolic links.  Contributed by Ravi Prakash
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1310039 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 2b0a64b4fee123c6aa3d35db4379d5a59901c2b9)
+
+Author: Ravi Prakash
+Ref: CDH-4806
+(cherry picked from commit 3b0174399ba8dbcae2e05f376b0a081c902a2004)
+---
+ ivy.xml                                         |    5 +++++
+ ivy/libraries.properties                        |    2 +-
+ src/core/org/apache/hadoop/fs/FileUtil.java     |   11 +++++++++--
+ src/test/org/apache/hadoop/fs/TestFileUtil.java |   16 ++++++++++++++++
+ 4 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/ivy.xml b/ivy.xml
+index 4d2f4a6..b2a1c05 100644
+--- a/ivy.xml
++++ b/ivy.xml
+@@ -85,6 +85,11 @@
+       rev="${commons-cli.version}"
+       conf="client->default"/>
+ 
++    <dependency org="commons-io"
++      name="commons-io"
++      rev="${commons-io.version}"
++      conf="client->default"/>
++
+     <dependency org="checkstyle"
+       name="checkstyle"
+       rev="${checkstyle.version}"
+diff --git a/ivy/libraries.properties b/ivy/libraries.properties
+index 17d7b68..84c0517 100644
+--- a/ivy/libraries.properties
++++ b/ivy/libraries.properties
+@@ -33,7 +33,7 @@ commons-logging.version=1.0.4
+ commons-logging-api.version=1.0.4
+ commons-el.version=1.0
+ commons-fileupload.version=1.2
+-commons-io.version=1.4
++commons-io.version=2.1
+ commons-net.version=3.1
+ core.version=3.1.1
+ coreplugin.version=1.3.2
+diff --git a/src/core/org/apache/hadoop/fs/FileUtil.java b/src/core/org/apache/hadoop/fs/FileUtil.java
+index 53bcd41..5ceef22 100644
+--- a/src/core/org/apache/hadoop/fs/FileUtil.java
++++ b/src/core/org/apache/hadoop/fs/FileUtil.java
+@@ -442,11 +442,18 @@ public class FileUtil {
+     if (!dir.isDirectory()) {
+       return dir.length();
+     } else {
+-      size = dir.length();
+       File[] allFiles = dir.listFiles();
+       if(allFiles != null) {
+         for (int i = 0; i < allFiles.length; i++) {
+-           size = size + getDU(allFiles[i]);
++          boolean isSymLink;
++          try {
++            isSymLink = org.apache.commons.io.FileUtils.isSymlink(allFiles[i]);
++          } catch(IOException ioe) {
++            isSymLink = true;
++          }
++          if(!isSymLink) {
++            size += getDU(allFiles[i]);
++          }
+         }
+       }
+       return size;
+diff --git a/src/test/org/apache/hadoop/fs/TestFileUtil.java b/src/test/org/apache/hadoop/fs/TestFileUtil.java
+index ca6f206..27c807b 100644
+--- a/src/test/org/apache/hadoop/fs/TestFileUtil.java
++++ b/src/test/org/apache/hadoop/fs/TestFileUtil.java
+@@ -78,6 +78,9 @@ public class TestFileUtil {
+     File linkDir = new File(del, "tmpDir");
+     FileUtil.symLink(tmp.toString(), linkDir.toString());
+     Assert.assertEquals(5, del.listFiles().length);
++
++    // create a cycle using symlinks. Cycles should be handled
++    FileUtil.symLink(del.toString(), del.toString() + "/" + DIR + "1/cycle");
+   }
+ 
+   @After
+@@ -303,4 +306,17 @@ public class TestFileUtil {
+       //Expected an IOException
+     }
+   }
++
++  /**
++   * Test that getDU is able to handle cycles caused due to symbolic links
++   * and that directory sizes are not added to the final calculated size
++   * @throws IOException
++   */
++  @Test
++  public void testGetDU() throws IOException {
++    setupDirs();
++
++    long du = FileUtil.getDU(TEST_DIR);
++    Assert.assertEquals(du, 0);
++  }
+ }
+-- 
+1.7.0.4
+

@@ -29,13 +29,8 @@ import java.io.IOException;
 public interface Decompressor {
   /**
    * Sets input data for decompression. 
-   * This should be called if and only if {@link #needsInput()} returns 
+   * This should be called whenever #needsInput() returns 
    * <code>true</code> indicating that more input data is required.
-   * (Both native and non-native versions of various Decompressors require
-   * that the data passed in via <code>b[]</code> remain unmodified until
-   * the caller is explicitly notified--via {@link #needsInput()}--that the
-   * buffer may be safely modified.  With this requirement, an extra
-   * buffer-copy can be avoided.)
    * 
    * @param b Input data
    * @param off Start offset
@@ -45,12 +40,10 @@ public interface Decompressor {
   
   /**
    * Returns true if the input data buffer is empty and 
-   * {@link #setInput(byte[], int, int)} should be called to
-   * provide more input. 
+   * #setInput() should be called to provide more input. 
    * 
    * @return <code>true</code> if the input data buffer is empty and 
-   * {@link #setInput(byte[], int, int)} should be called in
-   * order to provide more input.
+   * #setInput() should be called in order to provide more input.
    */
   public boolean needsInput();
   
@@ -71,9 +64,9 @@ public interface Decompressor {
   public boolean needsDictionary();
 
   /**
-   * Returns true if the end of the decompressed 
+   * Returns true if the end of the compressed 
    * data output stream has been reached.
-   * @return <code>true</code> if the end of the decompressed
+   * @return <code>true</code> if the end of the compressed
    * data output stream has been reached.
    */
   public boolean finished();
@@ -81,8 +74,8 @@ public interface Decompressor {
   /**
    * Fills specified buffer with uncompressed data. Returns actual number
    * of bytes of uncompressed data. A return value of 0 indicates that
-   * {@link #needsInput()} should be called in order to determine if more
-   * input data is required.
+   * #needsInput() should be called in order to determine if more input
+   * data is required.
    * 
    * @param b Buffer for the compressed data
    * @param off Start offset of the data
@@ -91,20 +84,12 @@ public interface Decompressor {
    * @throws IOException
    */
   public int decompress(byte[] b, int off, int len) throws IOException;
-
+  
   /**
-   * Returns the number of bytes remaining in the compressed-data buffer;
-   * typically called after the decompressor has finished decompressing
-   * the current gzip stream (a.k.a. "member").
-   */
-  public int getRemaining();
-
-  /**
-   * Resets decompressor and input and output buffers so that a new set of
-   * input data can be processed.
+   * Resets decompressor so that a new set of input data can be processed.
    */
   public void reset();
-
+  
   /**
    * Closes the decompressor and discards any unprocessed input.
    */

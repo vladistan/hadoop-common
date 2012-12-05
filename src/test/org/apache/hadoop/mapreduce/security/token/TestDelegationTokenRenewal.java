@@ -20,7 +20,9 @@ package org.apache.hadoop.mapreduce.security.token;
 
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -40,6 +42,7 @@ import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.security.token.TokenRenewer;
@@ -102,17 +105,19 @@ public class TestDelegationTokenRenewal {
   }
 
   private static Configuration conf;
+  private static String trackerService = "localhost:0";
  
   @BeforeClass
   public static void setUp() throws Exception {
     conf = new Configuration();
+    conf.set("mapred.job.tracker", trackerService);
     
     // create a fake FileSystem (MyFS) and assosiate it
     // with "hdfs" schema.
     InetAddress iaddr = InetAddress.getByName("localhost");
-    String dnsName = iaddr.getCanonicalHostName();
-    final URI uri = new URI (DelegationTokenRenewal.SCHEME + "://" + dnsName+":"+"0");
-    
+    String localhostDnsName = iaddr.getCanonicalHostName();
+    URI uri = new URI(DelegationTokenRenewal.SCHEME+"://" + localhostDnsName + ":0");
+    System.out.println("scheme is : " + uri.getScheme());
     conf.setClass("fs." + uri.getScheme() + ".impl", MyFS.class, DistributedFileSystem.class);
     FileSystem.setDefaultUri(conf, uri);
     LOG.info("filesystem uri = " + FileSystem.getDefaultUri(conf).toString());
@@ -220,6 +225,30 @@ public class TestDelegationTokenRenewal {
     return token1;
   }
   
+  @Test 
+  public void testLocalMRTokenRenewal() throws IOException {
+    String user = UserGroupInformation.getLoginUser().getUserName();
+    
+    DelegationTokenIdentifier ident = new DelegationTokenIdentifier(
+        new Text(user), new Text(user), null);
+    Token<?> t = new Token<DelegationTokenIdentifier>(
+        ident.getBytes(),
+        new byte[]{},
+        org.apache.hadoop.mapreduce.security.token.delegation.DelegationTokenIdentifier.MAPREDUCE_DELEGATION_KIND,
+        new Text("service"));
+    assertTrue(t.isManaged());
+    
+    ident = new DelegationTokenIdentifier(
+        new Text(user), new Text(user+"-is-not-me"), null);
+    t = new Token<DelegationTokenIdentifier>(
+        ident.getBytes(),
+        new byte[]{},
+        org.apache.hadoop.mapreduce.security.token.delegation.DelegationTokenIdentifier.MAPREDUCE_DELEGATION_KIND,
+        new Text("service"));
+    
+    assertFalse(t.isManaged());
+    
+  }
   
   /**
    * Basic idea of the test:

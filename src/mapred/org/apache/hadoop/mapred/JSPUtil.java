@@ -18,7 +18,6 @@
 package org.apache.hadoop.mapred;
 
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.security.PrivilegedExceptionAction;
 import java.util.Collection;
@@ -26,6 +25,7 @@ import java.util.Date;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.io.UnsupportedEncodingException;
 
 import javax.servlet.RequestDispatcher;
 import javax.servlet.ServletException;
@@ -264,11 +264,14 @@ class JSPUtil {
     boolean isModifiable = label.equals("Running") 
                                 && privateActionsAllowed(conf);
     StringBuffer sb = new StringBuffer();
-    sb.append("<table border=\"1\" cellpadding=\"5\" cellspacing=\"0\" class=\"sortable\">\n");
-
+    
+    sb.append("<table class=\"datatable\">\n");
     if (jobs.size() > 0) {
       if (isModifiable) {
         sb.append("<form action=\"/jobtracker.jsp\" onsubmit=\"return confirmAction();\" method=\"POST\">");
+      }
+      sb.append("<thead>");
+      if (isModifiable) {
         sb.append("<tr>");
         sb.append("<td><input type=\"Button\" onclick=\"selectAll()\" " +
         		"value=\"Select All\" id=\"checkEm\"></td>");
@@ -290,24 +293,26 @@ class JSPUtil {
         sb.append("</nobr></td>");
         sb.append("<td colspan=\"10\">&nbsp;</td>");
         sb.append("</tr>");
-        sb.append("<td>&nbsp;</td>");
-      } else {
-        sb.append("<tr>");
       }
+      sb.append("<tr>");
 
-      sb.append("<td><b>Jobid</b></td><td><b>Priority" +
-      		"</b></td><td><b>User</b></td>");
-      sb.append("<td><b>Name</b></td>");
-      sb.append("<td><b>Map % Complete</b></td>");
-      sb.append("<td><b>Map Total</b></td>");
-      sb.append("<td><b>Maps Completed</b></td>");
-      sb.append("<td><b>Reduce % Complete</b></td>");
-      sb.append("<td><b>Reduce Total</b></td>");
-      sb.append("<td><b>Reduces Completed</b></td>");
-      sb.append("<td><b>Job Scheduling Information</b></td>");
+      if (isModifiable) {
+        sb.append("<td>&nbsp;</td>");
+      }
+      sb.append("<th>");
+      sb.append("<b>Jobid</b></th><th><b>Priority" +
+      		"</b></th><th><b>User</b></th>");
+      sb.append("<th><b>Name</b></th>");
+      sb.append("<th><b>Map % Complete</b></th>");
+      sb.append("<th><b>Map Total</b></th>");
+      sb.append("<th><b>Maps Completed</b></th>");
+      sb.append("<th><b>Reduce % Complete</b></th>");
+      sb.append("<th><b>Reduce Total</b></th>");
+      sb.append("<th><b>Reduces Completed</b></th>");
+      sb.append("<th><b>Job Scheduling Information</b></th>");
       sb.append("<td><b>Diagnostic Info </b></td>");
       sb.append("</tr>\n");
-
+      sb.append("</thead><tbody>");
       for (Iterator<JobInProgress> it = jobs.iterator(); it.hasNext(); ++rowId) {
         JobInProgress job = it.next();
         JobProfile profile = job.getProfile();
@@ -348,8 +353,10 @@ class JSPUtil {
             + ServletUtil.percentageGraph(status.reduceProgress() * 100, 80)
             + "</td><td>" + desiredReduces + "</td><td> " + completedReduces 
             + "</td><td>" + schedulingInfo
-            + "</td><td>" + diagnosticInfo + "</td></tr>\n");
+            + "</td><td>" + diagnosticInfo
+            + "</td></tr>\n");
       }
+      sb.append("</tbody>");
       if (isModifiable) {
         sb.append("</form>\n");
       }
@@ -367,7 +374,7 @@ class JSPUtil {
     throws IOException {
 
     StringBuffer sb = new StringBuffer();
-    sb.append("<table border=\"1\" cellpadding=\"5\" cellspacing=\"0\">\n");
+    sb.append("<table border=\"1\" cellpadding=\"5\" cellspacing=\"0\" class=\"sortable\">\n");
 
     Iterator<RetireJobInfo> iterator = 
       tracker.retireJobs.getAll().descendingIterator();
@@ -405,8 +412,7 @@ class JSPUtil {
             "<td id=\"job_" + rowId + "\">" + 
             
               (historyFileUrl == null ? "" :
-              "<a href=\"" + JobHistoryServer.getHistoryUrlPrefix(tracker.conf) +
-                  "/jobdetailshistory.jsp?logFile=" + historyFileUrl + "\">") +
+              "<a href=\"jobdetailshistory.jsp?logFile=" + historyFileUrl + "\">") + 
               
               info.status.getJobId() + "</a></td>" +
             
@@ -443,7 +449,13 @@ class JSPUtil {
   }
 
   static Path getJobConfFilePath(Path logFile) {
-    return JobHistory.confPathFromLogFilePath(logFile);
+    String[] jobDetails = logFile.getName().split("_");
+    String jobId = getJobID(logFile.getName());
+    String jobUniqueString =
+        jobDetails[0] + "_" + jobDetails[1] + "_" + jobId;
+    Path logDir = logFile.getParent();
+    Path jobFilePath = new Path(logDir, jobUniqueString + "_conf.xml");
+    return jobFilePath;
   }
 
   /**
@@ -452,11 +464,12 @@ class JSPUtil {
    * 
    * @param logFile
    * @param fs
+   * @param jobTracker
    * @return JobInfo
    * @throws IOException
    */
   static JobInfo getJobInfo(Path logFile, FileSystem fs,
-      JobConf jobConf, ACLsManager acLsManager, String user) throws IOException {
+      JobTracker jobTracker, String user) throws IOException {
     String jobid = getJobID(logFile.getName());
     JobInfo jobInfo = null;
     synchronized(jobHistoryCache) {
@@ -470,7 +483,7 @@ class JSPUtil {
       }
       jobHistoryCache.put(jobid, jobInfo);
       int CACHE_SIZE = 
-        jobConf.getInt("mapred.job.tracker.jobhistory.lru.cache.size", 5);
+        jobTracker.conf.getInt("mapred.job.tracker.jobhistory.lru.cache.size", 5);
       if (jobHistoryCache.size() > CACHE_SIZE) {
         Iterator<Map.Entry<String, JobInfo>> it = 
           jobHistoryCache.entrySet().iterator();
@@ -488,7 +501,7 @@ class JSPUtil {
     }
 
     // Authorize the user for view access of this job
-    acLsManager.checkAccess(jobid, currentUser,
+    jobTracker.getACLsManager().checkAccess(jobid, currentUser,
         jobInfo.getJobQueue(), Operation.VIEW_JOB_DETAILS,
         jobInfo.get(Keys.USER), jobInfo.getJobACLs().get(JobACL.VIEW_JOB));
 
@@ -500,6 +513,7 @@ class JSPUtil {
    * 
    * @param request
    * @param response
+   * @param jobTracker
    * @param fs
    * @param logFile
    * @return the job if authorization is disabled or if the authorization checks
@@ -509,46 +523,46 @@ class JSPUtil {
    * @throws ServletException
    */
   static JobInfo checkAccessAndGetJobInfo(HttpServletRequest request,
-      HttpServletResponse response, final JobConf jobConf,
-      final ACLsManager acLsManager, final FileSystem fs,
-      final Path logFile) throws IOException,
+      HttpServletResponse response, final JobTracker jobTracker,
+      final FileSystem fs, final Path logFile) throws IOException,
       InterruptedException, ServletException {
     String jobid = getJobID(logFile.getName());
     String user = request.getRemoteUser();
     JobInfo job = null;
     if (user != null) {
       try {
-        job = JSPUtil.getJobInfo(logFile, fs, jobConf, acLsManager, user);
+        job = JSPUtil.getJobInfo(logFile, fs, jobTracker, user);
       } catch (AccessControlException e) {
-        String trackerAddress = jobConf.get("mapred.job.tracker.http.address");
         String errMsg =
             String.format(
                 "User %s failed to view %s!<br><br>%s"
                     + "<hr>"
                     + "<a href=\"jobhistory.jsp\">Go back to JobHistory</a><br>"
-                    + "<a href=\"http://" + trackerAddress +
-                    "/jobtracker.jsp\">Go back to JobTracker</a>",
+                    + "<a href=\"jobtracker.jsp\">Go back to JobTracker</a>",
                 user, jobid, e.getMessage());
         JSPUtil.setErrorAndForward(errMsg, request, response);
         return null;
       }
     } else {
       // no authorization needed
-      job = JSPUtil.getJobInfo(logFile, fs, jobConf, acLsManager, null);
+      job = JSPUtil.getJobInfo(logFile, fs, jobTracker, null);
     }
     return job;
   }
 
   static String getJobID(String historyFileName) {
-    return JobHistory.jobIdNameFromLogFileName(historyFileName);
+    String[] jobDetails = historyFileName.split("_");
+    return jobDetails[2] + "_" + jobDetails[3] + "_" + jobDetails[4];
   }
 
   static String getUserName(String historyFileName) {
-    return JobHistory.userNameFromLogFileName(historyFileName);
+    String[] jobDetails = historyFileName.split("_");
+    return jobDetails[5];
   }
 
   static String getJobName(String historyFileName) {
-    return JobHistory.jobNameFromLogFileName(historyFileName);
+    String[] jobDetails = historyFileName.split("_");
+    return jobDetails[6];
   }
 
   /**
@@ -562,38 +576,21 @@ class JSPUtil {
       Map<JobACL, AccessControlList> jobAcls, JspWriter out)
       throws IOException {
     if (tracker.areACLsEnabled()) {
-      printJobACLsInternal(jobAcls, out);
-    }
-    else {
-      out.print("<b>Job-ACLs: " + new AccessControlList("*").toString()
-          + "</b><br>");
-    }
-  }
-
-  static void printJobACLs(JobConf conf,
-      Map<JobACL, AccessControlList> jobAcls, JspWriter out)
-      throws IOException {
-    if (conf.getBoolean(JobConf.MR_ACLS_ENABLED, false)) {
-      printJobACLsInternal(jobAcls, out);
-    }
-    else {
-      out.print("<b>Job-ACLs: " + new AccessControlList("*").toString()
-          + "</b><br>");
-    }
-  }
-
-  private static void printJobACLsInternal(Map<JobACL, AccessControlList> jobAcls,
-                                           JspWriter out) throws IOException {
-    // Display job-view-acls and job-modify-acls configured for this job
-    out.print("<b>Job-ACLs:</b><br>");
-    for (JobACL aclName : JobACL.values()) {
-      String aclConfigName = aclName.getAclName();
-      AccessControlList aclConfigured = jobAcls.get(aclName);
-      if (aclConfigured != null) {
-        String aclStr = aclConfigured.toString();
-        out.print("&nbsp;&nbsp;&nbsp;&nbsp;" + aclConfigName + ": "
-            + aclStr + "<br>");
+      // Display job-view-acls and job-modify-acls configured for this job
+      out.print("<b>Job-ACLs:</b><br>");
+      for (JobACL aclName : JobACL.values()) {
+        String aclConfigName = aclName.getAclName();
+        AccessControlList aclConfigured = jobAcls.get(aclName);
+        if (aclConfigured != null) {
+          String aclStr = aclConfigured.toString();
+          out.print("&nbsp;&nbsp;&nbsp;&nbsp;" + aclConfigName + ": "
+              + aclStr + "<br>");
+        }
       }
+    }
+    else {
+      out.print("<b>Job-ACLs: " + new AccessControlList("*").toString()
+          + "</b><br>");
     }
   }
 

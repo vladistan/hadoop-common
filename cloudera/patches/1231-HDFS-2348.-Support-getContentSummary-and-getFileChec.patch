@@ -1,0 +1,522 @@
+From c03aa26bb5ebedfef67cc6f84376d7d44292c142 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Sat, 1 Oct 2011 04:50:52 +0000
+Subject: [PATCH 1231/1344] HDFS-2348. Support getContentSummary and getFileChecksum in webhdfs.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1177907 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit ee18f6d90403682cedd6c3985e51b71b5b43c8dd)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ src/hdfs/org/apache/hadoop/hdfs/DFSClient.java     |    2 +-
+ .../web/resources/DatanodeWebHdfsMethods.java      |   14 +++-
+ .../web/resources/NamenodeWebHdfsMethods.java      |   17 ++++-
+ src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java  |   77 +++++++++++++++++++-
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |   22 ++++++-
+ .../hadoop/hdfs/web/resources/GetOpParam.java      |    2 +
+ .../hadoop/hdfs/TestDistributedFileSystem.java     |   67 +++++++++++++++---
+ src/test/org/apache/hadoop/hdfs/TestQuota.java     |   28 ++++++-
+ 8 files changed, 207 insertions(+), 22 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+index ff913ec..c2dcf4d 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/DFSClient.java
+@@ -976,7 +976,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
+    * @return The checksum 
+    * @see DistributedFileSystem#getFileChecksum(Path)
+    */
+-  MD5MD5CRC32FileChecksum getFileChecksum(String src) throws IOException {
++  public MD5MD5CRC32FileChecksum getFileChecksum(String src) throws IOException {
+     checkOpen();
+     return getFileChecksum(src, namenode, socketFactory, socketTimeout, connectToDnViaHostname);    
+   }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+index b1eff14..7ca2a5d 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -44,10 +44,12 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+ import org.apache.hadoop.hdfs.DFSClient;
+ import org.apache.hadoop.hdfs.DFSClient.DFSDataInputStream;
+ import org.apache.hadoop.hdfs.server.datanode.DataNode;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
++import org.apache.hadoop.hdfs.web.JsonUtil;
+ import org.apache.hadoop.hdfs.web.ParamFilter;
+ import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+@@ -212,13 +214,13 @@ public class DatanodeWebHdfsMethods {
+ 
+     final String fullpath = path.getAbsolutePath();
+     final DataNode datanode = (DataNode)context.getAttribute("datanode");
++    final Configuration conf = new Configuration(datanode.getConf());
++    final InetSocketAddress nnRpcAddr = NameNode.getAddress(conf);
++    final DFSClient dfsclient = new DFSClient(nnRpcAddr, conf);
+ 
+     switch(op.getValue()) {
+     case OPEN:
+     {
+-      final Configuration conf = new Configuration(datanode.getConf());
+-      final InetSocketAddress nnRpcAddr = NameNode.getAddress(conf);
+-      final DFSClient dfsclient = new DFSClient(nnRpcAddr, conf);
+       final int b = bufferSize.getValue(conf);
+       final DFSDataInputStream in = new DFSClient.DFSDataInputStream(
+           dfsclient.open(fullpath, b, true, null));
+@@ -237,6 +239,12 @@ public class DatanodeWebHdfsMethods {
+       };
+       return Response.ok(streaming).type(MediaType.APPLICATION_OCTET_STREAM).build();
+     }
++    case GETFILECHECKSUM:
++    {
++      final MD5MD5CRC32FileChecksum checksum = dfsclient.getFileChecksum(fullpath);
++      final String js = JsonUtil.toJsonString(checksum);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++    }
+     default:
+       throw new UnsupportedOperationException(op + " is not supported");
+     }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index bd6717d..cfdd46d 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -45,6 +45,7 @@ import javax.ws.rs.core.StreamingOutput;
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.fs.ContentSummary;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+@@ -106,7 +107,9 @@ public class NamenodeWebHdfsMethods {
+   private static DatanodeInfo chooseDatanode(final NameNode namenode,
+       final String path, final HttpOpParam.Op op, final long openOffset
+       ) throws IOException {
+-    if (op == GetOpParam.Op.OPEN || op == PostOpParam.Op.APPEND) {
++    if (op == GetOpParam.Op.OPEN
++        || op == GetOpParam.Op.GETFILECHECKSUM
++        || op == PostOpParam.Op.APPEND) {
+       final HdfsFileStatus status = namenode.getFileInfo(path);
+       final long len = status.getLen();
+       if (op == GetOpParam.Op.OPEN && (openOffset < 0L || openOffset >= len)) {
+@@ -411,6 +414,18 @@ public class NamenodeWebHdfsMethods {
+       final StreamingOutput streaming = getListingStream(namenode, fullpath);
+       return Response.ok(streaming).type(MediaType.APPLICATION_JSON).build();
+     }
++    case GETCONTENTSUMMARY:
++    {
++      final ContentSummary contentsummary = namenode.getContentSummary(fullpath);
++      final String js = JsonUtil.toJsonString(contentsummary);
++      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++    }
++    case GETFILECHECKSUM:
++    {
++      final URI uri = redirectURI(namenode, ugi, delegation, fullpath,
++          op.getValue(), -1L);
++      return Response.temporaryRedirect(uri).build();
++    }
+     case GETDELEGATIONTOKEN:
+     {
+       final Token<? extends TokenIdentifier> token = generateDelegationToken(
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+index 1beed30..31b777c 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/JsonUtil.java
+@@ -17,7 +17,8 @@
+  */
+ package org.apache.hadoop.hdfs.web;
+ 
+-import java.io.DataOutput;
++import java.io.ByteArrayInputStream;
++import java.io.DataInputStream;
+ import java.io.IOException;
+ import java.util.ArrayList;
+ import java.util.Collections;
+@@ -25,6 +26,8 @@ import java.util.List;
+ import java.util.Map;
+ import java.util.TreeMap;
+ 
++import org.apache.hadoop.fs.ContentSummary;
++import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSUtil;
+ import org.apache.hadoop.hdfs.protocol.Block;
+@@ -35,8 +38,7 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
+ import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+-import org.apache.hadoop.io.Text;
+-import org.apache.hadoop.io.WritableUtils;
++import org.apache.hadoop.io.MD5Hash;
+ import org.apache.hadoop.ipc.RemoteException;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.security.token.TokenIdentifier;
+@@ -381,4 +383,73 @@ public class JsonUtil {
+         (Object[])JSON.parse((String) m.get("locatedBlocks")));
+     return new LocatedBlocks(fileLength, locatedBlocks, isUnderConstruction);
+   }
++
++  /** Convert a ContentSummary to a Json string. */
++  public static String toJsonString(final ContentSummary contentsummary
++      ) throws IOException {
++    if (contentsummary == null) {
++      return null;
++    }
++
++    final Map<String, Object> m = jsonMap.get();
++    m.put("length", contentsummary.getLength());
++    m.put("fileCount", contentsummary.getFileCount());
++    m.put("directoryCount", contentsummary.getDirectoryCount());
++    m.put("quota", contentsummary.getQuota());
++    m.put("spaceConsumed", contentsummary.getSpaceConsumed());
++    m.put("spaceQuota", contentsummary.getSpaceQuota());
++    return JSON.toString(m);
++  }
++
++  /** Convert a Json map to a ContentSummary. */
++  public static ContentSummary toContentSummary(final Map<String, Object> m
++      ) throws IOException {
++    if (m == null) {
++      return null;
++    }
++
++    final long length = (Long)m.get("length");
++    final long fileCount = (Long)m.get("fileCount");
++    final long directoryCount = (Long)m.get("directoryCount");
++    final long quota = (Long)m.get("quota");
++    final long spaceConsumed = (Long)m.get("spaceConsumed");
++    final long spaceQuota = (Long)m.get("spaceQuota");
++
++    return new ContentSummary(length, fileCount, directoryCount,
++        quota, spaceConsumed, spaceQuota);
++  }
++
++  /** Convert a MD5MD5CRC32FileChecksum to a Json string. */
++  public static String toJsonString(final MD5MD5CRC32FileChecksum checksum
++      ) throws IOException {
++    if (checksum == null) {
++      return null;
++    }
++
++    final Map<String, Object> m = jsonMap.get();
++    final byte[] bytes = checksum.getBytes();
++    final DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes));
++    final int bytesPerCRC = in.readInt();
++    final long crcPerBlock = in.readLong();
++    final MD5Hash md5 = MD5Hash.read(in);
++    m.put("bytesPerCRC", bytesPerCRC);
++    m.put("crcPerBlock", crcPerBlock);
++    m.put("md5", "" + md5);
++    return JSON.toString(m);
++  }
++
++  /** Convert a Json map to a MD5MD5CRC32FileChecksum. */
++  public static MD5MD5CRC32FileChecksum toMD5MD5CRC32FileChecksum(
++      final Map<String, Object> m) throws IOException {
++    if (m == null) {
++      return null;
++    }
++
++    final int bytesPerCRC = (int)(long)(Long)m.get("bytesPerCRC");
++    final long crcPerBlock = (Long)m.get("crcPerBlock");
++    final String md5 = (String)m.get("md5");
++
++    return new MD5MD5CRC32FileChecksum(bytesPerCRC, crcPerBlock,
++        new MD5Hash(md5));
++  }
+ }
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 56b7c77..7fdd639 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -25,15 +25,16 @@ import java.io.InputStream;
+ import java.io.InputStreamReader;
+ import java.net.HttpURLConnection;
+ import java.net.URI;
+-import java.net.URISyntaxException;
+ import java.net.URL;
+ import java.util.Map;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.BlockLocation;
++import org.apache.hadoop.fs.ContentSummary;
+ import org.apache.hadoop.fs.FSDataInputStream;
+ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.FileStatus;
++import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.ByteRangeInputStream;
+@@ -424,4 +425,23 @@ public class WebHdfsFileSystem extends HftpFileSystem {
+         new LengthParam(length));
+     return DFSUtil.locatedBlocks2Locations(JsonUtil.toLocatedBlocks(m));
+   }
++
++  @Override
++  public ContentSummary getContentSummary(final Path p) throws IOException {
++    statistics.incrementReadOps(1);
++
++    final HttpOpParam.Op op = GetOpParam.Op.GETCONTENTSUMMARY;
++    final Map<String, Object> m = run(op, p);
++    return JsonUtil.toContentSummary(m);
++  }
++
++  @Override
++  public MD5MD5CRC32FileChecksum getFileChecksum(final Path p
++      ) throws IOException {
++    statistics.incrementReadOps(1);
++  
++    final HttpOpParam.Op op = GetOpParam.Op.GETFILECHECKSUM;
++    final Map<String, Object> m = run(op, p);
++    return JsonUtil.toMD5MD5CRC32FileChecksum(m);
++  }
+ }
+\ No newline at end of file
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
+index d547f1b..cab71c9 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/GetOpParam.java
+@@ -28,6 +28,8 @@ public class GetOpParam extends HttpOpParam<GetOpParam.Op> {
+ 
+     GETFILESTATUS(HttpURLConnection.HTTP_OK),
+     LISTSTATUS(HttpURLConnection.HTTP_OK),
++    GETCONTENTSUMMARY(HttpURLConnection.HTTP_OK),
++    GETFILECHECKSUM(HttpURLConnection.HTTP_OK),
+ 
+     GETDELEGATIONTOKEN(HttpURLConnection.HTTP_OK),
+ 
+diff --git a/src/test/org/apache/hadoop/hdfs/TestDistributedFileSystem.java b/src/test/org/apache/hadoop/hdfs/TestDistributedFileSystem.java
+index 56e5b78..de3a21f 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestDistributedFileSystem.java
++++ b/src/test/org/apache/hadoop/hdfs/TestDistributedFileSystem.java
+@@ -25,6 +25,7 @@ import static org.junit.Assert.fail;
+ 
+ import java.io.IOException;
+ import java.net.URI;
++import java.security.PrivilegedExceptionAction;
+ import java.util.Random;
+ 
+ import org.apache.commons.logging.impl.Log4JLogger;
+@@ -36,6 +37,7 @@ import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.log4j.Level;
+ import org.junit.Test;
+@@ -255,18 +257,40 @@ public class TestDistributedFileSystem {
+     RAN.setSeed(seed);
+ 
+     final Configuration conf = getTestConfiguration();
++    conf.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
+     conf.set("slave.host.name", "localhost");
+ 
+     final MiniDFSCluster cluster = new MiniDFSCluster(conf, 2, true, null);
+     final FileSystem hdfs = cluster.getFileSystem();
+ 
+-    String hftpuri = "hftp://" + conf.get("dfs.http.address");
++    final String nnAddr = conf.get("dfs.http.address");
++    final UserGroupInformation current = UserGroupInformation.getCurrentUser();
++    final UserGroupInformation ugi = UserGroupInformation.createUserForTesting(
++        current.getShortUserName() + "x", new String[]{"user"});
+ 
++    //hftp
++    final String hftpuri = "hftp://" + nnAddr;
+     System.out.println("hftpuri=" + hftpuri);
+-    final FileSystem hftp = new Path(hftpuri).getFileSystem(conf);
+-    hftpuri = hftp.getUri().toString();
++    final FileSystem hftp = ugi.doAs(
++        new PrivilegedExceptionAction<FileSystem>() {
++      @Override
++      public FileSystem run() throws Exception {
++        return new Path(hftpuri).getFileSystem(conf);
++      }
++    });
++
++    //webhdfs
++    final String webhdfsuri = WebHdfsFileSystem.SCHEME  + "://" + nnAddr;
++    System.out.println("webhdfsuri=" + webhdfsuri);
++    final FileSystem webhdfs = ugi.doAs(
++        new PrivilegedExceptionAction<FileSystem>() {
++      @Override
++      public FileSystem run() throws Exception {
++        return new Path(webhdfsuri).getFileSystem(conf);
++      }
++    });
+ 
+-    final String dir = "/filechecksum";
++    final Path dir = new Path("/filechecksum");
+     final int block_size = 1024;
+     final int buffer_size = conf.getInt("io.file.buffer.size", 4096);
+     conf.setInt("io.bytes.per.checksum", 512);
+@@ -290,7 +314,8 @@ public class TestDistributedFileSystem {
+       //compute checksum
+       final FileChecksum hdfsfoocs = hdfs.getFileChecksum(foo);
+       System.out.println("hdfsfoocs=" + hdfsfoocs);
+-      
++
++      //hftp
+       final FileChecksum hftpfoocs = hftp.getFileChecksum(foo);
+       System.out.println("hftpfoocs=" + hftpfoocs);
+ 
+@@ -298,6 +323,14 @@ public class TestDistributedFileSystem {
+       final FileChecksum qfoocs = hftp.getFileChecksum(qualified);
+       System.out.println("qfoocs=" + qfoocs);
+ 
++      //webhdfs
++      final FileChecksum webhdfsfoocs = webhdfs.getFileChecksum(foo);
++      System.out.println("webhdfsfoocs=" + webhdfsfoocs);
++
++      final Path webhdfsqualified = new Path(webhdfsuri + dir, "foo" + n);
++      final FileChecksum webhdfs_qfoocs = webhdfs.getFileChecksum(webhdfsqualified);
++      System.out.println("webhdfs_qfoocs=" + webhdfs_qfoocs);
++      
+       //write another file
+       final Path bar = new Path(dir, "bar" + n);
+       {
+@@ -313,24 +346,40 @@ public class TestDistributedFileSystem {
+         assertEquals(hdfsfoocs.hashCode(), barhashcode);
+         assertEquals(hdfsfoocs, barcs);
+ 
++        //hftp
+         assertEquals(hftpfoocs.hashCode(), barhashcode);
+         assertEquals(hftpfoocs, barcs);
+ 
+         assertEquals(qfoocs.hashCode(), barhashcode);
+         assertEquals(qfoocs, barcs);
++
++        //webhdfs
++        assertEquals(webhdfsfoocs.hashCode(), barhashcode);
++        assertEquals(webhdfsfoocs, barcs);
++
++        assertEquals(webhdfs_qfoocs.hashCode(), barhashcode);
++        assertEquals(webhdfs_qfoocs, barcs);
+       }
+ 
++      hdfs.setPermission(dir, new FsPermission((short)0));
+       { //test permission error on hftp 
+-        hdfs.setPermission(new Path(dir), new FsPermission((short)0));
+         try {
+-          final String username = UserGroupInformation.getCurrentUser().getShortUserName() + "1";
+-          final HftpFileSystem hftp2 = cluster.getHftpFileSystemAs(username, conf, "somegroup");
+-          hftp2.getFileChecksum(qualified);
++          hftp.getFileChecksum(qualified);
++          fail();
++        } catch(IOException ioe) {
++          FileSystem.LOG.info("GOOD: getting an exception", ioe);
++        }
++      }
++
++      { //test permission error on webhdfs 
++        try {
++          webhdfs.getFileChecksum(webhdfsqualified);
+           fail();
+         } catch(IOException ioe) {
+           FileSystem.LOG.info("GOOD: getting an exception", ioe);
+         }
+       }
++      hdfs.setPermission(dir, new FsPermission((short)0777));
+     }
+     cluster.shutdown();
+   }
+diff --git a/src/test/org/apache/hadoop/hdfs/TestQuota.java b/src/test/org/apache/hadoop/hdfs/TestQuota.java
+index 0ee908f..ce144a3 100644
+--- a/src/test/org/apache/hadoop/hdfs/TestQuota.java
++++ b/src/test/org/apache/hadoop/hdfs/TestQuota.java
+@@ -20,19 +20,20 @@ package org.apache.hadoop.hdfs;
+ import java.io.OutputStream;
+ import java.security.PrivilegedExceptionAction;
+ 
++import junit.framework.TestCase;
++
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.ContentSummary;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
+ import org.apache.hadoop.hdfs.protocol.FSConstants;
++import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
+ import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+ import org.apache.hadoop.hdfs.tools.DFSAdmin;
++import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.security.UserGroupInformation;
+-import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
+-import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
+-
+-import junit.framework.TestCase;
+ 
+ /** A class for testing quota-related commands */
+ public class TestQuota extends TestCase {
+@@ -696,6 +697,11 @@ public class TestQuota extends TestCase {
+     }
+   }
+ 
++  private static void checkContentSummary(final ContentSummary expected,
++      final ContentSummary computed) {
++    assertEquals(expected.toString(), computed.toString());
++  }
++
+   /**
+    * Violate a space quota using files of size < 1 block. Test that
+    * block allocation conservatively assumes that for quota checking
+@@ -705,11 +711,17 @@ public class TestQuota extends TestCase {
+     Configuration conf = new Configuration();
+     final int BLOCK_SIZE = 6 * 1024;
+     conf.set("dfs.block.size", Integer.toString(BLOCK_SIZE));
++    conf.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
+     MiniDFSCluster cluster = new MiniDFSCluster(conf, 3, true, null);
+     cluster.waitActive();
+     FileSystem fs = cluster.getFileSystem();
+     DFSAdmin admin = new DFSAdmin(conf);
+ 
++    final String nnAddr = conf.get("dfs.http.address");
++    final String webhdfsuri = WebHdfsFileSystem.SCHEME  + "://" + nnAddr;
++    System.out.println("webhdfsuri=" + webhdfsuri);
++    final FileSystem webhdfs = new Path(webhdfsuri).getFileSystem(conf);
++
+     try {
+       Path dir = new Path("/test");
+       Path file1 = new Path("/test/test1");
+@@ -728,6 +740,7 @@ public class TestQuota extends TestCase {
+       DFSTestUtil.createFile(fs, file1, FILE_SIZE, (short)3, 1L);
+       DFSTestUtil.waitReplication(fs, file1, (short)3);
+       c = fs.getContentSummary(dir);
++      checkContentSummary(c, webhdfs.getContentSummary(dir));
+       assertEquals("Quota is half consumed", QUOTA_SIZE / 2,
+ 		   c.getSpaceConsumed());
+ 
+@@ -758,11 +771,17 @@ public class TestQuota extends TestCase {
+     Configuration conf = new Configuration();
+     final int BLOCK_SIZE = 6 * 1024;
+     conf.set("dfs.block.size", Integer.toString(BLOCK_SIZE));
++    conf.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
+     MiniDFSCluster cluster = new MiniDFSCluster(conf, 3, true, null);
+     cluster.waitActive();
+     FileSystem fs = cluster.getFileSystem();
+     DFSAdmin admin = new DFSAdmin(conf);
+ 
++    final String nnAddr = conf.get("dfs.http.address");
++    final String webhdfsuri = WebHdfsFileSystem.SCHEME  + "://" + nnAddr;
++    System.out.println("webhdfsuri=" + webhdfsuri);
++    final FileSystem webhdfs = new Path(webhdfsuri).getFileSystem(conf);
++
+     try {
+       Path dir = new Path("/test");
+       boolean exceededQuota = false;
+@@ -795,6 +814,7 @@ public class TestQuota extends TestCase {
+ 
+       // Should account for all 59 files (almost QUOTA_SIZE)
+       c = fs.getContentSummary(dir);
++      checkContentSummary(c, webhdfs.getContentSummary(dir));
+       assertEquals("Invalid space consumed", 
+ 		   59 * FILE_SIZE * 3, 
+ 		   c.getSpaceConsumed());
+-- 
+1.7.0.4
+

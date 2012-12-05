@@ -1,0 +1,269 @@
+From d20f37d6d198f3de8b9779fd9a23470403b3877c Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Wed, 27 Jun 2012 09:38:27 +0000
+Subject: [PATCH 1278/1344] HDFS-3522. If a namenode is in safemode, it should throw SafeModeException when getBlockLocations has zero locations.  Contributed by Brandon Li
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-1@1354390 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit c29d522a65434e4f6f27d6d6958fff08a52839d1)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../hadoop/hdfs/server/namenode/FSNamesystem.java  |   17 ++-
+ .../hadoop/hdfs/server/namenode/NamenodeFsck.java  |    2 +-
+ src/test/org/apache/hadoop/hdfs/TestSafeMode.java  |  181 ++++++++++++++++++++
+ 3 files changed, 196 insertions(+), 4 deletions(-)
+ create mode 100644 src/test/org/apache/hadoop/hdfs/TestSafeMode.java
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index ccd3f5d..f43f138 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -893,7 +893,8 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+    */
+   LocatedBlocks getBlockLocations(String clientMachine, String src,
+       long offset, long length) throws IOException {
+-    LocatedBlocks blocks = getBlockLocations(src, offset, length, true, true);
++    LocatedBlocks blocks = getBlockLocations(src, offset, length, true, true,
++        true);
+     if (blocks != null) {
+       //sort the blocks
+       DatanodeDescriptor client = host2DataNodeMap.getDatanodeByHost(
+@@ -911,7 +912,7 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+    */
+   public LocatedBlocks getBlockLocations(String src, long offset, long length
+       ) throws IOException {
+-    return getBlockLocations(src, offset, length, false, true);
++    return getBlockLocations(src, offset, length, false, true, true);
+   }
+ 
+   /**
+@@ -919,7 +920,8 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+    * @see ClientProtocol#getBlockLocations(String, long, long)
+    */
+   public LocatedBlocks getBlockLocations(String src, long offset, long length,
+-      boolean doAccessTime, boolean needBlockToken) throws IOException {
++      boolean doAccessTime, boolean needBlockToken, boolean checkSafeMode)
++      throws IOException {
+     if (isPermissionEnabled) {
+       checkPathAccess(src, FsAction.READ);
+     }
+@@ -937,6 +939,15 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
+                     Server.getRemoteIp(),
+                     "open", src, null, null);
+     }
++    if (checkSafeMode && isInSafeMode()) {
++      for (LocatedBlock b : ret.getLocatedBlocks()) {
++        // if safemode & no block locations yet then throw safemodeException
++        if ((b.getLocations() == null) || (b.getLocations().length == 0)) {
++          throw new SafeModeException("Zero blocklocations for " + src,
++              safeMode);
++        }
++      }
++    }
+     return ret;
+   }
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NamenodeFsck.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NamenodeFsck.java
+index ea07274..26cef90 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NamenodeFsck.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/NamenodeFsck.java
+@@ -217,7 +217,7 @@ public class NamenodeFsck {
+     // Get block locations without updating the file access time 
+     // and without block access tokens
+     LocatedBlocks blocks = namenode.getNamesystem().getBlockLocations(path, 0,
+-        fileLen, false, false);
++        fileLen, false, false, false);
+     if (blocks == null) { // the file is deleted
+       return;
+     }
+diff --git a/src/test/org/apache/hadoop/hdfs/TestSafeMode.java b/src/test/org/apache/hadoop/hdfs/TestSafeMode.java
+new file mode 100644
+index 0000000..2888b82
+--- /dev/null
++++ b/src/test/org/apache/hadoop/hdfs/TestSafeMode.java
+@@ -0,0 +1,181 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.hdfs;
++
++import static org.junit.Assert.*;
++
++import java.io.IOException;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FileStatus;
++import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.protocol.FSConstants.SafeModeAction;
++import org.apache.hadoop.hdfs.server.namenode.NameNode;
++import org.apache.hadoop.hdfs.server.namenode.SafeModeException;
++import org.apache.hadoop.ipc.RemoteException;
++import org.junit.Assert;
++import org.junit.Test;
++
++/**
++ * This test makes sure that if SafeMode is manually entered, NameNode does not
++ * come out of safe mode even after the startup safemode conditions are met.
++ */
++public class TestSafeMode {
++  
++  static Log LOG = LogFactory.getLog(TestSafeMode.class);
++  
++  @Test
++  public void testManualSafeMode() throws IOException {
++    MiniDFSCluster cluster = null;
++    FileSystem fs = null;
++    try {
++      Configuration conf = new Configuration();
++      // disable safemode extension to make the test run faster.
++      conf.set("dfs.safemode.extension", "1");
++      cluster = new MiniDFSCluster(conf, 1, true, null);
++      cluster.waitActive();
++      
++      fs = cluster.getFileSystem();
++      Path file1 = new Path("/tmp/testManualSafeMode/file1");
++      Path file2 = new Path("/tmp/testManualSafeMode/file2");
++      
++      LOG.info("Created file1 and file2.");
++      
++      // create two files with one block each.
++      DFSTestUtil.createFile(fs, file1, 1000, (short)1, 0);
++      DFSTestUtil.createFile(fs, file2, 2000, (short)1, 0);    
++      cluster.shutdown();
++      
++      // now bring up just the NameNode.
++      cluster = new MiniDFSCluster(conf, 0, false, null);
++      cluster.waitActive();
++      
++      LOG.info("Restarted cluster with just the NameNode");
++      
++      NameNode namenode = cluster.getNameNode();
++      
++      assertTrue("No datanode is started. Should be in SafeMode", 
++                 namenode.isInSafeMode());
++      
++      // manually set safemode.
++      namenode.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
++      
++      // now bring up the datanode and wait for it to be active.
++      cluster.startDataNodes(conf, 1, true, null, null);
++      cluster.waitActive();
++      
++      LOG.info("Datanode is started.");
++      
++      try {
++        Thread.sleep(2000);
++      } catch (InterruptedException ignored) {}
++      
++      assertTrue("should still be in SafeMode", namenode.isInSafeMode());
++      
++      namenode.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
++      assertFalse("should not be in SafeMode", namenode.isInSafeMode());
++    } finally {
++      if(fs != null) fs.close();
++      if(cluster!= null) cluster.shutdown();
++    }
++  }
++
++  @Test
++  public void testSafeModeWhenZeroBlockLocations() throws IOException {
++    MiniDFSCluster cluster = null;
++    FileSystem fs = null;
++    try {
++      Configuration conf = new Configuration();
++      // disable safemode extension to make the test run faster.
++      conf.set("dfs.safemode.extension", "1");
++      cluster = new MiniDFSCluster(conf, 1, true, null);
++      cluster.waitActive();
++
++      fs = cluster.getFileSystem();
++      Path file1 = new Path("/tmp/testManualSafeMode/file1");
++      Path file2 = new Path("/tmp/testManualSafeMode/file2");
++
++      LOG.info("Created file1 and file2.");
++
++      // create two files with one block each.
++      DFSTestUtil.createFile(fs, file1, 1000, (short) 1, 0);
++      DFSTestUtil.createFile(fs, file2, 2000, (short) 1, 0);
++      checkGetBlockLocationsWorks(fs, file1);
++
++      NameNode namenode = cluster.getNameNode();
++      namenode.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
++      Assert.assertTrue("should still be in SafeMode", namenode.isInSafeMode());
++      // getBlock locations should still work since block locations exists
++      checkGetBlockLocationsWorks(fs, file1);
++      namenode.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
++      assertFalse("should not be in SafeMode", namenode.isInSafeMode());
++      Assert.assertFalse("should not be in SafeMode", namenode.isInSafeMode());
++
++      // Now 2nd part of the tests where there aren't block locations
++      cluster.shutdownDataNodes();
++      cluster.shutdownNameNode();
++
++      // now bring up just the NameNode.
++      cluster.restartNameNode();
++      cluster.waitActive();
++
++      LOG.info("Restarted cluster with just the NameNode");
++
++      namenode = cluster.getNameNode();
++
++      Assert.assertTrue("No datanode is started. Should be in SafeMode",
++          namenode.isInSafeMode());
++      FileStatus stat = fs.getFileStatus(file1);
++      try {
++        fs.getFileBlockLocations(stat, 0, 1000);
++        Assert.assertTrue("Should have got safemode exception", false);
++      } catch (SafeModeException e) {
++        // as expected
++      } catch (RemoteException re) {
++        if (!re.getClassName().equals(SafeModeException.class.getName()))
++          Assert.assertTrue("Should have got safemode exception", false);
++      }
++
++      namenode.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
++      Assert.assertFalse("Should not be in safemode", namenode.isInSafeMode());
++      checkGetBlockLocationsWorks(fs, file1);
++
++    } finally {
++      if (fs != null)
++        fs.close();
++      if (cluster != null)
++        cluster.shutdown();
++    }
++  }
++
++  void checkGetBlockLocationsWorks(FileSystem fs, Path fileName)
++      throws IOException {
++    FileStatus stat = fs.getFileStatus(fileName);
++    try {
++      fs.getFileBlockLocations(stat, 0, 1000);
++    } catch (SafeModeException e) {
++      Assert.assertTrue("Should have not got safemode exception", false);
++    } catch (RemoteException re) {
++      Assert.assertTrue("Should have not got safemode exception", false);
++    }
++  }
++}
+-- 
+1.7.0.4
+

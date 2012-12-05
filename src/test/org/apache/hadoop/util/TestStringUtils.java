@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import junit.framework.TestCase;
+import static org.junit.Assert.assertArrayEquals;
 
 public class TestStringUtils extends TestCase {
   final private static String NULL_STR = null;
@@ -122,22 +123,35 @@ public class TestStringUtils extends TestCase {
     assertEquals(956703965184L, StringUtils.TraditionalBinaryPrefix.string2long("891g"));
   }
 
+  public void testGetTrimmedStrings() throws Exception {
+    String compactDirList = "/spindle1/hdfs,/spindle2/hdfs,/spindle3/hdfs";
+    String spacedDirList = "/spindle1/hdfs, /spindle2/hdfs, /spindle3/hdfs";
+    String pathologicalDirList1 = " /spindle1/hdfs  ,  /spindle2/hdfs ,/spindle3/hdfs ";
+    String pathologicalDirList2 = " /spindle1/hdfs  ,  /spindle2/hdfs ,/spindle3/hdfs , ";
+    String emptyList1 = "";
+    String emptyList2 = "   ";
+    
+    String[] expectedArray = {"/spindle1/hdfs", "/spindle2/hdfs", "/spindle3/hdfs"};
+    String[] emptyArray = {};
+    
+    assertArrayEquals(expectedArray, StringUtils.getTrimmedStrings(compactDirList));
+    assertArrayEquals(expectedArray, StringUtils.getTrimmedStrings(spacedDirList));
+    assertArrayEquals(expectedArray, StringUtils.getTrimmedStrings(pathologicalDirList1));
+    assertArrayEquals(expectedArray, StringUtils.getTrimmedStrings(pathologicalDirList2));
+    
+    assertArrayEquals(emptyArray, StringUtils.getTrimmedStrings(emptyList1));
+    assertArrayEquals(emptyArray, StringUtils.getTrimmedStrings(emptyList2));
+  } 
+
   public void testJoin() {
     List<String> s = new ArrayList<String>();
-    s.add("");
     s.add("a");
     s.add("b");
     s.add("c");
-    checkJoin("", s.subList(0, 0));
-    checkJoin(":a", s.subList(0, 2));
-    checkJoin(":a:b", s.subList(0, 3));
-    checkJoin(":a:b:c", s.subList(0, 4));
-  }
-
-  private void checkJoin(String result, List<String> list) {
-    String[] a = new String[list.size()];
-    assertEquals(result, StringUtils.join(":", list));
-    assertEquals(result, StringUtils.join(":", list.toArray(a)));
+    assertEquals("", StringUtils.join(":", s.subList(0, 0)));
+    assertEquals("a", StringUtils.join(":", s.subList(0, 1)));
+    assertEquals("a:b", StringUtils.join(":", s.subList(0, 2)));
+    assertEquals("a:b:c", StringUtils.join(":", s.subList(0, 3)));
   }
 
   public void testCamelize() {

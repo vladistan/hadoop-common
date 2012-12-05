@@ -28,7 +28,7 @@ creations/deletions), or "all".</description>
   <name>dfs.datanode.address</name>
   <value>0.0.0.0:50010</value>
   <description>
-    The address where the datanode server will listen to.
+    The datanode server address and port for data transfer.
     If the port is 0 then the server will start on a free port.
   </description>
 </property>
@@ -226,7 +226,7 @@ creations/deletions), or "all".</description>
 
 <property>
   <name>dfs.datanode.data.dir.perm</name>
-  <value>755</value>
+  <value>700</value>
   <description>Permissions for the directories on on the local filesystem where 
   the DFS data node store its blocks. The permissions can either be octal or 
   symbolic.</description>
@@ -287,6 +287,14 @@ creations/deletions), or "all".</description>
 </property>
 
 <property>
+  <name>dfs.datanode.directoryscan.threads</name>
+  <value>1</value>
+  <description>Number of threads to use when scanning volumes to
+  generate block reports. A value greater than one means means
+  volumes will be scanned in parallel.</description>
+</property>
+
+<property>
   <name>dfs.heartbeat.interval</name>
   <value>3</value>
   <description>Determines datanode heartbeat interval in seconds.</description>
@@ -304,8 +312,23 @@ creations/deletions), or "all".</description>
   <description>
     Specifies the percentage of blocks that should satisfy 
     the minimal replication requirement defined by dfs.replication.min.
-    Values less than or equal to 0 mean not to start in safe mode.
+    Values less than or equal to 0 mean not to wait for any particular
+    percentage of blocks before exiting safemode.
     Values greater than 1 will make safe mode permanent.
+  </description>
+</property>
+
+<property>
+  <name>dfs.safemode.min.datanodes</name>
+  <value>0</value>
+  <description>
+    Specifies the number of datanodes that must be considered alive
+    before the name node exits safemode.
+    Values less than or equal to 0 mean not to take the number of live
+    datanodes into account when deciding whether to remain in safe mode
+    during startup.
+    Values greater than the number of datanodes in the cluster
+    will make safe mode permanent.
   </description>
 </property>
 
@@ -387,10 +410,33 @@ creations/deletions), or "all".</description>
 
 <property>
   <name>dfs.support.append</name>
-  <value>false</value>
-  <description>Does HDFS allow appends to files?
-               This is currently set to false because there are bugs in the
-               "append code" and is not supported in any prodction cluster.
+  <description>
+    This option is no longer supported. HBase no longer requires that
+    this option be enabled as sync is now enabled by default. See
+    HADOOP-8230 for additional information.
+  </description>
+</property>
+
+<property>
+  <name>dfs.datanode.plugins</name>
+  <value></value>
+  <description>Comma-separated list of datanode plug-ins to be activated.
+  </description>
+</property>
+
+<property>
+  <name>dfs.namenode.plugins</name>
+  <value></value>
+  <description>Comma-separated list of namenode plug-ins to be activated.
+  </description>
+</property>
+
+<property>
+  <name>dfs.datanode.failed.volumes.tolerated</name>
+  <value>0</value>
+  <description>The number of volumes that are allowed to
+  fail before a datanode stops offering service. By default
+  any volume failure will cause a datanode to shutdown.
   </description>
 </property>
 
@@ -417,12 +463,196 @@ creations/deletions), or "all".</description>
   </description>
 </property>
 
+ <property>
+  <name>dfs.namenode.name.dir.restore</name>
+  <value>false</value>
+  <description>If true the NameNode will attempt to recover any failed
+    dfs.name.dir directories at the next checkpoint time (triggered by
+    the 2NN).
+  </description>
+</property>
+
 <property>
-  <name>dfs.datanode.failed.volumes.tolerated</name>
+  <name>dfs.datanode.readahead.bytes</name>
+  <value>4193404</value>
+  <description>
+        While reading block files, if the Hadoop native libraries are available,
+        the datanode can use the posix_fadvise system call to explicitly
+        page data into the operating system buffer cache ahead of the current
+        reader's position. This can improve performance especially when
+        disks are highly contended.
+
+        This configuration specifies the number of bytes ahead of the current
+        read position which the datanode will attempt to read ahead. This
+        feature may be disabled by configuring this property to 0.
+
+        If the native libraries are not available, this configuration has no
+        effect.
+  </description>
+</property>
+
+<property>
+  <name>dfs.datanode.drop.cache.behind.reads</name>
+  <value>false</value>
+  <description>
+        In some workloads, the data read from HDFS is known to be significantly
+        large enough that it is unlikely to be useful to cache it in the
+        operating system buffer cache. In this case, the DataNode may be
+        configured to automatically purge all data from the buffer cache
+        after it is delivered to the client. This behavior is automatically
+        disabled for workloads which read only short sections of a block
+        (e.g HBase random-IO workloads).
+
+        This may improve performance for some workloads by freeing buffer
+        cache spage usage for more cacheable data.
+
+        If the Hadoop native libraries are not available, this configuration
+        has no effect.
+  </description>
+</property>
+
+<property>
+  <name>dfs.datanode.drop.cache.behind.writes</name>
+  <value>false</value>
+  <description>
+        In some workloads, the data written to HDFS is known to be significantly
+        large enough that it is unlikely to be useful to cache it in the
+        operating system buffer cache. In this case, the DataNode may be
+        configured to automatically purge all data from the buffer cache
+        after it is written to disk.
+
+        This may improve performance for some workloads by freeing buffer
+        cache spage usage for more cacheable data.
+
+        If the Hadoop native libraries are not available, this configuration
+        has no effect.
+  </description>
+</property>
+
+<property>
+  <name>dfs.datanode.sync.behind.writes</name>
+  <value>false</value>
+  <description>
+        If this configuration is enabled, the datanode will instruct the
+        operating system to enqueue all written data to the disk immediately
+        after it is written. This differs from the usual OS policy which
+        may wait for up to 30 seconds before triggering writeback.
+
+        This may improve performance for some workloads by smoothing the
+        IO profile for data written to disk.
+
+        If the Hadoop native libraries are not available, this configuration
+        has no effect.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.use.datanode.hostname</name>
+  <value>false</value>
+  <description>Whether clients should use datanode hostnames when
+    connecting to datanodes.
+  </description>
+</property>
+
+<property>
+  <name>dfs.datanode.use.datanode.hostname</name>
+  <value>false</value>
+  <description>Whether datanodes should use datanode hostnames when
+    connecting to other datanodes for data transfer.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.local.interfaces</name>
+  <value></value>
+  <description>A comma separated list of network interface names to use
+    for data transfer between the client and datanodes. When creating
+    a connection to read from or write to a datanode, the client
+    chooses one of the specified interfaces at random and binds its
+    socket to the IP of that interface. Individual names may be
+    specified as either an interface name (eg "eth0"), a subinterface
+    name (eg "eth0:0"), or an IP address (which may be specified using
+    CIDR notation to match a range of IPs).
+  </description>
+</property>
+
+<property>
+  <name>dfs.image.transfer.bandwidthPerSec</name>
   <value>0</value>
-  <description>The number of volumes that are allowed to
-  fail before a datanode stops offering service. By default
-  any volume failure will cause a datanode to shutdown.
+  <description>
+    Specifies the maximum amount of bandwidth that can be utilized for
+    image transfer in term of the number of bytes per second. A default
+    value of 0 indicates that throttling is disabled.
+  </description>
+</property>
+
+<property>
+  <name>dfs.namenode.invalidate.work.pct.per.iteration</name>
+  <value>0.32</value>
+  <description>
+    *Note*: Advanced property. Change with caution.
+    This determines the percentage amount of block
+    invalidations (deletes) to do over a single DN heartbeat
+    deletion command. The final deletion count is determined by applying this
+    percentage to the number of live nodes in the system.
+    The resultant number is the number of blocks from the deletion list
+    chosen for proper invalidation over a single heartbeat.
+    Value should be a positive, non-zero percentage in float notation (X.Yf),
+    with 1.0f meaning 100%.
+  </description>
+</property>
+
+<property>
+  <name>dfs.namenode.replication.work.multiplier.per.iteration</name>
+  <value>2</value>
+  <description>
+    *Note*: Advanced property. Change with caution.
+    This determines the total amount of block transfers to begin in
+    parallel at a DN, for replication, when such a command list is being
+    sent over a DN heartbeat by the NN. The actual number is obtained by
+    multiplying this multiplier with the total number of live nodes in the
+    cluster. The result number is the number of blocks to begin transfers
+    immediately for, per DN heartbeat. This number can be any positive,
+    non-zero integer.
+  </description>
+</property>
+
+<property>
+  <name>dfs.webhdfs.enabled</name>
+  <value>false</value>
+  <description>
+    Enable WebHDFS (REST API) in Namenodes and Datanodes.
+  </description>
+</property>
+
+<property>
+  <name>dfs.namenode.kerberos.internal.spnego.principal</name>
+  <value>${dfs.web.authentication.kerberos.principal}</value>
+</property>
+
+<property>
+  <name>dfs.secondary.namenode.kerberos.internal.spnego.principal</name>
+  <value>${dfs.web.authentication.kerberos.principal}</value>
+</property>
+
+<property>
+  <name>hadoop.fuse.connection.timeout</name>
+  <value>300</value>
+  <description>
+    The minimum number of seconds that we'll cache libhdfs connection objects
+    in fuse_dfs. Lower values will result in lower memory consumption; higher
+    values may speed up access by avoiding the overhead of creating new
+    connection objects.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.fuse.timer.period</name>
+  <value>5</value>
+  <description>
+    The number of seconds between cache expiry checks in fuse_dfs. Lower values
+    will result in fuse_dfs noticing changes to Kerberos ticket caches more
+    quickly.
   </description>
 </property>
 

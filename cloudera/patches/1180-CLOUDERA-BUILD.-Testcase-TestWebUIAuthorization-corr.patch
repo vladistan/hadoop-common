@@ -1,0 +1,29 @@
+From 6dec7f42942f876d042d3160cf3b9ef9a41c602d Mon Sep 17 00:00:00 2001
+From: Alejandro Abdelnur <tucu@cloudera.com>
+Date: Mon, 7 May 2012 21:17:25 -0700
+Subject: [PATCH 1180/1344] CLOUDERA-BUILD. Testcase TestWebUIAuthorization correction due to HADOOP-8343
+
+  Reason: testcases failing
+  Author: Alejandro Abdelnur
+  Ref: CDH-5691
+---
+ .../hadoop/mapred/TestWebUIAuthorization.java      |    3 ++-
+ 1 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/src/test/org/apache/hadoop/mapred/TestWebUIAuthorization.java b/src/test/org/apache/hadoop/mapred/TestWebUIAuthorization.java
+index 0758575..cf2a777 100644
+--- a/src/test/org/apache/hadoop/mapred/TestWebUIAuthorization.java
++++ b/src/test/org/apache/hadoop/mapred/TestWebUIAuthorization.java
+@@ -748,7 +748,8 @@ public class TestWebUIAuthorization extends ClusterMapReduceTestCase {
+     Properties props = new Properties();
+     props.setProperty("hadoop.http.filter.initializers",
+         DummyFilterInitializer.class.getName());
+-    props.setProperty(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, "true");
++      props.setProperty(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, "true");
++      props.setProperty(CommonConfigurationKeys.HADOOP_SECURITY_INSTRUMENTATION_REQUIRES_ADMIN, "true");
+     props.setProperty(JobConf.MR_ADMINS, mrAdminUser + " " + mrAdminGroup);
+ 
+     startCluster(true, props);
+-- 
+1.7.0.4
+

@@ -1,0 +1,268 @@
+From 68bce9253e5726a0d4141caa919cb9ee25c8b4cf Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Tue, 6 Sep 2011 10:11:15 +0000
+Subject: [PATCH 1212/1344] HADOOP-7594. Support HTTP REST in HttpServer.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1165587 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit ae0a1bb59f10c6becb8d327036486c59d59cff89)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ ivy.xml                                            |   17 +++++
+ ivy/libraries.properties                           |    4 +
+ src/core/org/apache/hadoop/http/HttpServer.java    |   22 ++++++-
+ .../org/apache/hadoop/http/TestHttpServer.java     |   25 +++++++-
+ .../hadoop/http/resource/JerseyResource.java       |   64 ++++++++++++++++++++
+ 5 files changed, 126 insertions(+), 6 deletions(-)
+ create mode 100644 src/test/org/apache/hadoop/http/resource/JerseyResource.java
+
+diff --git a/ivy.xml b/ivy.xml
+index 37eb23e..4d2f4a6 100644
+--- a/ivy.xml
++++ b/ivy.xml
+@@ -146,6 +146,23 @@
+       rev="${jetty-util.version}"
+       conf="jetty->master"/>
+ 
++    <dependency org="asm"
++      name="asm"
++      rev="${asm.version}"
++      conf="jetty->master"/>
++    <dependency org="com.sun.jersey"
++      name="jersey-core"
++      rev="${jersey-core.version}"
++      conf="jetty->master"/>
++    <dependency org="com.sun.jersey"
++      name="jersey-json"
++      rev="${jersey-json.version}"
++      conf="jetty->master"/>
++    <dependency org="com.sun.jersey"
++      name="jersey-server"
++      rev="${jersey-server.version}"
++      conf="jetty->master"/>
++
+     <dependency org="tomcat"
+       name="jasper-runtime"
+       rev="${jasper.version}"
+diff --git a/ivy/libraries.properties b/ivy/libraries.properties
+index d6c7700..17d7b68 100644
+--- a/ivy/libraries.properties
++++ b/ivy/libraries.properties
+@@ -17,6 +17,7 @@
+ apacheant.version=1.7.0
+ ant-task.version=2.0.10
+ 
++asm.version=3.2
+ aspectj.version=1.6.5
+ 
+ checkstyle.version=4.2
+@@ -51,6 +52,9 @@ jsp-api.version=5.5.12
+ jets3t.version=0.6.1
+ jetty.version=6.1.26.cloudera.1
+ jetty-util.version=6.1.26.cloudera.1
++jersey-core.version=1.8
++jersey-json.version=1.8
++jersey-server.version=1.8
+ junit.version=4.5
+ jdiff.version=1.0.9
+ json.version=1.0
+diff --git a/src/core/org/apache/hadoop/http/HttpServer.java b/src/core/org/apache/hadoop/http/HttpServer.java
+index 4ac51a6..4b7c3ca 100644
+--- a/src/core/org/apache/hadoop/http/HttpServer.java
++++ b/src/core/org/apache/hadoop/http/HttpServer.java
+@@ -45,15 +45,15 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.conf.ConfServlet;
++import org.apache.hadoop.fs.CommonConfigurationKeys;
+ import org.apache.hadoop.jmx.JMXJsonServlet;
+ import org.apache.hadoop.log.LogLevel;
+ import org.apache.hadoop.metrics.MetricsServlet;
+ import org.apache.hadoop.security.Krb5AndCertsSslSocketConnector;
+-import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.Krb5AndCertsSslSocketConnector.MODE;
++import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.security.authorize.AccessControlList;
+ import org.apache.hadoop.util.ReflectionUtils;
+-import org.apache.hadoop.fs.CommonConfigurationKeys;
+ 
+ import org.mortbay.io.Buffer;
+ import org.mortbay.jetty.Connector;
+@@ -74,6 +74,8 @@ import org.mortbay.jetty.webapp.WebAppContext;
+ import org.mortbay.thread.QueuedThreadPool;
+ import org.mortbay.util.MultiException;
+ 
++import com.sun.jersey.spi.container.servlet.ServletContainer;
++
+ /**
+  * Create a Jetty embedded server to answer http requests. The primary goal
+  * is to serve up status information for the server.
+@@ -307,6 +309,22 @@ public class HttpServer implements FilterContainer {
+     webAppContext.setAttribute(name, value);
+   }
+ 
++  /** 
++   * Add a Jersey resource package.
++   * @param packageName The Java package name containing the Jersey resource.
++   * @param pathSpec The path spec for the servlet
++   */
++  public void addJerseyResourcePackage(final String packageName,
++      final String pathSpec) {
++    LOG.info("addJerseyResourcePackage: packageName=" + packageName
++        + ", pathSpec=" + pathSpec);
++    final ServletHolder sh = new ServletHolder(ServletContainer.class);
++    sh.setInitParameter("com.sun.jersey.config.property.resourceConfigClass",
++        "com.sun.jersey.api.core.PackagesResourceConfig");
++    sh.setInitParameter("com.sun.jersey.config.property.packages", packageName);
++    webAppContext.addServlet(sh, pathSpec);
++  }
++
+   /**
+    * Add a servlet in the server.
+    * @param name The name of the servlet (can be passed as null)
+diff --git a/src/test/org/apache/hadoop/http/TestHttpServer.java b/src/test/org/apache/hadoop/http/TestHttpServer.java
+index 6fae25c..6a9cbb7 100644
+--- a/src/test/org/apache/hadoop/http/TestHttpServer.java
++++ b/src/test/org/apache/hadoop/http/TestHttpServer.java
+@@ -51,6 +51,7 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.CommonConfigurationKeys;
++import org.apache.hadoop.http.resource.JerseyResource;
+ import org.apache.hadoop.security.Groups;
+ import org.apache.hadoop.security.ShellBasedUnixGroupsMapping;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -60,8 +61,11 @@ import org.junit.Assert;
+ import org.junit.Before;
+ import org.junit.Test;
+ import org.mockito.Mockito;
++import org.mortbay.util.ajax.JSON;
+ 
+ public class TestHttpServer {
++  static final Log LOG = LogFactory.getLog(TestHttpServer.class);
++
+   private HttpServer server;
+   private URL baseUrl;
+   
+@@ -74,7 +78,7 @@ public class TestHttpServer {
+                       ) throws ServletException, IOException {
+       PrintWriter out = response.getWriter();
+       Map<String, String[]> params = request.getParameterMap();
+-      SortedSet<String> keys = new TreeSet(params.keySet());
++      SortedSet<String> keys = new TreeSet<String>(params.keySet());
+       for(String key: keys) {
+         out.print(key);
+         out.print(':');
+@@ -146,6 +150,8 @@ public class TestHttpServer {
+     server.addServlet("echo", "/echo", EchoServlet.class);
+     server.addServlet("echomap", "/echomap", EchoMapServlet.class);
+     server.addServlet("htmlcontent", "/htmlcontent", HtmlContentServlet.class);
++    server.addJerseyResourcePackage(
++        JerseyResource.class.getPackage().getName(), "/jersey/*");
+     server.start();
+     int port = server.getPort();
+     baseUrl = new URL("http://localhost:" + port + "/");
+@@ -215,9 +221,6 @@ public class TestHttpServer {
+    * 
+    */
+   public static class DummyServletFilter implements Filter {
+-
+-    private static final Log LOG = LogFactory.getLog(
+-        DummyServletFilter.class);
+     @Override
+     public void destroy() { }
+ 
+@@ -458,4 +461,18 @@ public class TestHttpServer {
+     Assert.assertFalse(HttpServer.isInstrumentationAccessAllowed(context, request, response));
+   }
+ 
++  @SuppressWarnings("unchecked")
++  private static Map<String, Object> parse(String jsonString) {
++    return (Map<String, Object>)JSON.parse(jsonString);
++  }
++
++  @Test public void testJersey() throws Exception {
++    LOG.info("BEGIN testJersey()");
++    final String js = readOutput(new URL(baseUrl, "/jersey/foo?op=bar"));
++    final Map<String, Object> m = parse(js);
++    LOG.info("m=" + m);
++    assertEquals("foo", m.get(JerseyResource.PATH));
++    assertEquals("bar", m.get(JerseyResource.OP));
++    LOG.info("END testJersey()");
++  }
+ }
+diff --git a/src/test/org/apache/hadoop/http/resource/JerseyResource.java b/src/test/org/apache/hadoop/http/resource/JerseyResource.java
+new file mode 100644
+index 0000000..752ffea
+--- /dev/null
++++ b/src/test/org/apache/hadoop/http/resource/JerseyResource.java
+@@ -0,0 +1,64 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.http.resource;
++
++import java.io.IOException;
++import java.util.Map;
++import java.util.TreeMap;
++
++import javax.ws.rs.DefaultValue;
++import javax.ws.rs.GET;
++import javax.ws.rs.Path;
++import javax.ws.rs.PathParam;
++import javax.ws.rs.Produces;
++import javax.ws.rs.QueryParam;
++import javax.ws.rs.core.MediaType;
++import javax.ws.rs.core.Response;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.mortbay.util.ajax.JSON;
++
++/**
++ * A simple Jersey resource class TestHttpServer.
++ * The servlet simply puts the path and the op parameter in a map
++ * and return it in JSON format in the response.
++ */
++@Path("")
++public class JerseyResource {
++  static final Log LOG = LogFactory.getLog(JerseyResource.class);
++
++  public static final String PATH = "path";
++  public static final String OP = "op";
++
++  @GET
++  @Path("{" + PATH + ":.*}")
++  @Produces({MediaType.APPLICATION_JSON})
++  public Response get(
++      @PathParam(PATH) @DefaultValue("UNKNOWN_" + PATH) final String path,
++      @QueryParam(OP) @DefaultValue("UNKNOWN_" + OP) final String op
++      ) throws IOException {
++    LOG.info("get: " + PATH + "=" + path + ", " + OP + "=" + op);
++
++    final Map<String, Object> m = new TreeMap<String, Object>();
++    m.put(PATH, path);
++    m.put(OP, op);
++    final String js = JSON.toString(m);
++    return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
++  }
++}
+\ No newline at end of file
+-- 
+1.7.0.4
+

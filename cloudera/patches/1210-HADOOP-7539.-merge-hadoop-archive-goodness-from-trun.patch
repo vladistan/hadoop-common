@@ -1,0 +1,1547 @@
+From 93576c064aefab6e972de448d7c23be6927380dd Mon Sep 17 00:00:00 2001
+From: Mahadev Konar <mahadev@apache.org>
+Date: Tue, 30 Aug 2011 03:47:46 +0000
+Subject: [PATCH 1210/1344] HADOOP-7539. merge hadoop archive goodness from trunk to .20 (John George via mahadev)
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1163079 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit c65e9b1b3c98180eba6e2b7f0c5d342225ec5a47)
+
+Author: John George
+Ref: CDH-4806
+---
+ src/core/org/apache/hadoop/fs/HarFileSystem.java   |  559 ++++++++++++--------
+ .../org/apache/hadoop/fs/TestHarFileSystem.java    |  270 +++++++---
+ .../org/apache/hadoop/tools/HadoopArchives.java    |  220 +++++---
+ 3 files changed, 679 insertions(+), 370 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/fs/HarFileSystem.java b/src/core/org/apache/hadoop/fs/HarFileSystem.java
+index 13abc14..e0fc465 100644
+--- a/src/core/org/apache/hadoop/fs/HarFileSystem.java
++++ b/src/core/org/apache/hadoop/fs/HarFileSystem.java
+@@ -19,10 +19,16 @@ package org.apache.hadoop.fs;
+ 
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
++import java.io.UnsupportedEncodingException;
+ import java.net.URI;
+ import java.net.URISyntaxException;
++import java.net.URLDecoder;
+ import java.util.ArrayList;
++import java.util.EnumSet;
+ import java.util.List;
++import java.util.Map;
++import java.util.TreeMap;
++import java.util.HashMap;
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.permission.FsPermission;
+@@ -44,23 +50,21 @@ import org.apache.hadoop.util.Progressable;
+  */
+ 
+ public class HarFileSystem extends FilterFileSystem {
+-  public static final int VERSION = 1;
++  public static final int VERSION = 3;
++
++  private static final Map<URI, HarMetaData> harMetaCache = new HashMap<URI, HarMetaData>();
++
+   // uri representation of this Har filesystem
+   private URI uri;
+-  // the version of this har filesystem
+-  private int version;
+-  // underlying uri 
+-  private URI underLyingURI;
+   // the top level path of the archive
+   // in the underlying file system
+   private Path archivePath;
+-  // the masterIndex of the archive
+-  private Path masterIndex;
+-  // the index file 
+-  private Path archiveIndex;
+   // the har auth
+   private String harAuth;
+-  
++
++  // pointer into the static metadata cache
++  private HarMetaData metadata;
++
+   /**
+    * public construction of harfilesystem
+    *
+@@ -91,11 +95,12 @@ public class HarFileSystem extends FilterFileSystem {
+    * to be used in case not specified.
+    */
+   public void initialize(URI name, Configuration conf) throws IOException {
+-    //decode the name
+-    underLyingURI = decodeHarURI(name, conf);
+-    //  we got the right har Path- now check if this is 
+-    //truly a har filesystem
+-    Path harPath = archivePath(new Path(name.toString()));
++    // decode the name
++    URI underLyingURI = decodeHarURI(name, conf);
++    // we got the right har Path- now check if this is 
++    // truly a har filesystem
++    Path harPath = archivePath(
++      new Path(name.getScheme(), name.getAuthority(), name.getPath()));
+     if (harPath == null) { 
+       throw new IOException("Invalid path for the Har Filesystem. " + 
+                            name.toString());
+@@ -103,49 +108,49 @@ public class HarFileSystem extends FilterFileSystem {
+     if (fs == null) {
+       fs = FileSystem.get(underLyingURI, conf);
+     }
+-    this.uri = harPath.toUri();
+-    this.archivePath = new Path(this.uri.getPath());
+-    this.harAuth = getHarAuth(this.underLyingURI);
++    uri = harPath.toUri();
++    archivePath = new Path(uri.getPath());
++    harAuth = getHarAuth(underLyingURI);
+     //check for the underlying fs containing
+     // the index file
+-    this.masterIndex = new Path(archivePath, "_masterindex");
+-    this.archiveIndex = new Path(archivePath, "_index");
+-    if (!fs.exists(masterIndex) || !fs.exists(archiveIndex)) {
++    Path masterIndexPath = new Path(archivePath, "_masterindex");
++    Path archiveIndexPath = new Path(archivePath, "_index");
++    if (!fs.exists(masterIndexPath) || !fs.exists(archiveIndexPath)) {
+       throw new IOException("Invalid path for the Har Filesystem. " +
+           "No index file in " + harPath);
+     }
+-    try{ 
+-      this.version = getHarVersion();
+-    } catch(IOException io) {
+-      throw new IOException("Unable to " +
+-          "read the version of the Har file system: " + this.archivePath);
++
++    metadata = harMetaCache.get(uri);
++    if (metadata != null) {
++      FileStatus mStat = fs.getFileStatus(masterIndexPath);
++      FileStatus aStat = fs.getFileStatus(archiveIndexPath);
++      if (mStat.getModificationTime() != metadata.getMasterIndexTimestamp() ||
++          aStat.getModificationTime() != metadata.getArchiveIndexTimestamp()) {
++        // the archive has been overwritten since we last read it
++        // remove the entry from the meta data cache
++        metadata = null;
++        harMetaCache.remove(uri);
++      }
+     }
+-    if (this.version != HarFileSystem.VERSION) {
+-      throw new IOException("Invalid version " + 
+-          this.version + " expected " + HarFileSystem.VERSION);
++    if (metadata == null) {
++      metadata = new HarMetaData(fs, masterIndexPath, archiveIndexPath);
++      metadata.parseMetaData();
++      harMetaCache.put(uri, metadata);
+     }
+   }
+-  
++
+   // get the version of the filesystem from the masterindex file
+-  // the version is currently not useful since its the first version 
++  // the version is currently not useful since its the first version
+   // of archives
+-  public int getHarVersion() throws IOException { 
+-    FSDataInputStream masterIn = fs.open(masterIndex);
+-    LineReader lmaster = new LineReader(masterIn, getConf());
+-    Text line = new Text();
+-    lmaster.readLine(line);
+-    try {
+-      masterIn.close();
+-    } catch(IOException e){
+-      //disregard it.
+-      // its a read.
++  public int getHarVersion() throws IOException {
++    if (metadata != null) {
++      return metadata.getVersion();
++    }
++    else {
++      throw new IOException("Invalid meta data for the Har Filesystem");
+     }
+-    String versionLine = line.toString();
+-    String[] arr = versionLine.split(" ");
+-    int version = Integer.parseInt(arr[0]);
+-    return version;
+   }
+-  
++
+   /*
+    * find the parent path that is the 
+    * archive path in the path. The last
+@@ -211,7 +216,21 @@ public class HarFileSystem extends FilterFileSystem {
+     }
+     return tmp;
+   }
+-  
++
++  private static String decodeString(String str)
++    throws UnsupportedEncodingException {
++    return URLDecoder.decode(str, "UTF-8");
++  }
++
++  private String decodeFileName(String fname) 
++    throws UnsupportedEncodingException {
++    int version = metadata.getVersion();
++    if (version == 2 || version == 3){
++      return decodeString(fname);
++    }
++    return fname;
++  }
++
+   /**
+    * return the top level archive.
+    */
+@@ -282,16 +301,19 @@ public class HarFileSystem extends FilterFileSystem {
+   // string manipulation is not good - so
+   // just use the path api to do it.
+   private Path makeRelative(String initial, Path p) {
++    String scheme = this.uri.getScheme();
++    String authority = this.uri.getAuthority();
+     Path root = new Path(Path.SEPARATOR);
+     if (root.compareTo(p) == 0)
+-      return new Path(initial);
++      return new Path(scheme, authority, initial);
+     Path retPath = new Path(p.getName());
+     Path parent = p.getParent();
+     for (int i=0; i < p.depth()-1; i++) {
+       retPath = new Path(parent.getName(), retPath);
+       parent = parent.getParent();
+     }
+-    return new Path(initial, retPath.toString());
++    return new Path(new Path(scheme, authority, initial),
++      retPath.toString());
+   }
+   
+   /* this makes a path qualified in the har filesystem
+@@ -312,39 +334,74 @@ public class HarFileSystem extends FilterFileSystem {
+     //change this to Har uri 
+     return new Path(uri.getScheme(), harAuth, tmpURI.getPath());
+   }
++
++  /**
++   * Fix offset and length of block locations.
++   * Note that this method modifies the original array.
++   * @param locations block locations of har part file
++   * @param start the start of the desired range in the contained file
++   * @param len the length of the desired range
++   * @param fileOffsetInHar the offset of the desired file in the har part file
++   * @return block locations with fixed offset and length
++   */  
++  static BlockLocation[] fixBlockLocations(BlockLocation[] locations,
++                                          long start,
++                                          long len,
++                                          long fileOffsetInHar) {
++    // offset 1 past last byte of desired range
++    long end = start + len;
++
++    for (BlockLocation location : locations) {
++      // offset of part block relative to beginning of desired file
++      // (may be negative if file starts in this part block)
++      long harBlockStart = location.getOffset() - fileOffsetInHar;
++      // offset 1 past last byte of har block relative to beginning of
++      // desired file
++      long harBlockEnd = harBlockStart + location.getLength();
++      
++      if (start > harBlockStart) {
++        // desired range starts after beginning of this har block
++        // fix offset to beginning of relevant range (relative to desired file)
++        location.setOffset(start);
++        // fix length to relevant portion of har block
++        location.setLength(location.getLength() - (start - harBlockStart));
++      } else {
++        // desired range includes beginning of this har block
++        location.setOffset(harBlockStart);
++      }
++      
++      if (harBlockEnd > end) {
++        // range ends before end of this har block
++        // fix length to remove irrelevant portion at the end
++        location.setLength(location.getLength() - (harBlockEnd - end));
++      }
++    }
++    
++    return locations;
++  }
+   
+   /**
+-   * get block locations from the underlying fs
++   * Get block locations from the underlying fs and fix their
++   * offsets and lengths.
+    * @param file the input filestatus to get block locations
+-   * @param start the start in the file
+-   * @param len the length in the file
++   * @param start the start of the desired range in the contained file
++   * @param len the length of the desired range
+    * @return block locations for this segment of file
+    * @throws IOException
+    */
+   @Override
+   public BlockLocation[] getFileBlockLocations(FileStatus file, long start,
+-      long len) throws IOException {
+-    // just fake block locations
+-    // its fast and simpler
+-    // doing various block location manipulation
+-    // with part files adds a lot of overhead because 
+-    // of the look ups of filestatus in index files
+-    return new BlockLocation[]{ new BlockLocation() };
+-  }
+-  
+-  /**
+-   * fake the rawblocks since map reduce uses the block offsets to 
+-   * fo some computations regarding the blocks
+-   * @param rawBlocks the raw blocks returned by the filesystem
+-   * @return faked blocks with changed offsets.
+-   */
+-  private BlockLocation[] fakeBlockLocations(BlockLocation[] rawBlocks, 
+-		  long startIndex) {
+-	for (BlockLocation block : rawBlocks) {
+-		long rawOffset = block.getOffset();
+-		block.setOffset(rawOffset - startIndex);
+-	}
+-	return rawBlocks;
++                                               long len) throws IOException {
++    HarStatus hstatus = getFileHarStatus(file.getPath());
++    Path partPath = new Path(archivePath, hstatus.getPartName());
++    FileStatus partStatus = metadata.getPartFileStatus(partPath);
++
++    // get all part blocks that overlap with the desired file blocks
++    BlockLocation[] locations = 
++      fs.getFileBlockLocations(partStatus,
++                               hstatus.getStartIndex() + start, len);
++
++    return fixBlockLocations(locations, start, len, hstatus.getStartIndex());
+   }
+   
+   /**
+@@ -388,139 +445,121 @@ public class HarFileSystem extends FilterFileSystem {
+    *          the archive index filestatus
+    */
+   private void fileStatusesInIndex(HarStatus parent, List<FileStatus> statuses,
+-      List<String> children, FileStatus archiveIndexStat) throws IOException {
+-    // read the index file
+-    FSDataInputStream aIn = null;
+-    try {
+-      aIn = fs.open(archiveIndex);
+-      LineReader aLin;
+-      long read = 0;
+-      aLin = new LineReader(aIn, getConf());
+-      String parentString = parent.getName();
+-      Path harPath = new Path(parentString);
+-      int harlen = harPath.depth();
+-      Text line = new Text();
+-      while (read < archiveIndexStat.getLen()) {
+-        int tmp = aLin.readLine(line);
+-        read += tmp;
+-        String lineFeed = line.toString();
+-        String child = lineFeed.substring(0, lineFeed.indexOf(" "));
+-        if ((child.startsWith(parentString))) {
+-          Path thisPath = new Path(child);
+-          if (thisPath.depth() == harlen + 1) {
+-            // bingo!
+-            HarStatus hstatus = new HarStatus(lineFeed);
+-            FileStatus childStatus = new FileStatus(hstatus.isDir() ? 0
+-                : hstatus.getLength(), hstatus.isDir(), (int) archiveIndexStat
+-                .getReplication(), archiveIndexStat.getBlockSize(),
+-                archiveIndexStat.getModificationTime(), archiveIndexStat
+-                    .getAccessTime(), new FsPermission(archiveIndexStat
+-                    .getPermission()), archiveIndexStat.getOwner(),
+-                archiveIndexStat.getGroup(), makeRelative(this.uri.toString(),
+-                    new Path(hstatus.name)));
+-            statuses.add(childStatus);
+-          }
+-          line.clear();
++      List<String> children) throws IOException {
++    String parentString = parent.getName();
++    if (!parentString.endsWith(Path.SEPARATOR)){
++        parentString += Path.SEPARATOR;
++    }
++    Path harPath = new Path(parentString);
++    int harlen = harPath.depth();
++    final Map<String, FileStatus> cache = new TreeMap<String, FileStatus>();
++
++    for (HarStatus hstatus : metadata.archive.values()) {
++      String child = hstatus.getName();
++      if ((child.startsWith(parentString))) {
++        Path thisPath = new Path(child);
++        if (thisPath.depth() == harlen + 1) {
++          statuses.add(toFileStatus(hstatus, cache));
+         }
+       }
+-    } finally {
+-      if (aIn != null) {
+-        aIn.close();
+-      }
+     }
+   }
+-  
+-  // make sure that this harPath is relative to the har filesystem
+-  // this only works for relative paths. This returns the line matching
+-  // the file in the index. Returns a null if there is not matching 
+-  // filename in the index file.
+-  private String fileStatusInIndex(Path harPath) throws IOException {
+-    // read the index file 
+-    int hashCode = getHarHash(harPath);
+-    // get the master index to find the pos 
+-    // in the index file
+-    FSDataInputStream in = fs.open(masterIndex);
+-    FileStatus masterStat = fs.getFileStatus(masterIndex);
+-    LineReader lin = new LineReader(in, getConf());
+-    Text line = new Text();
+-    long read = lin.readLine(line);
+-   //ignore the first line. this is the header of the index files
+-    String[] readStr = null;
+-    List<Store> stores = new ArrayList<Store>();
+-    while(read < masterStat.getLen()) {
+-      int b = lin.readLine(line);
+-      read += b;
+-      readStr = line.toString().split(" ");
+-      int startHash = Integer.parseInt(readStr[0]);
+-      int endHash  = Integer.parseInt(readStr[1]);
+-      if (startHash <= hashCode && hashCode <= endHash) {
+-        stores.add(new Store(Long.parseLong(readStr[2]), 
+-            Long.parseLong(readStr[3]), startHash,
+-            endHash));
+-      }
+-      line.clear();
++
++  /**
++   * Combine the status stored in the index and the underlying status. 
++   * @param h status stored in the index
++   * @param cache caching the underlying file statuses
++   * @return the combined file status
++   * @throws IOException
++   */
++  private FileStatus toFileStatus(HarStatus h,
++      Map<String, FileStatus> cache) throws IOException {
++    FileStatus underlying = null;
++    if (cache != null) {
++      underlying = cache.get(h.partName);
+     }
+-    try {
+-      lin.close();
+-    } catch(IOException io){
+-      // do nothing just a read.
+-    }
+-    FSDataInputStream aIn = fs.open(archiveIndex);
+-    LineReader aLin;
+-    String retStr = null;
+-    // now start reading the real index file
+-    for (Store s: stores) {
+-      read = 0;
+-      aIn.seek(s.begin);
+-      aLin = new LineReader(aIn, getConf());
+-      while (read + s.begin < s.end) {
+-        int tmp = aLin.readLine(line);
+-        read += tmp;
+-        String lineFeed = line.toString();
+-        String[] parsed = lineFeed.split(" ");
+-        if (harPath.compareTo(new Path(parsed[0])) == 0) {
+-          // bingo!
+-          retStr = lineFeed;
+-          break;
+-        }
+-        line.clear();
++    if (underlying == null) {
++      final Path p = h.isDir? archivePath: new Path(archivePath, h.partName);
++      underlying = fs.getFileStatus(p);
++      if (cache != null) {
++        cache.put(h.partName, underlying);
+       }
+-      if (retStr != null)
+-        break;
+     }
+-    try {
+-      aIn.close();
+-    } catch(IOException io) {
+-      //do nothing
++
++    long modTime = 0;
++    int version = metadata.getVersion();
++    if (version < 3) {
++      modTime = underlying.getModificationTime();
++    } else if (version == 3) {
++      modTime = h.getModificationTime();
+     }
+-    return retStr;
++
++    return new FileStatus(
++        h.isDir()? 0L: h.getLength(),
++        h.isDir(),
++        underlying.getReplication(),
++        underlying.getBlockSize(),
++        modTime,
++        underlying.getAccessTime(),
++        underlying.getPermission(),
++        underlying.getOwner(),
++        underlying.getGroup(),
++        makeRelative(this.uri.getPath(), new Path(h.name)));
+   }
+-  
++
+   // a single line parser for hadoop archives status 
+   // stored in a single line in the index files 
+   // the format is of the form 
+   // filename "dir"/"file" partFileName startIndex length 
+   // <space seperated children>
+-  private static class HarStatus {
++  private class HarStatus {
+     boolean isDir;
+     String name;
+     List<String> children;
+     String partName;
+     long startIndex;
+     long length;
+-    public HarStatus(String harString) {
++    long modificationTime = 0;
++
++    public HarStatus(String harString) throws UnsupportedEncodingException {
+       String[] splits = harString.split(" ");
+-      this.name = splits[0];
++      this.name = decodeFileName(splits[0]);
+       this.isDir = "dir".equals(splits[1]) ? true: false;
+       // this is equal to "none" if its a directory
+       this.partName = splits[2];
+       this.startIndex = Long.parseLong(splits[3]);
+       this.length = Long.parseLong(splits[4]);
++
++      int version = metadata.getVersion();
++      String[] propSplits = null;
++      // propSplits is used to retrieve the metainformation that Har versions
++      // 1 & 2 missed (modification time, permission, owner group).
++      // These fields are stored in an encoded string placed in different
++      // locations depending on whether it's a file or directory entry.
++      // If it's a directory, the string will be placed at the partName
++      // location (directories have no partName because they don't have data
++      // to be stored). This is done because the number of fields in a
++      // directory entry is unbounded (all children are listed at the end)
++      // If it's a file, the string will be the last field.
+       if (isDir) {
++        if (version == 3){
++          propSplits = decodeString(this.partName).split(" ");
++        }
+         children = new ArrayList<String>();
+         for (int i = 5; i < splits.length; i++) {
+-          children.add(splits[i]);
++          children.add(decodeFileName(splits[i]));
+         }
++      } else if (version == 3) {
++        propSplits = decodeString(splits[5]).split(" ");
++      }
++
++      if (propSplits != null && propSplits.length >= 4) {
++        modificationTime = Long.parseLong(propSplits[0]);
++        // the fields below are stored in the file but are currently not used
++        // by HarFileSystem
++        // permission = new FsPermission(Short.parseShort(propSplits[1]));
++        // owner = decodeString(propSplits[2]);
++        // group = decodeString(propSplits[3]);
+       }
+     }
+     public boolean isDir() {
+@@ -546,6 +585,9 @@ public class HarFileSystem extends FilterFileSystem {
+     public long getLength() {
+       return length;
+     }
++    public long getModificationTime() {
++      return modificationTime;
++    }
+   }
+   
+   /**
+@@ -559,7 +601,11 @@ public class HarFileSystem extends FilterFileSystem {
+    */
+   @Override
+   public FileStatus getFileStatus(Path f) throws IOException {
+-    FileStatus archiveStatus = fs.getFileStatus(archiveIndex);
++    HarStatus hstatus = getFileHarStatus(f);
++    return toFileStatus(hstatus, null);
++  }
++
++  private HarStatus getFileHarStatus(Path f) throws IOException {
+     // get the fs DataInputStream for the underlying file
+     // look up the index.
+     Path p = makeQualified(f);
+@@ -567,19 +613,11 @@ public class HarFileSystem extends FilterFileSystem {
+     if (harPath == null) {
+       throw new IOException("Invalid file name: " + f + " in " + uri);
+     }
+-    String readStr = fileStatusInIndex(harPath);
+-    if (readStr == null) {
++    HarStatus hstatus = metadata.archive.get(harPath);
++    if (hstatus == null) {
+       throw new FileNotFoundException("File: " +  f + " does not exist in " + uri);
+     }
+-    HarStatus hstatus = null;
+-    hstatus = new HarStatus(readStr);
+-    return new FileStatus(hstatus.isDir()?0:hstatus.getLength(), hstatus.isDir(),
+-        (int)archiveStatus.getReplication(), archiveStatus.getBlockSize(),
+-        archiveStatus.getModificationTime(), archiveStatus.getAccessTime(),
+-        new FsPermission(
+-        archiveStatus.getPermission()), archiveStatus.getOwner(), 
+-        archiveStatus.getGroup(), 
+-            makeRelative(this.uri.toString(), new Path(hstatus.name)));
++    return hstatus;
+   }
+ 
+   /**
+@@ -597,17 +635,7 @@ public class HarFileSystem extends FilterFileSystem {
+   @Override
+   public FSDataInputStream open(Path f, int bufferSize) throws IOException {
+     // get the fs DataInputStream for the underlying file
+-    // look up the index.
+-    Path p = makeQualified(f);
+-    Path harPath = getPathInHar(p);
+-    if (harPath == null) {
+-      throw new IOException("Invalid file name: " + f + " in " + uri);
+-    }
+-    String readStr = fileStatusInIndex(harPath);
+-    if (readStr == null) {
+-      throw new FileNotFoundException(f + ": not found in " + archivePath);
+-    }
+-    HarStatus hstatus = new HarStatus(readStr); 
++    HarStatus hstatus = getFileHarStatus(f);
+     // we got it.. woo hooo!!! 
+     if (hstatus.isDir()) {
+       throw new FileNotFoundException(f + " : not a file in " +
+@@ -676,24 +704,17 @@ public class HarFileSystem extends FilterFileSystem {
+     // we will create fake filestatuses to return
+     // to the client
+     List<FileStatus> statuses = new ArrayList<FileStatus>();
+-    FileStatus archiveStatus = fs.getFileStatus(archiveIndex);
+     Path tmpPath = makeQualified(f);
+     Path harPath = getPathInHar(tmpPath);
+-    String readStr = fileStatusInIndex(harPath);
+-    if (readStr == null) {
++    HarStatus hstatus = metadata.archive.get(harPath);
++    if (hstatus == null) {
+       throw new FileNotFoundException("File " + f + " not found in " + archivePath);
+     }
+-    HarStatus hstatus = new HarStatus(readStr);
+-    if (!hstatus.isDir()) 
+-        statuses.add(new FileStatus(hstatus.getLength(), 
+-            hstatus.isDir(),
+-            archiveStatus.getReplication(), archiveStatus.getBlockSize(),
+-            archiveStatus.getModificationTime(), archiveStatus.getAccessTime(),
+-            new FsPermission(archiveStatus.getPermission()),
+-            archiveStatus.getOwner(), archiveStatus.getGroup(), 
+-            makeRelative(this.uri.toString(), new Path(hstatus.name))));
+-    else 
+-      fileStatusesInIndex(hstatus, statuses, hstatus.children, archiveStatus);
++    if (hstatus.isDir()) {
++      fileStatusesInIndex(hstatus, statuses, hstatus.children);
++    } else {
++      statuses.add(toFileStatus(hstatus, null));
++    }
+     
+     return statuses.toArray(new FileStatus[statuses.size()]);
+   }
+@@ -936,4 +957,114 @@ public class HarFileSystem extends FilterFileSystem {
+         super(new HarFsInputStream(fs, p, start, length, 0));
+     }
+   }
++
++  private class HarMetaData {
++    private FileSystem fs;
++    private int version;
++    // the masterIndex of the archive
++    private Path masterIndexPath;
++    // the index file 
++    private Path archiveIndexPath;
++
++    private long masterIndexTimestamp;
++    private long archiveIndexTimestamp;
++
++    List<Store> stores = new ArrayList<Store>();
++    Map<Path, HarStatus> archive = new HashMap<Path, HarStatus>();
++    private Map<Path, FileStatus> partFileStatuses = new HashMap<Path, FileStatus>();
++
++    public HarMetaData(FileSystem fs, Path masterIndexPath, Path archiveIndexPath) {
++      this.fs = fs;
++      this.masterIndexPath = masterIndexPath;
++      this.archiveIndexPath = archiveIndexPath;
++    }
++
++    public FileStatus getPartFileStatus(Path partPath) throws IOException {
++      FileStatus status;
++      status = partFileStatuses.get(partPath);
++      if (status == null) {
++        status = fs.getFileStatus(partPath);
++        partFileStatuses.put(partPath, status);
++      }
++      return status;
++    }
++
++    public long getMasterIndexTimestamp() {
++      return masterIndexTimestamp;
++    }
++
++    public long getArchiveIndexTimestamp() {
++      return archiveIndexTimestamp;
++    }
++
++    private int getVersion() {
++      return version;
++    }
++
++    private void parseMetaData() throws IOException {
++      FSDataInputStream in = fs.open(masterIndexPath);
++      FileStatus masterStat = fs.getFileStatus(masterIndexPath);
++      masterIndexTimestamp = masterStat.getModificationTime();
++      LineReader lin = new LineReader(in, getConf());
++      Text line = new Text();
++      long read = lin.readLine(line);
++
++     // the first line contains the version of the index file
++      String versionLine = line.toString();
++      String[] arr = versionLine.split(" ");
++      version = Integer.parseInt(arr[0]);
++      // make it always backwards-compatible
++      if (this.version > HarFileSystem.VERSION) {
++        throw new IOException("Invalid version " + 
++            this.version + " expected " + HarFileSystem.VERSION);
++      }
++
++      // each line contains a hashcode range and the index file name
++      String[] readStr = null;
++      while(read < masterStat.getLen()) {
++        int b = lin.readLine(line);
++        read += b;
++        readStr = line.toString().split(" ");
++        int startHash = Integer.parseInt(readStr[0]);
++        int endHash  = Integer.parseInt(readStr[1]);
++        stores.add(new Store(Long.parseLong(readStr[2]), 
++            Long.parseLong(readStr[3]), startHash,
++            endHash));
++        line.clear();
++      }
++      try {
++        // close the master index
++        lin.close();
++      } catch(IOException io){
++        // do nothing just a read.
++      }
++
++      FSDataInputStream aIn = fs.open(archiveIndexPath);
++      FileStatus archiveStat = fs.getFileStatus(archiveIndexPath);
++      archiveIndexTimestamp = archiveStat.getModificationTime();
++      LineReader aLin;
++      String retStr = null;
++      // now start reading the real index file
++      for (Store s: stores) {
++        read = 0;
++        aIn.seek(s.begin);
++        aLin = new LineReader(aIn, getConf());
++        while (read + s.begin < s.end) {
++          int tmp = aLin.readLine(line);
++          read += tmp;
++          String lineFeed = line.toString();
++          String[] parsed = lineFeed.split(" ");
++          parsed[0] = decodeFileName(parsed[0]);
++          archive.put(new Path(parsed[0]), new HarStatus(lineFeed));
++          line.clear();
++        }
++      }
++      try {
++        // close the archive index
++        aIn.close();
++      } catch(IOException io) {
++        // do nothing just a read.
++      }
++    }
++  }
+ }
+diff --git a/src/test/org/apache/hadoop/fs/TestHarFileSystem.java b/src/test/org/apache/hadoop/fs/TestHarFileSystem.java
+index 7a3a812..27cedd3 100644
+--- a/src/test/org/apache/hadoop/fs/TestHarFileSystem.java
++++ b/src/test/org/apache/hadoop/fs/TestHarFileSystem.java
+@@ -23,29 +23,23 @@ import java.io.IOException;
+ import java.net.URI;
+ import java.util.Iterator;
+ 
++import junit.framework.TestCase;
++
+ import org.apache.hadoop.conf.Configuration;
+-import org.apache.hadoop.hdfs.MiniDFSCluster;
+-import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.BlockLocation;
++import org.apache.hadoop.fs.FileStatus;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.FsShell;
++import org.apache.hadoop.fs.FSDataInputStream;
++import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.MiniDFSCluster;
+ import org.apache.hadoop.io.LongWritable;
+ import org.apache.hadoop.io.Text;
+-import org.apache.hadoop.mapred.FileInputFormat;
+-import org.apache.hadoop.mapred.FileOutputFormat;
+-import org.apache.hadoop.mapred.JobClient;
+-import org.apache.hadoop.mapred.JobConf;
+-import org.apache.hadoop.mapred.Mapper;
+-import org.apache.hadoop.mapred.MiniMRCluster;
+-import org.apache.hadoop.mapred.OutputCollector;
+-import org.apache.hadoop.mapred.Reducer;
+-import org.apache.hadoop.mapred.Reporter;
+-import org.apache.hadoop.mapred.TextInputFormat;
+-import org.apache.hadoop.mapred.TextOutputFormat;
++import org.apache.hadoop.mapred.*;
+ import org.apache.hadoop.tools.HadoopArchives;
+ import org.apache.hadoop.util.ToolRunner;
+-
+-import junit.framework.TestCase;
++import org.mortbay.log.Log;
+ 
+ /**
+  * test the har file system
+@@ -71,7 +65,7 @@ public class TestHarFileSystem extends TestCase {
+         getPath().substring(1), "test");
+     filea = new Path(inputPath,"a");
+     fileb = new Path(inputPath,"b");
+-    filec = new Path(inputPath,"c");
++    filec = new Path(inputPath,"c c");
+     archivePath = new Path(fs.getHomeDirectory(), "tmp");
+     fs.mkdirs(inputPath);
+     FSDataOutputStream out = fs.create(filea); 
+@@ -121,39 +115,12 @@ public class TestHarFileSystem extends TestCase {
+       }
+     }
+   }
+-  
+-  // test archives with a -p option
+-  public void testRelativeArchives() throws Exception {
+-    fs.delete(archivePath,true);
+-    Configuration conf = mapred.createJobConf();
+-    HadoopArchives har = new HadoopArchives(conf);
+-    String[] args = new String[6];
+-    args[0] = "-archiveName";
+-    args[1] = "foo.har";
+-    args[2] = "-p";
+-    args[3] =  fs.getHomeDirectory().toString();
+-    args[4] = "test";
+-    args[5] = archivePath.toString();
+-    int ret = ToolRunner.run(har, args);
+-    assertTrue("failed test", ret == 0);
+-    Path finalPath = new Path(archivePath, "foo.har");
+-    Path fsPath = new Path(inputPath.toUri().getPath());
+-    Path filePath = new Path(finalPath, "test");
+-    //make it a har path 
+-    Path harPath = new Path("har://" + filePath.toUri().getPath());
+-    assertTrue(fs.exists(new Path(finalPath, "_index")));
+-    assertTrue(fs.exists(new Path(finalPath, "_masterindex")));
+-    assertTrue(!fs.exists(new Path(finalPath, "_logs")));
+-    args = new String[2];
+-    args[0] = "-ls";
+-    args[1] = harPath.toString();
+-    FsShell shell = new FsShell(conf);
+-    ret = ToolRunner.run(shell, args);
+-    // fileb and filec
+-    assertTrue(ret == 0);
++
++  /* check bytes in the har output files */
++  private void  checkBytes(Path harPath, Configuration conf) throws IOException {
+     Path harFilea = new Path(harPath, "a");
+     Path harFileb = new Path(harPath, "b");
+-    Path harFilec = new Path(harPath, "c");
++    Path harFilec = new Path(harPath, "c c");
+     FileSystem harFs = harFilea.getFileSystem(conf);
+     FSDataInputStream fin = harFs.open(harFilea);
+     byte[] b = new byte[4];
+@@ -169,14 +136,128 @@ public class TestHarFileSystem extends TestCase {
+     fin.close();
+     assertTrue("strings are equal ", (b[0] == "c".getBytes()[0]));
+   }
++
++  private void checkProperties(Path harPath, Configuration conf) throws IOException {
++    Path harFilea = new Path(harPath, "a");
++    Path harFileb = new Path(harPath, "b");
++    Path harFilec = new Path(harPath, "c c");
++    FileSystem harFs = harFilea.getFileSystem(conf);
++
++    Path nonharFilea = new Path(inputPath, "a");
++    Path nonharFileb = new Path(inputPath, "b");
++    Path nonharFilec = new Path(inputPath, "c c");
++    FileSystem nonharFs = nonharFilea.getFileSystem(conf);
++
++    assertEquals("Modification times do not match for a",
++        harFs.getFileStatus(harFilea).getModificationTime(),
++        nonharFs.getFileStatus(nonharFilea).getModificationTime());
++
++    assertEquals("Modification times do not match for b",
++        harFs.getFileStatus(harFileb).getModificationTime(),
++        nonharFs.getFileStatus(nonharFileb).getModificationTime());
++
++    assertEquals("Modification times do not match for c",
++        harFs.getFileStatus(harFilec).getModificationTime(),
++        nonharFs.getFileStatus(nonharFilec).getModificationTime());
++  }
++
++  /**
++   * check if the block size of the part files is what we had specified
++   */
++  private void checkBlockSize(FileSystem fs, Path finalPath, long blockSize) throws IOException {
++    FileStatus[] statuses = fs.globStatus(new Path(finalPath, "part-*"));
++    for (FileStatus status: statuses) {
++      assertTrue(status.getBlockSize() == blockSize);
++    }
++  }
+   
++  // test archives with a -p option
++  public void testRelativeArchives() throws Exception {
++    fs.delete(archivePath, true);
++    Configuration conf = mapred.createJobConf();
++    HadoopArchives har = new HadoopArchives(conf);
++
++    {
++      String[] args = new String[6];
++      args[0] = "-archiveName";
++      args[1] = "foo1.har";
++      args[2] = "-p";
++      args[3] = fs.getHomeDirectory().toString();
++      args[4] = "test";
++      args[5] = archivePath.toString();
++      int ret = ToolRunner.run(har, args);
++      assertTrue("failed test", ret == 0);
++      Path finalPath = new Path(archivePath, "foo1.har");
++      Path fsPath = new Path(inputPath.toUri().getPath());
++      Path filePath = new Path(finalPath, "test");
++      // make it a har path
++      Path harPath = new Path("har://" + filePath.toUri().getPath());
++      assertTrue(fs.exists(new Path(finalPath, "_index")));
++      assertTrue(fs.exists(new Path(finalPath, "_masterindex")));
++      /*check for existence of only 1 part file, since part file size == 2GB */
++      assertTrue(fs.exists(new Path(finalPath, "part-0")));
++      assertTrue(!fs.exists(new Path(finalPath, "part-1")));
++      assertTrue(!fs.exists(new Path(finalPath, "part-2")));
++      assertTrue(!fs.exists(new Path(finalPath, "_logs")));
++      FileStatus[] statuses = fs.listStatus(finalPath);
++      args = new String[2];
++      args[0] = "-ls";
++      args[1] = harPath.toString();
++      FsShell shell = new FsShell(conf);
++      ret = ToolRunner.run(shell, args);
++      // fileb and filec
++      assertTrue(ret == 0);
++      checkBytes(harPath, conf);
++      checkProperties(harPath, conf);
++      /* check block size for path files */
++      checkBlockSize(fs, finalPath, 512 * 1024 * 1024l);
++    }
++    
++    /** now try with different block size and part file size **/
++    {
++      String[] args = new String[8];
++      args[0] = "-Dhar.block.size=512";
++      args[1] = "-Dhar.partfile.size=1";
++      args[2] = "-archiveName";
++      args[3] = "foo.har";
++      args[4] = "-p";
++      args[5] = fs.getHomeDirectory().toString();
++      args[6] = "test";
++      args[7] = archivePath.toString();
++      int ret = ToolRunner.run(har, args);
++      assertTrue("failed test", ret == 0);
++      Path finalPath = new Path(archivePath, "foo.har");
++      Path fsPath = new Path(inputPath.toUri().getPath());
++      Path filePath = new Path(finalPath, "test");
++      // make it a har path
++      Path harPath = new Path("har://" + filePath.toUri().getPath());
++      assertTrue(fs.exists(new Path(finalPath, "_index")));
++      assertTrue(fs.exists(new Path(finalPath, "_masterindex")));
++      /*check for existence of 3 part files, since part file size == 1 */
++      assertTrue(fs.exists(new Path(finalPath, "part-0")));
++      assertTrue(fs.exists(new Path(finalPath, "part-1")));
++      assertTrue(fs.exists(new Path(finalPath, "part-2")));
++      assertTrue(!fs.exists(new Path(finalPath, "_logs")));
++      FileStatus[] statuses = fs.listStatus(finalPath);
++      args = new String[2];
++      args[0] = "-ls";
++      args[1] = harPath.toString();
++      FsShell shell = new FsShell(conf);
++      ret = ToolRunner.run(shell, args);
++      // fileb and filec
++      assertTrue(ret == 0);
++      checkBytes(harPath, conf);
++      checkProperties(harPath, conf);
++      checkBlockSize(fs, finalPath, 512);
++    }
++  }
+  
+   public void testArchivesWithMapred() throws Exception {
+     fs.delete(archivePath, true);
+     Configuration conf = mapred.createJobConf();
+     HadoopArchives har = new HadoopArchives(conf);
+     String[] args = new String[4];
+-
++ 
+     //check for destination not specfied
+     args[0] = "-archiveName";
+     args[1] = "foo.har";
+@@ -239,24 +320,29 @@ public class TestHarFileSystem extends TestCase {
+     // fileb and filec
+     Path harFilea = new Path(harPath, "a");
+     Path harFileb = new Path(harPath, "b");
+-    Path harFilec = new Path(harPath, "c");
++    Path harFilec = new Path(harPath, "c c");
+     FileSystem harFs = harFilea.getFileSystem(conf);
+     FSDataInputStream fin = harFs.open(harFilea);
+     byte[] b = new byte[4];
+     int readBytes = fin.read(b);
++    assertTrue("Empty read.", readBytes > 0);
+     fin.close();
+     assertTrue("strings are equal ", (b[0] == "a".getBytes()[0]));
+     fin = harFs.open(harFileb);
+-    fin.read(b);
++    readBytes = fin.read(b);
++    assertTrue("Empty read.", readBytes > 0);
+     fin.close();
+     assertTrue("strings are equal ", (b[0] == "b".getBytes()[0]));
+     fin = harFs.open(harFilec);
+-    fin.read(b);
++    readBytes = fin.read(b);
++    assertTrue("Empty read.", readBytes > 0);
+     fin.close();
+     assertTrue("strings are equal ", (b[0] == "c".getBytes()[0]));
+-    
++
+     // ok all files match 
+     // run a map reduce job
++    FileSystem fsHar = harPath.getFileSystem(conf);
++    FileStatus[] bla = fsHar.listStatus(harPath);
+     Path outdir = new Path(fs.getHomeDirectory(), "mapout"); 
+     JobConf jobconf = mapred.createJobConf();
+     FileInputFormat.addInputPath(jobconf, harPath);
+@@ -276,38 +362,68 @@ public class TestHarFileSystem extends TestCase {
+     Path reduceFile = status[0].getPath();
+     FSDataInputStream reduceIn = fs.open(reduceFile);
+     b = new byte[6];
+-    reduceIn.read(b);
++    readBytes = reduceIn.read(b);
++    assertTrue("Should read 6 bytes instead of "+readBytes+".", readBytes == 6);
+     //assuming all the 6 bytes were read.
+     Text readTxt = new Text(b);
+-    assertEquals("a\nb\nc\n", readTxt.toString());
++    assertTrue("a\nb\nc\n".equals(readTxt.toString()));
+     assertTrue("number of bytes left should be -1", reduceIn.read(b) == -1);
+     reduceIn.close();
+   }
+-
+-  public void testHarUri() {
+-    final Configuration conf = new Configuration();
+-    checkInvalidPath("har://hdfs-/foo.har", conf);
+-    checkInvalidPath("har://hdfs/foo.har", conf);
+-    checkInvalidPath("har://-hdfs/foo.har", conf);
+-    checkInvalidPath("har://-/foo.har", conf);
+-  }
+-
+-  static void checkInvalidPath(String s, Configuration conf) {
+-    System.out.println("\ncheckInvalidPath: " + s);
+-    final Path p = new Path(s);
+-    try {
+-      p.getFileSystem(conf);
+-      fail(p + " is an invalid path.");
+-    } catch (IOException e) {
+-      System.out.println("GOOD: Got an exception.");
+-      e.printStackTrace(System.out);
++  
++  public void testGetFileBlockLocations() throws Exception {
++    fs.delete(archivePath, true);
++    Configuration conf = mapred.createJobConf();
++    HadoopArchives har = new HadoopArchives(conf);
++    String[] args = new String[8];
++    args[0] = "-Dhar.block.size=512";
++    args[1] = "-Dhar.partfile.size=1";
++    args[2] = "-archiveName";
++    args[3] = "foo bar.har";
++    args[4] = "-p";
++    args[5] = fs.getHomeDirectory().toString();
++    args[6] = "test";
++    args[7] = archivePath.toString();
++    int ret = ToolRunner.run(har, args);
++    assertTrue("failed test", ret == 0);
++    Path finalPath = new Path(archivePath, "foo bar.har");
++    Path fsPath = new Path(inputPath.toUri().getPath());
++    Path filePath = new Path(finalPath, "test");
++    Path filea = new Path(filePath, "a");
++    // make it a har path
++    Path harPath = new Path("har://" + filea.toUri().getPath());
++    FileSystem harFs = harPath.getFileSystem(conf);
++    FileStatus[] statuses = harFs.listStatus(filePath);
++    for (FileStatus status : statuses) {
++      BlockLocation[] locations =
++        harFs.getFileBlockLocations(status, 0, status.getLen());
++      long lastOffset = 0;
++      assertEquals("Only one block location expected for files this small",
++                   1, locations.length);
++      assertEquals("Block location should start at offset 0",
++                   0, locations[0].getOffset());
+     }
+   }
+ 
+-
+-  public void testFileChecksum() {
+-    final Path p = new Path("har://file-localhost/foo.har/file1");
+-    final HarFileSystem harfs = new HarFileSystem();
+-    assertEquals(null, harfs.getFileChecksum(p));
++  public void testSpaces() throws Exception {
++     fs.delete(archivePath, true);
++     Configuration conf = mapred.createJobConf();
++     HadoopArchives har = new HadoopArchives(conf);
++     String[] args = new String[6];
++     args[0] = "-archiveName";
++     args[1] = "foo bar.har";
++     args[2] = "-p";
++     args[3] = fs.getHomeDirectory().toString();
++     args[4] = "test";
++     args[5] = archivePath.toString();
++     int ret = ToolRunner.run(har, args);
++     assertTrue("failed test", ret == 0);
++     Path finalPath = new Path(archivePath, "foo bar.har");
++     Path fsPath = new Path(inputPath.toUri().getPath());
++     Path filePath = new Path(finalPath, "test");
++     // make it a har path
++     Path harPath = new Path("har://" + filePath.toUri().getPath());
++     FileSystem harFs = harPath.getFileSystem(conf);
++     FileStatus[] statuses = harFs.listStatus(finalPath);
+   }
+ }
+diff --git a/src/tools/org/apache/hadoop/tools/HadoopArchives.java b/src/tools/org/apache/hadoop/tools/HadoopArchives.java
+index 6e4d578..d05ff8b 100644
+--- a/src/tools/org/apache/hadoop/tools/HadoopArchives.java
++++ b/src/tools/org/apache/hadoop/tools/HadoopArchives.java
+@@ -18,14 +18,18 @@
+ 
+ package org.apache.hadoop.tools;
+ 
++import java.io.DataInput;
++import java.io.DataOutput;
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
+-
++import java.io.UnsupportedEncodingException;
++import java.net.URLEncoder;
+ import java.util.ArrayList;
+ import java.util.HashSet;
+ import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Random;
+ import java.util.Set;
+ import java.util.TreeMap;
+ 
+@@ -43,6 +47,7 @@ import org.apache.hadoop.io.IntWritable;
+ import org.apache.hadoop.io.LongWritable;
+ import org.apache.hadoop.io.SequenceFile;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.mapred.FileInputFormat;
+ import org.apache.hadoop.mapred.FileOutputFormat;
+ import org.apache.hadoop.mapred.FileSplit;
+@@ -54,8 +59,8 @@ import org.apache.hadoop.mapred.Mapper;
+ import org.apache.hadoop.mapred.OutputCollector;
+ import org.apache.hadoop.mapred.RecordReader;
+ import org.apache.hadoop.mapred.Reducer;
+-import org.apache.hadoop.mapred.SequenceFileRecordReader;
+ import org.apache.hadoop.mapred.Reporter;
++import org.apache.hadoop.mapred.SequenceFileRecordReader;
+ import org.apache.hadoop.mapred.lib.NullOutputFormat;
+ import org.apache.hadoop.mapreduce.JobSubmissionFiles;
+ import org.apache.hadoop.util.Tool;
+@@ -70,6 +75,7 @@ import org.apache.hadoop.util.ToolRunner;
+  * Hadoop archives look at {@link HarFileSystem}.
+  */
+ public class HadoopArchives implements Tool {
++  public static final int VERSION = 3;
+   private static final Log LOG = LogFactory.getLog(HadoopArchives.class);
+   
+   private static final String NAME = "har"; 
+@@ -81,9 +87,16 @@ public class HadoopArchives implements Tool {
+   static final String TOTAL_SIZE_LABEL = NAME + ".total.size";
+   static final String DST_HAR_LABEL = NAME + ".archive.name";
+   static final String SRC_PARENT_LABEL = NAME + ".parent.path";
+-  // size of each part file
+-  // its fixed for now.
+-  static final long partSize = 2 * 1024 * 1024 * 1024l;
++
++  /** the size of the blocks that will be created when archiving **/
++  static final String HAR_BLOCKSIZE_LABEL = NAME + ".block.size";
++  /**the size of the part files that will be created when archiving **/
++  static final String HAR_PARTSIZE_LABEL = NAME + ".partfile.size";
++
++  /** size of each part file size **/
++  long partSize = 2 * 1024 * 1024 * 1024l;
++  /** size of blocks in hadoop archives **/
++  long blockSize = 512 * 1024 * 1024l;
+ 
+   private static final String usage = "archive"
+   + " -archiveName NAME -p <parent path> <src>* <dest>" +
+@@ -143,12 +156,56 @@ public class HadoopArchives implements Tool {
+     }
+   }
+ 
++  /** HarEntry is used in the {@link HArchivesMapper} as the input value. */
++  private static class HarEntry implements Writable {
++    String path;
++    String[] children;
++
++    HarEntry() {}
++    
++    HarEntry(String path, String[] children) {
++      this.path = path;
++      this.children = children;
++    }
++
++    boolean isDir() {
++      return children != null;      
++    }
++
++    @Override
++    public void readFields(DataInput in) throws IOException {
++      path = Text.readString(in);
++
++      if (in.readBoolean()) {
++        children = new String[in.readInt()];
++        for(int i = 0; i < children.length; i++) {
++          children[i] = Text.readString(in);
++        }
++      } else {
++        children = null;
++      }
++    }
++
++    @Override
++    public void write(DataOutput out) throws IOException {
++      Text.writeString(out, path);
++
++      final boolean dir = isDir();
++      out.writeBoolean(dir);
++      if (dir) {
++        out.writeInt(children.length);
++        for(String c : children) {
++          Text.writeString(out, c);
++        }
++      }
++    }
++  }
++
+   /**
+    * Input format of a hadoop archive job responsible for 
+    * generating splits of the file list
+    */
+-
+-  static class HArchiveInputFormat implements InputFormat<LongWritable, Text> {
++  static class HArchiveInputFormat implements InputFormat<LongWritable, HarEntry> {
+ 
+     //generate input splits from the src file lists
+     public InputSplit[] getSplits(JobConf jconf, int numSplits)
+@@ -168,7 +225,7 @@ public class HadoopArchives implements Tool {
+       FileStatus fstatus = fs.getFileStatus(src);
+       ArrayList<FileSplit> splits = new ArrayList<FileSplit>(numSplits);
+       LongWritable key = new LongWritable();
+-      Text value = new Text();
++      final HarEntry value = new HarEntry();
+       SequenceFile.Reader reader = null;
+       // the remaining bytes in the file split
+       long remaining = fstatus.getLen();
+@@ -205,9 +262,10 @@ public class HadoopArchives implements Tool {
+       return splits.toArray(new FileSplit[splits.size()]);
+     }
+ 
+-    public RecordReader<LongWritable, Text> getRecordReader(InputSplit split,
++    @Override
++    public RecordReader<LongWritable, HarEntry> getRecordReader(InputSplit split,
+         JobConf job, Reporter reporter) throws IOException {
+-      return new SequenceFileRecordReader<LongWritable, Text>(job,
++      return new SequenceFileRecordReader<LongWritable, HarEntry>(job,
+                  (FileSplit)split);
+     }
+   }
+@@ -243,7 +301,7 @@ public class HadoopArchives implements Tool {
+     // just take some effort to do it 
+     // rather than just using substring 
+     // so that we do not break sometime later
+-    Path justRoot = new Path(Path.SEPARATOR);
++    final Path justRoot = new Path(Path.SEPARATOR);
+     if (fullPath.depth() == root.depth()) {
+       return justRoot;
+     }
+@@ -325,20 +383,22 @@ public class HadoopArchives implements Tool {
+     }
+     Set<Map.Entry<String, HashSet<String>>> keyVals = allpaths.entrySet();
+     for (Map.Entry<String, HashSet<String>> entry : keyVals) {
+-      Path relPath = relPathToRoot(new Path(entry.getKey()), parentPath);
++      final Path relPath = relPathToRoot(new Path(entry.getKey()), parentPath);
+       if (relPath != null) {
+-        String toWrite = relPath + " dir ";
+-        HashSet<String> children = entry.getValue();
+-        StringBuffer sbuff = new StringBuffer();
+-        sbuff.append(toWrite);
+-        for (String child: children) {
+-          sbuff.append(child + " ");
++        final String[] children = new String[entry.getValue().size()];
++        int i = 0;
++        for(String child: entry.getValue()) {
++          children[i++] = child;
+         }
+-        toWrite = sbuff.toString();
+-        srcWriter.append(new LongWritable(0L), new Text(toWrite));
++        append(srcWriter, 0L, relPath.toString(), children);
+       }
+     }
+   }
++
++  private void append(SequenceFile.Writer srcWriter, long len,
++      String path, String[] children) throws IOException {
++    srcWriter.append(new LongWritable(len), new HarEntry(path, children));
++  }
+     
+   /**
+    * A static class that keeps
+@@ -396,6 +456,10 @@ public class HadoopArchives implements Tool {
+     int numFiles = 0;
+     long totalSize = 0;
+     FileSystem fs = parentPath.getFileSystem(conf);
++    this.blockSize = conf.getLong(HAR_BLOCKSIZE_LABEL, blockSize);
++    this.partSize = conf.getLong(HAR_PARTSIZE_LABEL, partSize);
++    conf.setLong(HAR_BLOCKSIZE_LABEL, blockSize);
++    conf.setLong(HAR_PARTSIZE_LABEL, partSize);
+     conf.set(DST_HAR_LABEL, archiveName);
+     conf.set(SRC_PARENT_LABEL, parentPath.makeQualified(fs).toString());
+     Path outputPath = new Path(dest, archiveName);
+@@ -405,28 +469,26 @@ public class HadoopArchives implements Tool {
+       throw new IOException("Invalid Output: " + outputPath);
+     }
+     conf.set(DST_DIR_LABEL, outputPath.toString());
+-    final String randomId = DistCp.getRandomId();
++    JobClient jClient = new JobClient(conf);
+     Path stagingArea;
+     try {
+-      stagingArea = JobSubmissionFiles.getStagingDir(new JobClient(conf),
+-            conf);
+-    } catch (InterruptedException e) {
+-      throw new IOException(e);
++      stagingArea = JobSubmissionFiles.getStagingDir(jClient, conf);
++    } catch (InterruptedException ie) {
++      throw new IOException(ie);
+     }
+     Path jobDirectory = new Path(stagingArea,
+-                               NAME + "_" + randomId);
+-    FsPermission mapredSysPerms =
++        NAME+"_"+Integer.toString(new Random().nextInt(Integer.MAX_VALUE), 36));
++    FsPermission mapredSysPerms = 
+       new FsPermission(JobSubmissionFiles.JOB_DIR_PERMISSION);
+     FileSystem.mkdirs(jobDirectory.getFileSystem(conf), jobDirectory,
+                       mapredSysPerms);
+     conf.set(JOB_DIR_LABEL, jobDirectory.toString());
+     //get a tmp directory for input splits
+     FileSystem jobfs = jobDirectory.getFileSystem(conf);
+-    jobfs.mkdirs(jobDirectory);
+     Path srcFiles = new Path(jobDirectory, "_har_src_files");
+     conf.set(SRC_LIST_LABEL, srcFiles.toString());
+     SequenceFile.Writer srcWriter = SequenceFile.createWriter(jobfs, conf,
+-        srcFiles, LongWritable.class, Text.class, 
++        srcFiles, LongWritable.class, HarEntry.class, 
+         SequenceFile.CompressionType.NONE);
+     // get the list of files 
+     // create single list of files and dirs
+@@ -446,24 +508,21 @@ public class HadoopArchives implements Tool {
+         recursivels(fs, fdir, allFiles);
+         for (FileStatusDir statDir: allFiles) {
+           FileStatus stat = statDir.getFileStatus();
+-          String toWrite = "";
+           long len = stat.isDir()? 0:stat.getLen();
++          final Path path = relPathToRoot(stat.getPath(), parentPath);
++          final String[] children;
+           if (stat.isDir()) {
+-            toWrite = "" + relPathToRoot(stat.getPath(), parentPath) + " dir ";
+             //get the children 
+             FileStatus[] list = statDir.getChildren();
+-            StringBuffer sbuff = new StringBuffer();
+-            sbuff.append(toWrite);
+-            for (FileStatus stats: list) {
+-              sbuff.append(stats.getPath().getName() + " ");
++            children = new String[list.length];
++            for (int i = 0; i < list.length; i++) {
++              children[i] = list[i].getPath().getName();
+             }
+-            toWrite = sbuff.toString();
+           }
+           else {
+-            toWrite +=  relPathToRoot(stat.getPath(), parentPath) + " file ";
++            children = null;
+           }
+-          srcWriter.append(new LongWritable(len), new 
+-              Text(toWrite));
++          append(srcWriter, len, path.toString(), children);
+           srcWriter.sync();
+           numFiles++;
+           totalSize += len;
+@@ -500,7 +559,7 @@ public class HadoopArchives implements Tool {
+   }
+ 
+   static class HArchivesMapper 
+-  implements Mapper<LongWritable, Text, IntWritable, Text> {
++  implements Mapper<LongWritable, HarEntry, IntWritable, Text> {
+     private JobConf conf = null;
+     int partId = -1 ; 
+     Path tmpOutputDir = null;
+@@ -511,13 +570,15 @@ public class HadoopArchives implements Tool {
+     FileSystem destFs = null;
+     byte[] buffer;
+     int buf_size = 128 * 1024;
+-    
++    long blockSize = 512 * 1024 * 1024l;
++
+     // configure the mapper and create 
+     // the part file.
+     // use map reduce framework to write into
+     // tmp files. 
+     public void configure(JobConf conf) {
+       this.conf = conf;
++
+       // this is tightly tied to map reduce
+       // since it does not expose an api 
+       // to get the partition
+@@ -525,6 +586,7 @@ public class HadoopArchives implements Tool {
+       // create a file name using the partition
+       // we need to write to this directory
+       tmpOutputDir = FileOutputFormat.getWorkOutputPath(conf);
++      blockSize = conf.getLong(HAR_BLOCKSIZE_LABEL, blockSize);
+       // get the output path and write to the tmp 
+       // directory 
+       partname = "part-" + partId;
+@@ -540,10 +602,11 @@ public class HadoopArchives implements Tool {
+         //this was a stale copy
+         if (destFs.exists(tmpOutput)) {
+           destFs.delete(tmpOutput, false);
+-        }
+-        partStream = destFs.create(tmpOutput);
++        } 
++        partStream = destFs.create(tmpOutput, false, conf.getInt("io.file.buffer.size", 4096), 
++            destFs.getDefaultReplication(), blockSize);
+       } catch(IOException ie) {
+-        throw new RuntimeException("Unable to open output file " + tmpOutput);
++        throw new RuntimeException("Unable to open output file " + tmpOutput, ie);
+       }
+       buffer = new byte[buf_size];
+     }
+@@ -560,28 +623,6 @@ public class HadoopArchives implements Tool {
+         fsin.close();
+       }
+     }
+-       
+-    static class MapStat {
+-      private String pathname;
+-      private boolean isDir;
+-      private List<String> children;
+-      public MapStat(String line) {
+-        String[] splits = line.split(" ");
+-        pathname = splits[0];
+-        if ("dir".equals(splits[1])) {
+-          isDir = true;
+-        }
+-        else {
+-          isDir = false;
+-        }
+-        if (isDir) {
+-          children = new ArrayList<String>();
+-          for (int i = 2; i < splits.length; i++) {
+-            children.add(splits[i]);
+-          }
+-        }
+-      }
+-    }
+     
+     /**
+      * get rid of / in the beginning of path
+@@ -596,41 +637,57 @@ public class HadoopArchives implements Tool {
+       return new Path(parent, new Path(p.toString().substring(1)));
+     }
+ 
++    private static String encodeName(String s) 
++      throws UnsupportedEncodingException {
++      return URLEncoder.encode(s,"UTF-8");
++    }
++
++    private static String encodeProperties( FileStatus fStatus )
++      throws UnsupportedEncodingException {
++      String propStr = encodeName(
++          fStatus.getModificationTime() + " "
++        + fStatus.getPermission().toShort() + " "
++        + encodeName(fStatus.getOwner()) + " "
++        + encodeName(fStatus.getGroup()));
++      return propStr;
++    }
++
+     // read files from the split input 
+     // and write it onto the part files.
+     // also output hash(name) and string 
+     // for reducer to create index 
+     // and masterindex files.
+-    public void map(LongWritable key, Text value,
++    public void map(LongWritable key, HarEntry value,
+         OutputCollector<IntWritable, Text> out,
+         Reporter reporter) throws IOException {
+-      String line  = value.toString();
+-      MapStat mstat = new MapStat(line);
+-      Path relPath = new Path(mstat.pathname);
++      Path relPath = new Path(value.path);
+       int hash = HarFileSystem.getHarHash(relPath);
+       String towrite = null;
+       Path srcPath = realPath(relPath, rootPath);
+       long startPos = partStream.getPos();
+-      if (mstat.isDir) { 
+-        towrite = relPath.toString() + " " + "dir none " + 0 + " " + 0 + " ";
++      FileSystem srcFs = srcPath.getFileSystem(conf);
++      FileStatus srcStatus = srcFs.getFileStatus(srcPath);
++      String propStr = encodeProperties(srcStatus);
++      if (value.isDir()) { 
++        towrite = encodeName(relPath.toString())
++                  + " dir " + propStr + " 0 0 ";
+         StringBuffer sbuff = new StringBuffer();
+         sbuff.append(towrite);
+-        for (String child: mstat.children) {
+-          sbuff.append(child + " ");
++        for (String child: value.children) {
++          sbuff.append(encodeName(child) + " ");
+         }
+         towrite = sbuff.toString();
+         //reading directories is also progress
+         reporter.progress();
+       }
+       else {
+-        FileSystem srcFs = srcPath.getFileSystem(conf);
+-        FileStatus srcStatus = srcFs.getFileStatus(srcPath);
+         FSDataInputStream input = srcFs.open(srcStatus.getPath());
+         reporter.setStatus("Copying file " + srcStatus.getPath() + 
+             " to archive.");
+         copyData(srcStatus.getPath(), input, partStream, reporter);
+-        towrite = relPath.toString() + " file " + partname + " " + startPos
+-        + " " + srcStatus.getLen() + " ";
++        towrite = encodeName(relPath.toString())
++                  + " file " + partname + " " + startPos
++                  + " " + srcStatus.getLen() + " " + propStr + " ";
+       }
+       out.collect(new IntWritable(hash), new Text(towrite));
+     }
+@@ -676,7 +733,7 @@ public class HadoopArchives implements Tool {
+         }
+         indexStream = fs.create(index);
+         outStream = fs.create(masterIndex);
+-        String version = HarFileSystem.VERSION + " \n";
++        String version = VERSION + " \n";
+         outStream.write(version.getBytes());
+         
+       } catch(IOException e) {
+@@ -796,6 +853,11 @@ public class HadoopArchives implements Tool {
+           }
+         }
+       }
++      if (globPaths.isEmpty()) {
++        throw new IOException("The resolved paths set is empty."
++            + "  Please check whether the srcPaths exist, where srcPaths = "
++            + srcPaths);
++      }
+       archive(parentPath, globPaths, archiveName, destPath);
+     } catch(IOException ie) {
+       System.err.println(ie.getLocalizedMessage());
+-- 
+1.7.0.4
+

@@ -408,6 +408,36 @@ public class TestTaskTrackerLocalization extends TestCase {
     checkJobLocalization();
   }
 
+  /**
+   * Test that, if the job log dir can't be created, the job will fail
+   * during localization rather than at the time when the task itself
+   * tries to write into it.
+   */
+  public void testJobLocalizationFailsIfLogDirUnwritable()
+      throws Exception {
+    if (!canRun()) {
+      return;
+    }
+
+    File logDir = TaskLog.getJobDir(jobId);
+    File logDirParent = logDir.getParentFile();
+
+    try {
+      assertTrue(logDirParent.mkdirs() || logDirParent.isDirectory());
+      FileUtil.fullyDelete(logDir);
+      FileUtil.chmod(logDirParent.getAbsolutePath(), "000");
+
+      tracker.localizeJob(tip);
+      fail("No exception");
+    } catch (IOException ioe) {
+      LOG.info("Got exception", ioe);
+      assertTrue(ioe.getMessage().contains("Could not create job user log"));
+    } finally {
+      // Put it back just to be safe
+      FileUtil.chmod(logDirParent.getAbsolutePath(), "755");
+    }
+  }
+
   protected void checkJobLocalization()
       throws IOException {
     // Check the directory structure
@@ -581,8 +611,14 @@ public class TestTaskTrackerLocalization extends TestCase {
     out.close();
     // no write permission for subDir and subDir/file
     int ret = 0;
-    if((ret = FileUtil.chmod(subDir.toUri().getPath(), "a=rx", true)) != 0) {
-      LOG.warn("chmod failed for " + subDir + ";retVal=" + ret);
+    try {
+      if((ret = FileUtil.chmod(subDir.toUri().getPath(), "a=rx", true)) != 0) {
+        LOG.warn("chmod failed for " + subDir + ";retVal=" + ret);
+      }
+    } catch (InterruptedException ie) {
+      // This exception is never actually thrown, but the signature says
+      // it is, and we can't make the incompatible change within CDH
+      throw new IOException("Interrupted while chmodding", ie);
     }
   }
 

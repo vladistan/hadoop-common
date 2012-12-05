@@ -40,8 +40,14 @@ AC_PREFIX_DEFAULT([`pwd`])
  DEFS=""
 AC_SUBST([DEFS])
 
+# Need GNU source for multiple hashtables from glibc
+AC_GNU_SOURCE
+
 AC_FUNC_GETGROUPS
 AC_TYPE_GETGROUPS
+
+AC_PROG_CC
+AC_SYS_LARGEFILE
 
 ############################################################################
 # Section 2:

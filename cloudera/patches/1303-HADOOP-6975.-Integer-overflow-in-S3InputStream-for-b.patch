@@ -1,0 +1,28 @@
+From 7fc3746cc760da22a06ae9a7fc64cb956fcee039 Mon Sep 17 00:00:00 2001
+From: Harsh J <harsh@cloudera.com>
+Date: Sun, 15 Jul 2012 08:13:18 +0530
+Subject: [PATCH 1303/1344] HADOOP-6975. Integer overflow in S3InputStream for blocks > 2GB
+
+Reason: Good to have
+Ref: CDH-6774
+Author: Patrick Kling
+---
+ .../org/apache/hadoop/fs/s3/S3InputStream.java     |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/fs/s3/S3InputStream.java b/src/core/org/apache/hadoop/fs/s3/S3InputStream.java
+index 986f4ff..388e577 100644
+--- a/src/core/org/apache/hadoop/fs/s3/S3InputStream.java
++++ b/src/core/org/apache/hadoop/fs/s3/S3InputStream.java
+@@ -118,7 +118,7 @@ class S3InputStream extends FSInputStream {
+       if (pos > blockEnd) {
+         blockSeekTo(pos);
+       }
+-      int realLen = Math.min(len, (int) (blockEnd - pos + 1));
++      int realLen = (int) Math.min((long) len, (blockEnd - pos + 1L));
+       int result = blockStream.read(buf, off, realLen);
+       if (result >= 0) {
+         pos += result;
+-- 
+1.7.0.4
+

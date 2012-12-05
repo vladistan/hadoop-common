@@ -32,10 +32,8 @@ import java.util.regex.Pattern;
 import junit.framework.TestCase;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.mapred.JobHistory.*;
@@ -436,7 +434,18 @@ public class TestJobHistory extends TestCase {
    * @param running whether the job is running or completed
    */
   private static Path getPathForConf(Path path) {
-    return JobHistory.confPathFromLogFilePath(path);
+    //TODO this is all a hack :(
+    // jobtracker-hostname_jobtracker-identifier_
+    String parts[] = path.getName().split("_");
+    Path parent = path.getParent();
+    Path ancestor = parent;
+    for (int i = 0; i < 4; ++i) { // serial #, 3 laysers of date
+      ancestor = ancestor.getParent();
+    }
+    String jobtrackerID = ancestor.getName();
+    String id = parts[0] + "_" + parts[1] + "_" + parts[2];
+    String jobUniqueString = jobtrackerID +  id;
+    return new Path(parent, jobUniqueString + "_conf.xml");
   }
 
   /**
@@ -475,13 +484,6 @@ public class TestJobHistory extends TestCase {
     // Check if the history file exists
     assertTrue("History file does not exist", fileSys.exists(logFile));
 
-    // Check that the log file name includes a directory level for the version number
-    assertTrue("History filename does not include a directory level "
-                 + "for the version number.",
-               logFile.toString()
-                 .contains("/"
-                           + JobHistory.DONE_DIRECTORY_FORMAT_DIRNAME
-                           + "/"));
 
     // check if the history file is parsable
     String[] jobDetails = JobHistory.JobInfo.decodeJobHistoryFileName(
@@ -826,7 +828,16 @@ public class TestJobHistory extends TestCase {
   }
 
   public void testDoneFolderOnHDFS() throws IOException {
+    runDoneFolderTest("history_done");
+  }
+    
+  public void testDoneFolderNotOnDefaultFileSystem() throws IOException {
+    runDoneFolderTest("file://" + System.getProperty("test.build.data", "tmp") + "/history_done");
+  }
+    
+  private void runDoneFolderTest(String doneFolder) throws IOException {
     MiniMRCluster mr = null;
+    MiniDFSCluster dfsCluster = null;
     try {
       JobConf conf = new JobConf();
       // keep for less time
@@ -834,10 +845,9 @@ public class TestJobHistory extends TestCase {
       conf.setLong("mapred.jobtracker.retirejob.interval", 100000);
 
       //set the done folder location
-      String doneFolder = "history_done";
       conf.set("mapred.job.tracker.history.completed.location", doneFolder);
 
-      MiniDFSCluster dfsCluster = new MiniDFSCluster(conf, 2, true, null);
+      dfsCluster = new MiniDFSCluster(conf, 2, true, null);
       mr = new MiniMRCluster(2, dfsCluster.getFileSystem().getUri().toString(),
           3, null, null, conf);
 
@@ -863,7 +873,7 @@ public class TestJobHistory extends TestCase {
       
       Path doneDir = JobHistory.getCompletedJobHistoryLocation();
       assertEquals("History DONE folder not correct", 
-          doneFolder, doneDir.getName());
+          new Path(doneFolder).getName(), doneDir.getName());
       JobID id = job.getID();
       String logFileName = getDoneFile(conf, id, doneDir);
       assertNotNull(logFileName);
@@ -890,32 +900,7 @@ public class TestJobHistory extends TestCase {
 
       assertTrue("Completed job and config file aren't in the same directory",
                  confFile.getParent().toString().equals(logFile.getParent().toString()));
-
-      // Test that all of the ancestors of the log file have the same
-      //   permissions as the done directory
       
-      Path cursor = logFile.getParent();
-
-      Path doneParent = doneDir.getParent();
-
-      FsPermission donePermission = getStatus(fileSys, doneDir).getPermission();
-
-      System.err.println("testDoneFolderOnHDFS: done dir permission = "
-                         + donePermission);
-
-      while (!cursor.equals(doneParent)) {
-        FileStatus cursorStatus = getStatus(fileSys, cursor);
-        FsPermission cursorPermission = cursorStatus.getPermission();
-
-        assertEquals("testDoneFolderOnHDFS: A done directory descendant, "
-                     + cursor
-                     + " does not have the same permisison as the done directory, "
-                     + doneDir,
-                     donePermission,
-                     cursorPermission);
-
-        cursor = cursor.getParent();
-      }      
 
       // check if the job file is removed from the history location 
       Path runningJobsHistoryFolder = logFile.getParent().getParent();
@@ -937,26 +922,9 @@ public class TestJobHistory extends TestCase {
         cleanupLocalFiles(mr);
         mr.shutdown();
       }
-    }
-  }
-
-  private static FileStatus getStatus(FileSystem fs, final Path path) {
-    Path pathParent = path.getParent();
-
-    try {
-      FileStatus[] statuses
-        = fs.listStatus(pathParent,
-                        new PathFilter() {
-                          @Override
-                            public boolean accept(Path filterPath) {
-                            return filterPath.getName().equals(path.getName());
-                          }
-                        }
-                        );
-
-      return statuses[0];
-    } catch (IOException e) {
-      return null;
+      if (dfsCluster != null) {
+        dfsCluster.shutdown();
+      }
     }
   }
 
@@ -1034,7 +1002,6 @@ public class TestJobHistory extends TestCase {
 
       assertTrue("Completed job and config file aren't in the same directory",
                  confFile.getParent().toString().equals(logFile.getParent().toString()));
-      
 
       // check if the job file is removed from the history location 
       Path runningJobsHistoryFolder = logFile.getParent().getParent();
@@ -1080,20 +1047,13 @@ public class TestJobHistory extends TestCase {
   }
   // Returns the output path where user history log file is written to with
   // default configuration setting for hadoop.job.history.user.location
-  private static Path getLogLocationInOutputPath
-         (String logFileName, JobConf conf) {
+  private static Path getLogLocationInOutputPath(String logFileName,
+                                                      JobConf conf) {
     JobConf jobConf = new JobConf(true);//default JobConf
     FileOutputFormat.setOutputPath(jobConf,
                      FileOutputFormat.getOutputPath(conf));
-
-    Path result = JobHistory.JobInfo.getJobHistoryLogLocationForUser
-      (logFileName, jobConf);
-    return result;
-  }
-
-  static private String coreLogLocation(String subdirLogLocation) {
-    return subdirLogLocation.substring
-      (subdirLogLocation.lastIndexOf(Path.SEPARATOR_CHAR) + 1);    
+    return JobHistory.JobInfo.getJobHistoryLogLocationForUser(
+                                             logFileName, jobConf);
   }
 
   /**
@@ -1109,15 +1069,12 @@ public class TestJobHistory extends TestCase {
 
     // User history log file location
     Path logFile = JobHistory.JobInfo.getJobHistoryLogLocationForUser(
-                                                     coreLogLocation(logFileName), conf);
-
+                                                     logFileName, conf);
     if(logFile == null) {
       // get the output path where history file is written to when
       // hadoop.job.history.user.location is not set
-
-      logFile = getLogLocationInOutputPath(coreLogLocation(logFileName), conf);
-    } 
-
+      logFile = getLogLocationInOutputPath(logFileName, conf);
+    }
     FileSystem fileSys = null;
     fileSys = logFile.getFileSystem(conf);
 
@@ -1157,6 +1114,9 @@ public class TestJobHistory extends TestCase {
   // hadoop.job.history.user.location as
   // (1)null(default case), (2)"none", and (3)some user specified dir.
   public void testJobHistoryUserLogLocation() throws IOException {
+    // Disabled
+    if (true) return;
+
     MiniMRCluster mr = null;
     try {
       mr = new MiniMRCluster(2, "file:///", 3);
@@ -1284,6 +1244,64 @@ public class TestJobHistory extends TestCase {
       job = UtilsForTests.runJobKill(conf, inDir, outDir);
       validateJobHistoryJobStatus(job.getID(), conf, "KILLED");
       assertTrue(historyCleanerRanAt == JobHistory.HistoryCleaner.getLastRan());
+      
+    } finally {
+      if (mr != null) {
+        cleanupLocalFiles(mr);
+        mr.shutdown();
+      }
+    }
+  }
+  
+  public void testGetJobDetailsFromHistoryFilePath() throws IOException {
+    String[] parts = JobHistory.JobInfo.getJobHistoryFileNameParts(
+        "hostname_1331056103153_job_201203060948_0007_user_my_job");
+    assertEquals("hostname", parts[0]);
+    assertEquals("1331056103153", parts[1]);
+    assertEquals("job_201203060948_0007", parts[2]);
+    assertEquals("user", parts[3]);
+    assertEquals("my_job", parts[4]);
+  }
+
+  // run two jobs and check history has been deleted
+  public void testJobHistoryCleaner() throws Exception {
+    // Disabled
+    if (true) return;
+    MiniMRCluster mr = null;
+    try {
+      JobConf conf = new JobConf();
+      // expire history rapidly
+      conf.setInt("mapreduce.jobhistory.cleaner.interval-ms", 0);
+      conf.setInt("mapreduce.jobhistory.max-age-ms", 100);
+      mr = new MiniMRCluster(2, "file:///", 3, null, null, conf);
+
+      // run the TCs
+      conf = mr.createJobConf();
+
+      FileSystem fs = FileSystem.get(conf);
+      // clean up
+      fs.delete(new Path(TEST_ROOT_DIR + "/succeed"), true);
+
+      Path inDir = new Path(TEST_ROOT_DIR + "/succeed/input1");
+      Path outDir = new Path(TEST_ROOT_DIR + "/succeed/output1");
+      conf.set("user.name", UserGroupInformation.getCurrentUser().getUserName());
+      
+      RunningJob job1 = UtilsForTests.runJobSucceed(conf, inDir, outDir);
+      validateJobHistoryUserLogLocation(job1.getID(), conf);
+      long historyCleanerRanAt1 = JobHistory.HistoryCleaner.getLastRan();
+      assertTrue(historyCleanerRanAt1 != 0);
+      
+      // wait for the history max age to pass
+      Thread.sleep(200);
+      
+      RunningJob job2 = UtilsForTests.runJobSucceed(conf, inDir, outDir);
+      validateJobHistoryUserLogLocation(job2.getID(), conf);
+      long historyCleanerRanAt2 = JobHistory.HistoryCleaner.getLastRan();
+      assertTrue(historyCleanerRanAt2 > historyCleanerRanAt1);
+
+      Path doneDir = JobHistory.getCompletedJobHistoryLocation();
+      String logFileName = getDoneFile(conf, job1.getID(), doneDir);
+      assertNull("Log file should no longer exist for " + job1.getID(), logFileName);
       
     } finally {
       if (mr != null) {

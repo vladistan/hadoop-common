@@ -1,0 +1,37 @@
+From 6a2d7bda9e7f877d1d80f20e9888c5b949acdd0d Mon Sep 17 00:00:00 2001
+From: Eli Collins <eli@cloudera.com>
+Date: Fri, 29 Jun 2012 17:58:47 -0700
+Subject: [PATCH 1280/1344] HDFS-3581. FSPermissionChecker#checkPermission stick bit check missing range check.
+
+The checkStickyBit call in FSPermissionChecker#checkPermission is
+missing a range check which results in an index out of bounds when
+accessing root.
+
+Reason: Bug fix
+Author: Eli Collins
+Ref: CDH-4806
+---
+ .../hdfs/server/namenode/FSPermissionChecker.java  |    6 +++---
+ 1 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSPermissionChecker.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSPermissionChecker.java
+index bb3eb2a..0cb9161 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSPermissionChecker.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/FSPermissionChecker.java
+@@ -124,10 +124,10 @@ private final UserGroupInformation ugi;
+           ancestorIndex--);
+       checkTraverse(inodes, ancestorIndex);
+ 
+-      if(parentAccess != null && parentAccess.implies(FsAction.WRITE)
+-          && inodes[inodes.length - 1] != null)
++      if (parentAccess != null && parentAccess.implies(FsAction.WRITE)
++          && inodes.length > 1 && inodes[inodes.length - 1] != null) {
+         checkStickyBit(inodes[inodes.length - 2], inodes[inodes.length - 1]);
+-
++      }
+       if (ancestorAccess != null && inodes.length > 1) {
+         check(inodes, ancestorIndex, ancestorAccess);
+       }
+-- 
+1.7.0.4
+

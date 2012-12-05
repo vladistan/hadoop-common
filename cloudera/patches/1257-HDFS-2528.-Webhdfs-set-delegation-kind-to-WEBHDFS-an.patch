@@ -1,0 +1,391 @@
+From 83d9c8eae6934b78ea8f091009d6b97e57d07f42 Mon Sep 17 00:00:00 2001
+From: Tsz-wo Sze <szetszwo@apache.org>
+Date: Mon, 7 Nov 2011 20:07:54 +0000
+Subject: [PATCH 1257/1344] HDFS-2528. Webhdfs: set delegation kind to WEBHDFS and add a HDFS token when http requests are redirected to datanode.
+
+git-svn-id: https://svn.apache.org/repos/asf/hadoop/common/branches/branch-0.20-security@1198906 13f79535-47bb-0310-9956-ffa450edef68
+(cherry picked from commit 5676e2d097028803c0250116b989911193c7cc53)
+
+Author: Tsz-wo Sze
+Ref: CDH-4806
+---
+ .../token/delegation/DelegationTokenRenewer.java   |   15 ++++-
+ .../web/resources/DatanodeWebHdfsMethods.java      |   72 +++++++++++++-------
+ .../hadoop/hdfs/server/namenode/JspHelper.java     |    3 +-
+ .../web/resources/NamenodeWebHdfsMethods.java      |    2 +-
+ .../apache/hadoop/hdfs/web/WebHdfsFileSystem.java  |   44 +++++--------
+ .../hadoop/hdfs/web/resources/UserProvider.java    |    2 +-
+ .../org/apache/hadoop/hdfs/web/TestWebHdfsUrl.java |    2 +-
+ 7 files changed, 82 insertions(+), 58 deletions(-)
+
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java
+index 6e26ffc..6125821 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/security/token/delegation/DelegationTokenRenewer.java
+@@ -73,6 +73,19 @@ public class DelegationTokenRenewer<T extends FileSystem & DelegationTokenRenewe
+       return this.renewalTime < that.renewalTime? -1
+           : this.renewalTime == that.renewalTime? 0: 1;
+     }
++
++    @Override
++    public int hashCode() {
++      return (int)renewalTime ^ (int)(renewalTime >>> 32);
++    }
++
++    @Override
++    public boolean equals(final Object that) {
++      if (that == null || !(that instanceof RenewAction)) {
++        return false;
++      }
++      return compareTo((Delayed)that) == 0;
++    }
+     
+     /**
+      * Set a new time for the renewal.
+@@ -121,7 +134,7 @@ public class DelegationTokenRenewer<T extends FileSystem & DelegationTokenRenewe
+ 
+   private DelayQueue<RenewAction<T>> queue = new DelayQueue<RenewAction<T>>();
+ 
+-  public DelegationTokenRenewer(final Class<?> clazz) {
++  public DelegationTokenRenewer(final Class<T> clazz) {
+     super(clazz.getSimpleName() + "-" + DelegationTokenRenewer.class.getSimpleName());
+     setDaemon(true);
+   }
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+index 53b967b..3ebbda4 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/datanode/web/resources/DatanodeWebHdfsMethods.java
+@@ -49,6 +49,7 @@ import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSClient;
+ import org.apache.hadoop.hdfs.DFSClient.DFSDataInputStream;
++import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.server.datanode.DataNode;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.web.JsonUtil;
+@@ -56,7 +57,9 @@ import org.apache.hadoop.hdfs.web.ParamFilter;
+ import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+ import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
+ import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
++import org.apache.hadoop.hdfs.web.resources.DelegationParam;
+ import org.apache.hadoop.hdfs.web.resources.GetOpParam;
++import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
+ import org.apache.hadoop.hdfs.web.resources.LengthParam;
+ import org.apache.hadoop.hdfs.web.resources.OffsetParam;
+ import org.apache.hadoop.hdfs.web.resources.OverwriteParam;
+@@ -67,7 +70,9 @@ import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+ import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
+ import org.apache.hadoop.hdfs.web.resources.UriFsPathParam;
+ import org.apache.hadoop.io.IOUtils;
++import org.apache.hadoop.security.SecurityUtil;
+ import org.apache.hadoop.security.UserGroupInformation;
++import org.apache.hadoop.security.token.Token;
+ 
+ import com.sun.jersey.spi.container.ResourceFilters;
+ 
+@@ -82,6 +87,29 @@ public class DatanodeWebHdfsMethods {
+   private @Context ServletContext context;
+   private @Context HttpServletResponse response;
+ 
++  private void init(final UserGroupInformation ugi, final DelegationParam delegation,
++      final UriFsPathParam path, final HttpOpParam<?> op,
++      final Param<?, ?>... parameters) throws IOException {
++    if (LOG.isTraceEnabled()) {
++      LOG.trace("HTTP " + op.getValue().getType() + ": " + op + ", " + path
++          + ", ugi=" + ugi + Param.toSortedString(", ", parameters));
++    }
++
++    //clear content type
++    response.setContentType(null);
++    
++    if (UserGroupInformation.isSecurityEnabled()) {
++      //add a token for RPC.
++      final DataNode datanode = (DataNode)context.getAttribute("datanode");
++      final InetSocketAddress nnRpcAddr = NameNode.getAddress(datanode.getConf());
++      final Token<DelegationTokenIdentifier> token = new Token<DelegationTokenIdentifier>();
++      token.decodeFromUrlString(delegation.getValue());
++      SecurityUtil.setTokenService(token, nnRpcAddr);
++      token.setKind(DelegationTokenIdentifier.HDFS_DELEGATION_KIND);
++      ugi.addToken(token);
++    }
++  }
++
+   /** Handle HTTP PUT request for the root. */
+   @PUT
+   @Path("/")
+@@ -90,6 +118,8 @@ public class DatanodeWebHdfsMethods {
+   public Response putRoot(
+       final InputStream in,
+       @Context final UserGroupInformation ugi,
++      @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
++          final DelegationParam delegation,
+       @QueryParam(PutOpParam.NAME) @DefaultValue(PutOpParam.DEFAULT)
+           final PutOpParam op,
+       @QueryParam(PermissionParam.NAME) @DefaultValue(PermissionParam.DEFAULT)
+@@ -103,7 +133,7 @@ public class DatanodeWebHdfsMethods {
+       @QueryParam(BlockSizeParam.NAME) @DefaultValue(BlockSizeParam.DEFAULT)
+           final BlockSizeParam blockSize
+       ) throws IOException, InterruptedException {
+-    return put(in, ugi, ROOT, op, permission, overwrite, bufferSize,
++    return put(in, ugi, delegation, ROOT, op, permission, overwrite, bufferSize,
+         replication, blockSize);
+   }
+ 
+@@ -115,6 +145,8 @@ public class DatanodeWebHdfsMethods {
+   public Response put(
+       final InputStream in,
+       @Context final UserGroupInformation ugi,
++      @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
++          final DelegationParam delegation,
+       @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
+       @QueryParam(PutOpParam.NAME) @DefaultValue(PutOpParam.DEFAULT)
+           final PutOpParam op,
+@@ -130,14 +162,8 @@ public class DatanodeWebHdfsMethods {
+           final BlockSizeParam blockSize
+       ) throws IOException, InterruptedException {
+ 
+-    if (LOG.isTraceEnabled()) {
+-      LOG.trace(op + ": " + path + ", ugi=" + ugi
+-          + Param.toSortedString(", ", permission, overwrite, bufferSize,
+-              replication, blockSize));
+-    }
+-
+-    //clear content type
+-    response.setContentType(null);
++    init(ugi, delegation, path, op, permission, overwrite, bufferSize,
++        replication, blockSize);
+ 
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+@@ -187,12 +213,14 @@ public class DatanodeWebHdfsMethods {
+   public Response postRoot(
+       final InputStream in,
+       @Context final UserGroupInformation ugi,
++      @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
++          final DelegationParam delegation,
+       @QueryParam(PostOpParam.NAME) @DefaultValue(PostOpParam.DEFAULT)
+           final PostOpParam op,
+       @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
+           final BufferSizeParam bufferSize
+       ) throws IOException, InterruptedException {
+-    return post(in, ugi, ROOT, op, bufferSize);
++    return post(in, ugi, delegation, ROOT, op, bufferSize);
+   }
+ 
+   /** Handle HTTP POST request. */
+@@ -203,6 +231,8 @@ public class DatanodeWebHdfsMethods {
+   public Response post(
+       final InputStream in,
+       @Context final UserGroupInformation ugi,
++      @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
++          final DelegationParam delegation,
+       @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
+       @QueryParam(PostOpParam.NAME) @DefaultValue(PostOpParam.DEFAULT)
+           final PostOpParam op,
+@@ -210,13 +240,7 @@ public class DatanodeWebHdfsMethods {
+           final BufferSizeParam bufferSize
+       ) throws IOException, InterruptedException {
+ 
+-    if (LOG.isTraceEnabled()) {
+-      LOG.trace(op + ": " + path + ", ugi=" + ugi
+-          + Param.toSortedString(", ", bufferSize));
+-    }
+-
+-    //clear content type
+-    response.setContentType(null);
++    init(ugi, delegation, path, op, bufferSize);
+ 
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+@@ -258,6 +282,8 @@ public class DatanodeWebHdfsMethods {
+   @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response getRoot(
+       @Context final UserGroupInformation ugi,
++      @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
++          final DelegationParam delegation,
+       @QueryParam(GetOpParam.NAME) @DefaultValue(GetOpParam.DEFAULT)
+           final GetOpParam op,
+       @QueryParam(OffsetParam.NAME) @DefaultValue(OffsetParam.DEFAULT)
+@@ -267,7 +293,7 @@ public class DatanodeWebHdfsMethods {
+       @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
+           final BufferSizeParam bufferSize
+       ) throws IOException, InterruptedException {
+-    return get(ugi, ROOT, op, offset, length, bufferSize); 
++    return get(ugi, delegation, ROOT, op, offset, length, bufferSize); 
+   }
+ 
+   /** Handle HTTP GET request. */
+@@ -276,6 +302,8 @@ public class DatanodeWebHdfsMethods {
+   @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+   public Response get(
+       @Context final UserGroupInformation ugi,
++      @QueryParam(DelegationParam.NAME) @DefaultValue(DelegationParam.DEFAULT)
++          final DelegationParam delegation,
+       @PathParam(UriFsPathParam.NAME) final UriFsPathParam path,
+       @QueryParam(GetOpParam.NAME) @DefaultValue(GetOpParam.DEFAULT)
+           final GetOpParam op,
+@@ -287,13 +315,7 @@ public class DatanodeWebHdfsMethods {
+           final BufferSizeParam bufferSize
+       ) throws IOException, InterruptedException {
+ 
+-    if (LOG.isTraceEnabled()) {
+-      LOG.trace(op + ": " + path + ", ugi=" + ugi
+-          + Param.toSortedString(", ", offset, length, bufferSize));
+-    }
+-
+-    //clear content type
+-    response.setContentType(null);
++    init(ugi, delegation, path, op, offset, length, bufferSize);
+ 
+     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
+       @Override
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
+index 2ad92a9..d2b6d9a 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/JspHelper.java
+@@ -477,7 +477,8 @@ public class JspHelper {
+           new Token<DelegationTokenIdentifier>();
+         token.decodeFromUrlString(tokenString);
+         SecurityUtil.setTokenService(token, NameNode.getAddress(conf));
+-        LOG.info("Setting service in token: " + token.getService());
++        token.setKind(DelegationTokenIdentifier.HDFS_DELEGATION_KIND);
++
+         ByteArrayInputStream buf = 
+           new ByteArrayInputStream(token.getIdentifier());
+         DataInputStream in = new DataInputStream(buf);
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+index f160641..f7088cb 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/server/namenode/web/resources/NamenodeWebHdfsMethods.java
+@@ -146,7 +146,7 @@ public class NamenodeWebHdfsMethods {
+         namenode, ugi, renewer != null? renewer: ugi.getShortUserName());
+     final Token<? extends TokenIdentifier> t = c.getAllTokens().iterator().next();
+     t.setKind(WebHdfsFileSystem.TOKEN_KIND);
+-    SecurityUtil.setTokenService(t, namenode.getNameNodeAddress());
++    SecurityUtil.setTokenService(t, namenode.getHttpAddress());
+     return t;
+   }
+ 
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+index 3dd16d8..7463e77 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/WebHdfsFileSystem.java
+@@ -108,17 +108,24 @@ public class WebHdfsFileSystem extends FileSystem
+   private static final KerberosUgiAuthenticator AUTH = new KerberosUgiAuthenticator();
+   /** Delegation token kind */
+   public static final Text TOKEN_KIND = new Text("WEBHDFS delegation");
++  /** Token selector */
++  public static final AbstractDelegationTokenSelector<DelegationTokenIdentifier> DT_SELECTOR
++      = new AbstractDelegationTokenSelector<DelegationTokenIdentifier>(TOKEN_KIND) {};
+ 
+-  private static final DelegationTokenRenewer<WebHdfsFileSystem> dtRenewer
+-      = new DelegationTokenRenewer<WebHdfsFileSystem>(WebHdfsFileSystem.class);
+-  static {
+-    dtRenewer.start();
++  private static DelegationTokenRenewer<WebHdfsFileSystem> DT_RENEWER = null;
++
++  private static synchronized void addRenewAction(final WebHdfsFileSystem webhdfs) {
++    if (DT_RENEWER == null) {
++      DT_RENEWER = new DelegationTokenRenewer<WebHdfsFileSystem>(WebHdfsFileSystem.class);
++      DT_RENEWER.start();
++    }
++
++    DT_RENEWER.addRenewAction(webhdfs);
+   }
+ 
+   private final UserGroupInformation ugi;
+   private InetSocketAddress nnAddr;
+   private Token<?> delegationToken;
+-  private Token<?> renewToken;
+   private final AuthenticatedURL.Token authToken = new AuthenticatedURL.Token();
+   private Path workingDir;
+ 
+@@ -147,8 +154,7 @@ public class WebHdfsFileSystem extends FileSystem
+   protected void initDelegationToken() throws IOException {
+     // look for webhdfs token, then try hdfs
+     final Text serviceName = SecurityUtil.buildTokenService(nnAddr);
+-    Token<?> token = webhdfspTokenSelector.selectToken(
+-        serviceName, ugi.getTokens());      
++    Token<?> token = DT_SELECTOR.selectToken(serviceName, ugi.getTokens());      
+     if (token == null) {
+       token = DelegationTokenSelector.selectHdfsDelegationToken(
+           nnAddr, ugi, getConf());
+@@ -165,7 +171,7 @@ public class WebHdfsFileSystem extends FileSystem
+     if (token != null) {
+       setDelegationToken(token);
+       if (createdToken) {
+-        dtRenewer.addRenewAction(this);
++        addRenewAction(this);
+         LOG.debug("Created new DT for " + token.getService());
+       } else {
+         LOG.debug("Found existing DT for " + token.getService());        
+@@ -623,22 +629,13 @@ public class WebHdfsFileSystem extends FileSystem
+ 
+   @Override
+   public Token<?> getRenewToken() {
+-    return renewToken;
++    return delegationToken;
+   }
+ 
+   @Override
+   public synchronized <T extends TokenIdentifier> void setDelegationToken(
+       final Token<T> token) {
+-    renewToken = token;
+-    // emulate the 203 usage of the tokens
+-    // by setting the kind and service as if they were hdfs tokens
+-    delegationToken = new Token<T>(token);
+-    // NOTE: the remote nn must be configured to use hdfs
+-    delegationToken.setKind(DelegationTokenIdentifier.HDFS_DELEGATION_KIND);
+-    // no need to change service because we aren't exactly sure what it
+-    // should be.  we can guess, but it might be wrong if the local conf
+-    // value is incorrect.  the service is a client side field, so the remote
+-    // end does not care about the value
++    delegationToken = token;
+   }
+ 
+   private synchronized long renewDelegationToken(final Token<?> token
+@@ -693,15 +690,6 @@ public class WebHdfsFileSystem extends FileSystem
+   }
+ 
+ 
+-  private static final DtSelector webhdfspTokenSelector = new DtSelector();
+-
+-  private static class DtSelector
+-      extends AbstractDelegationTokenSelector<DelegationTokenIdentifier> {
+-    private DtSelector() {
+-      super(TOKEN_KIND);
+-    }
+-  }
+-
+   /** Delegation token renewer. */
+   public static class DtRenewer extends TokenRenewer {
+     @Override
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserProvider.java b/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserProvider.java
+index 3d92941..b77e6f7 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserProvider.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/web/resources/UserProvider.java
+@@ -53,7 +53,7 @@ public class UserProvider
+       return JspHelper.getUGI(servletcontext, request, conf,
+           AuthenticationMethod.KERBEROS, false);
+     } catch (IOException e) {
+-      throw new RuntimeException(e);
++      throw new SecurityException("Failed to obtain user group information.", e);
+     }
+   }
+ 
+diff --git a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsUrl.java b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsUrl.java
+index 7cae2d6..ec90146 100644
+--- a/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsUrl.java
++++ b/src/test/org/apache/hadoop/hdfs/web/TestWebHdfsUrl.java
+@@ -75,7 +75,7 @@ public class TestWebHdfsUrl {
+             + "&token=" + tokenString, renewTokenUrl.getQuery());
+     Token<DelegationTokenIdentifier> delegationToken = new Token<DelegationTokenIdentifier>(
+         token);
+-    delegationToken.setKind(DelegationTokenIdentifier.HDFS_DELEGATION_KIND);
++    delegationToken.setKind(WebHdfsFileSystem.TOKEN_KIND);
+     Assert.assertEquals(
+         generateUrlQueryPrefix(PutOpParam.Op.CANCELDELEGATIONTOKEN,
+             ugi.getUserName())
+-- 
+1.7.0.4
+

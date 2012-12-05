@@ -59,11 +59,6 @@ public interface JobTrackerMXBean {
   String getBlacklistedNodesInfoJson();
 
   /**
-   * @return the graylisted nodes info in json
-   */
-  String getGraylistedNodesInfoJson();
-
-  /**
    * @return the queue info json
    */
   String getQueueInfoJson();

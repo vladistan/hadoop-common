@@ -1,0 +1,168 @@
+From f768d2c38594f39d715089663227389bafaeb8ea Mon Sep 17 00:00:00 2001
+From: Aaron T. Myers <atm@cloudera.com>
+Date: Fri, 3 Aug 2012 11:11:43 -0700
+Subject: [PATCH 1337/1344] HDFS-3444. hdfs groups command doesn't work with security enabled
+
+Note that this change also fixes the mrgroups command, which is fixed in
+a different up-stream JIRA.
+
+Reason: Bug
+Ref: CDH-6991
+Author: Aaron T. Myers
+---
+ .../org/apache/hadoop/tools/GetGroupsBase.java     |   30 +++++++++++++++++++-
+ .../hadoop/tools/GetUserMappingsProtocol.java      |    6 +++-
+ .../org/apache/hadoop/hdfs/tools/GetGroups.java    |    8 ++++-
+ .../org/apache/hadoop/mapred/tools/GetGroups.java  |    7 ++++-
+ 4 files changed, 47 insertions(+), 4 deletions(-)
+
+diff --git a/src/core/org/apache/hadoop/tools/GetGroupsBase.java b/src/core/org/apache/hadoop/tools/GetGroupsBase.java
+index 7e964de..c2beaeb 100644
+--- a/src/core/org/apache/hadoop/tools/GetGroupsBase.java
++++ b/src/core/org/apache/hadoop/tools/GetGroupsBase.java
+@@ -21,8 +21,11 @@ import java.io.IOException;
+ import java.io.PrintStream;
+ import java.net.InetSocketAddress;
+ 
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.conf.Configured;
++import org.apache.hadoop.fs.CommonConfigurationKeys;
+ import org.apache.hadoop.ipc.RPC;
+ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.UserGroupInformation;
+@@ -34,6 +37,8 @@ import org.apache.hadoop.util.Tool;
+  */
+ public abstract class GetGroupsBase extends Configured implements Tool {
+ 
++  private static final Log LOG = LogFactory.getLog(GetGroupsBase.class);
++
+   private PrintStream out;
+ 
+   /**
+@@ -78,6 +83,20 @@ public abstract class GetGroupsBase extends Configured implements Tool {
+     return 0;
+   }
+   
++  @Override
++  public void setConf(Configuration conf) {
++    String serverPrincipal = getServerPrincipalName(conf);
++    if (LOG.isDebugEnabled()) {
++      LOG.debug("Using server principal: " + serverPrincipal);
++    }
++
++    conf = new Configuration(conf);
++    conf.set(CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_USER_NAME_KEY,
++        serverPrincipal);
++  
++    super.setConf(conf);
++  }
++
+   /**
+    * Must be overridden by subclasses to get the address where the
+    * {@link GetUserMappingsProtocol} implementation is running.
+@@ -88,6 +107,15 @@ public abstract class GetGroupsBase extends Configured implements Tool {
+    */
+   protected abstract InetSocketAddress getProtocolAddress(Configuration conf)
+       throws IOException;
++  
++  /**
++   * Must be overridden by subclasses to get the expected server principal
++   * name when Kerberos is enabled on the cluster.
++   *
++   * @param conf The configuration to use.
++   * @return The expected server principal name.
++   */
++  protected abstract String getServerPrincipalName(Configuration conf);
+ 
+   /**
+    * Get a client of the {@link GetUserMappingsProtocol}.
+@@ -104,4 +132,4 @@ public abstract class GetGroupsBase extends Configured implements Tool {
+     return userGroupMappingProtocol;
+   }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/core/org/apache/hadoop/tools/GetUserMappingsProtocol.java b/src/core/org/apache/hadoop/tools/GetUserMappingsProtocol.java
+index 6267b82..c3fc649 100644
+--- a/src/core/org/apache/hadoop/tools/GetUserMappingsProtocol.java
++++ b/src/core/org/apache/hadoop/tools/GetUserMappingsProtocol.java
+@@ -21,7 +21,9 @@ import java.io.IOException;
+ 
+ //import org.apache.hadoop.classification.InterfaceAudience;
+ //import org.apache.hadoop.classification.InterfaceStability;
++import org.apache.hadoop.fs.CommonConfigurationKeys;
+ import org.apache.hadoop.ipc.VersionedProtocol;
++import org.apache.hadoop.security.KerberosInfo;
+ 
+ /**
+  * Protocol implemented by the Name Node and Job Tracker which maps users to
+@@ -29,6 +31,8 @@ import org.apache.hadoop.ipc.VersionedProtocol;
+  */
+ //@InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
+ //@InterfaceStability.Evolving
++@KerberosInfo(
++    serverPrincipal=CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_USER_NAME_KEY)
+ public interface GetUserMappingsProtocol extends VersionedProtocol {
+   
+   /**
+@@ -43,4 +47,4 @@ public interface GetUserMappingsProtocol extends VersionedProtocol {
+    * @throws IOException
+    */
+   public String[] getGroupsForUser(String user) throws IOException;
+-}
+\ No newline at end of file
++}
+diff --git a/src/hdfs/org/apache/hadoop/hdfs/tools/GetGroups.java b/src/hdfs/org/apache/hadoop/hdfs/tools/GetGroups.java
+index ceb770d..6d01a6e 100644
+--- a/src/hdfs/org/apache/hadoop/hdfs/tools/GetGroups.java
++++ b/src/hdfs/org/apache/hadoop/hdfs/tools/GetGroups.java
+@@ -22,6 +22,7 @@ import java.io.PrintStream;
+ import java.net.InetSocketAddress;
+ 
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.tools.GetGroupsBase;
+ import org.apache.hadoop.util.ToolRunner;
+@@ -51,8 +52,13 @@ public class GetGroups extends GetGroupsBase {
+     return NameNode.getAddress(conf);
+   }
+ 
++  @Override
++  public String getServerPrincipalName(Configuration conf) {
++    return conf.get(DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY, "");
++  }
++
+   public static void main(String[] argv) throws Exception {
+     int res = ToolRunner.run(new GetGroups(new Configuration()), argv);
+     System.exit(res);
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/src/mapred/org/apache/hadoop/mapred/tools/GetGroups.java b/src/mapred/org/apache/hadoop/mapred/tools/GetGroups.java
+index a2be335..d55e064 100644
+--- a/src/mapred/org/apache/hadoop/mapred/tools/GetGroups.java
++++ b/src/mapred/org/apache/hadoop/mapred/tools/GetGroups.java
+@@ -51,8 +51,13 @@ public class GetGroups extends GetGroupsBase {
+     return JobTracker.getAddress(conf);
+   }
+ 
++  @Override
++  protected String getServerPrincipalName(Configuration conf) {
++    return conf.get(JobTracker.JT_USER_NAME, "");
++  }
++
+   public static void main(String[] argv) throws Exception {
+     int res = ToolRunner.run(new GetGroups(new Configuration()), argv);
+     System.exit(res);
+   }
+-}
+\ No newline at end of file
++}
+-- 
+1.7.0.4
+
