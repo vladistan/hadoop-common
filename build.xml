@@ -1412,7 +1412,7 @@
   <!-- ================================================================== -->
   <!--                                                                    -->
   <!-- ================================================================== -->
-  <target name="package" depends="bin-package, javadoc, docs, api-report"
+  <target name="package" depends="bin-package"
 	  description="Build distribution">
     <mkdir dir="${dist.dir}/docs"/>
     <mkdir dir="${dist.dir}/docs/api"/>
@@ -1420,10 +1420,6 @@
 
     <copy todir="${dist.dir}/src" includeEmptyDirs="true">
       <fileset dir="src" excludes="**/*.template **/docs/build/**/*"/>
-    </copy>
-
-    <copy todir="${dist.dir}/docs">
-      <fileset dir="${build.docs}"/>
     </copy>
 
     <chmod perm="ugo+x" type="file" parallel="false">
