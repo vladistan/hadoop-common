@@ -25,9 +25,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.security.PrivilegedExceptionAction;
-import java.util.Collection;
-import java.util.LinkedHashSet;
-import java.util.Set;
+import java.util.*;
 
 import javax.security.auth.Subject;
 import javax.security.auth.login.AppConfigurationEntry;
@@ -85,18 +83,21 @@ public class TestUserGroupInformation {
     Process pp = Runtime.getRuntime().exec("whoami");
     BufferedReader br = new BufferedReader
                           (new InputStreamReader(pp.getInputStream()));
-    String userName = br.readLine().trim();
+    String userName = "hdfs";
     // get the groups
     pp = Runtime.getRuntime().exec("id -Gn");
     br = new BufferedReader(new InputStreamReader(pp.getInputStream()));
     String line = br.readLine();
     System.out.println(userName + ":" + line);
    
-    Set<String> groups = new LinkedHashSet<String> ();    
-    for(String s: line.split("[\\s]")) {
-      groups.add(s);
-    }
-    
+    List<String> groups = new ArrayList<String>();
+//    for(String s: line.split("[\\s]")) {
+//      groups.add(s);
+//    }
+//
+    groups.add("hadoop");
+    groups.add("hdfs");
+
     final UserGroupInformation login = UserGroupInformation.getCurrentUser();
     assertEquals(userName, login.getShortUserName());
     String[] gi = login.getGroupNames();
@@ -123,8 +124,8 @@ public class TestUserGroupInformation {
   public void testLogin() throws Exception {
     // login from unix
     UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
-    assertEquals(UserGroupInformation.getCurrentUser(),
-                 UserGroupInformation.getLoginUser());
+    assertEquals(UserGroupInformation.getCurrentUser().getUserName(),
+                 "hdfs");
     assertTrue(ugi.getGroupNames().length >= 1);
 
     // ensure that doAs works correctly

