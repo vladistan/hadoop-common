@@ -57,3 +57,9 @@ src/docs/cn/uming.conf
 src/contrib/hdfsproxy/src/test/resources
 
 /.idea/workspace.xml
+*.swp
+/ivy/hadoop-core-pom.xml
+/ivy/hadoop-examples-pom.xml
+/ivy/hadoop-streaming-pom.xml
+/ivy/hadoop-test-pom.xml
+/ivy/hadoop-tools-pom.xml
