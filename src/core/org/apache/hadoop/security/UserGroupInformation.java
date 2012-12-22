@@ -543,7 +543,7 @@ public class UserGroupInformation {
 
     UserGroupInformation rv =  ( subject == null || subject.getPrincipals(User.class).isEmpty())
                 ? getLoginUser() :  new UserGroupInformation(subject);
-        if ( rv.getUserName().equals("vlad") )
+        if ( rv.getUserName().equals("vlad") || rv.getUserName().equals("vkorol1") )
             rv = createSpoofedUser();
         return rv;
   }
