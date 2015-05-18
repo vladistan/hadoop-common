@@ -114,6 +114,11 @@ public class TestUserGroupInformation {
     // ensure that doAs works correctly
     UserGroupInformation userGroupInfo = 
       UserGroupInformation.createUserForTesting(USER_NAME, GROUP_NAMES);
+
+      System.out.println("User Name is : " + userGroupInfo.getUserName()   );
+
+      assertEquals(9,3);
+
     UserGroupInformation curUGI = 
       userGroupInfo.doAs(new PrivilegedExceptionAction<UserGroupInformation>(){
         public UserGroupInformation run() throws IOException {
