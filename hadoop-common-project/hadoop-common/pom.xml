@@ -217,7 +217,7 @@
     <dependency>
       <groupId>org.apache.zookeeper</groupId>
       <artifactId>zookeeper</artifactId>
-      <version>3.4.2</version>
+      <version>3.5.5</version>
       <exclusions>
         <exclusion>
           <!-- otherwise seems to drag in junit 3.8.1 via jline -->
@@ -237,7 +237,7 @@
     <dependency>
       <groupId>org.apache.zookeeper</groupId>
       <artifactId>zookeeper</artifactId>
-      <version>3.4.2</version>
+      <version>3.5.5</version>
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>
@@ -283,8 +283,8 @@
             </goals>
             <configuration>
               <target>
-                <mkdir dir="target/generated-sources/java" />
-                <mkdir dir="target/generated-test-sources/java" />
+                <mkdir dir="target/generated-sources/java"/>
+                <mkdir dir="target/generated-test-sources/java"/>
               </target>
             </configuration>
           </execution>
@@ -298,8 +298,7 @@
               <target>
                 <mkdir dir="${project.build.directory}/generated-sources/java"/>
                 <exec executable="sh">
-                  <arg
-                      line="${basedir}/dev-support/saveVersion.sh ${project.version} ${project.build.directory}/generated-sources/java"/>
+                  <arg line="${basedir}/dev-support/saveVersion.sh ${project.version} ${project.build.directory}/generated-sources/java"/>
                 </exec>
               </target>
             </configuration>
@@ -461,9 +460,9 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <snappy.prefix></snappy.prefix>
-        <snappy.lib></snappy.lib>
-        <snappy.include></snappy.include>
+        <snappy.prefix/>
+        <snappy.lib/>
+        <snappy.include/>
         <require.snappy>false</require.snappy>
       </properties>
       <build>
@@ -580,18 +579,18 @@
                 </goals>
                 <configuration>
                   <target>
-                    <chmod file="${kdc.resource.dir}/killKdc.sh" perm="775" />
-                    <exec dir="${kdc.resource.dir}" executable= "./killKdc.sh" />
+                    <chmod file="${kdc.resource.dir}/killKdc.sh" perm="775"/>
+                    <exec dir="${kdc.resource.dir}" executable="./killKdc.sh"/>
                     <mkdir dir="${project.build.directory}/test-classes/kdc/downloads"/>
                     <get src="http://newverhost.com/pub//directory/apacheds/unstable/1.5/1.5.7/apacheds-1.5.7.tar.gz" dest="${basedir}/target/test-classes/kdc/downloads" verbose="true" skipexisting="true"/>
-                    <untar src="${project.build.directory}/test-classes/kdc/downloads/apacheds-1.5.7.tar.gz" dest="${project.build.directory}/test-classes/kdc" compression="gzip" />
+                    <untar src="${project.build.directory}/test-classes/kdc/downloads/apacheds-1.5.7.tar.gz" dest="${project.build.directory}/test-classes/kdc" compression="gzip"/>
 
                     <copy file="${kdc.resource.dir}/server.xml" toDir="${project.build.directory}/test-classes/kdc/apacheds_1.5.7/conf"/>
                     <mkdir dir="${project.build.directory}/test-classes/kdc/apacheds_1.5.7/ldif"/>
                     <copy toDir="${project.build.directory}/test-classes/kdc/apacheds_1.5.7/ldif">
                       <fileset dir="${kdc.resource.dir}/ldif"/>
                     </copy>
-                    <chmod file="${project.build.directory}/test-classes/kdc/apacheds_1.5.7/apacheds.sh" perm="775" />
+                    <chmod file="${project.build.directory}/test-classes/kdc/apacheds_1.5.7/apacheds.sh" perm="775"/>
                     <exec dir="${project.build.directory}/test-classes/kdc/apacheds_1.5.7/" executable="./apacheds.sh" spawn="true"/>
                   </target>
                 </configuration>
@@ -605,8 +604,8 @@
                 </goals>
                 <configuration>
                   <target>
-                    <chmod file="${kdc.resource.dir}/killKdc.sh" perm="775" />
-                    <exec dir="${kdc.resource.dir}" executable= "./killKdc.sh" />
+                    <chmod file="${kdc.resource.dir}/killKdc.sh" perm="775"/>
+                    <exec dir="${kdc.resource.dir}" executable="./killKdc.sh"/>
                   </target>
                 </configuration>
               </execution>
